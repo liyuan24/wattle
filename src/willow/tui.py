@@ -2405,6 +2405,13 @@ class _LiveTerminal:
         self.input_history_index: int | None = None
         self.input_history_draft = ""
 
+    def _reset_prompt_state(self) -> None:
+        self.prompt_lines = 0
+        self.prompt_width = 0
+        self.prompt_cursor_line_index = 0
+        self.prompt_cursor_column = 0
+        self.prompt_cursor_offset_from_bottom = 0
+
     def run(self) -> int:
         self.app._write_welcome_card()
         self.app._write_resume_history_if_pending()
@@ -2999,24 +3006,10 @@ class _LiveTerminal:
         self.interrupted_user_inputs = []
         self.pending_user_inputs = []
         self.pending_monitor_inputs = []
-        prepared_pending: list[str] = []
-        attachment_blocks: list[ContentBlock] = []
-        image_index = 1
-        for text in pending:
-            try:
-                content = self.app._user_content_blocks(
-                    text,
-                    image_index_start=image_index,
-                )
-            except ValueError as exc:
-                if render:
-                    self.app._write_panel("error", str(exc), ERROR_STYLE)
-                continue
-            image_index += sum(isinstance(block, ImageBlock) for block in content)
-            prepared_pending.append(_first_text_block_text(content, fallback=text))
-            attachment_blocks.extend(content[1:])
-            if render:
-                self.app._write_block(self.app._user_display_text(text, content), USER_STYLE)
+        prepared_pending, attachment_blocks = self._prepare_pending_user_inputs(
+            pending,
+            render=render,
+        )
         if interrupted:
             user_blocks = interrupted_user_text_blocks(interrupted, prepared_pending)
         else:
@@ -3055,6 +3048,31 @@ class _LiveTerminal:
         self.pending_monitor_inputs = []
         interrupted = [*self.interrupted_user_inputs, *self._take_trailing_text_user_message()]
         self.interrupted_user_inputs = []
+        prepared_pending, attachment_blocks = self._prepare_pending_user_inputs(
+            pending,
+            render=render,
+        )
+        user_blocks = (
+            interrupted_user_text_blocks(interrupted, prepared_pending)
+            if interrupted
+            else queued_user_text_blocks(prepared_pending)
+        )
+        blocks = [
+            *user_blocks,
+            *attachment_blocks,
+            *(TextBlock(text=text) for text in monitor_pending),
+        ]
+        if not blocks:
+            return
+        self.app.messages.append(Message(role="user", content=list(blocks)))
+        self.app._persist_session()
+
+    def _prepare_pending_user_inputs(
+        self,
+        pending: list[str],
+        *,
+        render: bool,
+    ) -> tuple[list[str], list[ContentBlock]]:
         prepared_pending: list[str] = []
         attachment_blocks: list[ContentBlock] = []
         image_index = 1
@@ -3073,20 +3091,7 @@ class _LiveTerminal:
             attachment_blocks.extend(content[1:])
             if render:
                 self.app._write_block(self.app._user_display_text(text, content), USER_STYLE)
-        user_blocks = (
-            interrupted_user_text_blocks(interrupted, prepared_pending)
-            if interrupted
-            else queued_user_text_blocks(prepared_pending)
-        )
-        blocks = [
-            *user_blocks,
-            *attachment_blocks,
-            *(TextBlock(text=text) for text in monitor_pending),
-        ]
-        if not blocks:
-            return
-        self.app.messages.append(Message(role="user", content=list(blocks)))
-        self.app._persist_session()
+        return prepared_pending, attachment_blocks
 
     def _take_trailing_text_user_message(self) -> list[str]:
         if not self.app.messages or self.app.messages[-1].role != "user":
@@ -3226,14 +3231,17 @@ class _LiveTerminal:
         interrupted_texts = self.interrupted_user_inputs
         pending_texts = self.pending_user_inputs
         pending_monitor_texts = self.pending_monitor_inputs
-        for text in pending_texts:
-            self.app._write_block(text, USER_STYLE)
+        prepared_pending, attachment_blocks = self._prepare_pending_user_inputs(
+            pending_texts,
+            render=True,
+        )
         if interrupted_texts:
-            user_blocks = interrupted_user_text_blocks(interrupted_texts, pending_texts)
+            user_blocks = interrupted_user_text_blocks(interrupted_texts, prepared_pending)
         else:
-            user_blocks = queued_user_text_blocks(pending_texts)
+            user_blocks = queued_user_text_blocks(prepared_pending)
         pending = [
             *user_blocks,
+            *attachment_blocks,
             *(TextBlock(text=text) for text in pending_monitor_texts),
         ]
         self.interrupted_user_inputs = []
@@ -3540,16 +3548,19 @@ class _LiveTerminal:
             max(0, self.prompt_cursor_column) // current_width,
         )
         if current_width != previous_width:
-            rows_above_prompt_top = self.prompt_cursor_line_index * wrap_factor + cursor_visual_row
+            rows_below_cursor_line = wrap_factor - cursor_visual_row - 1
+            rows_down_to_prompt_bottom = (
+                self.prompt_cursor_offset_from_bottom * wrap_factor
+                + rows_below_cursor_line
+            )
+            rows_to_prompt_top_from_bottom = max(0, self.prompt_lines * wrap_factor - 1)
             parts: list[str] = ["\x1b[?25l"]
-            if rows_above_prompt_top:
-                parts.append(f"\x1b[{rows_above_prompt_top}A")
+            if rows_down_to_prompt_bottom:
+                parts.append(f"\x1b[{rows_down_to_prompt_bottom}B")
+            if rows_to_prompt_top_from_bottom:
+                parts.append(f"\x1b[{rows_to_prompt_top_from_bottom}A")
             parts.append("\r\x1b[J\x1b[?25h")
-            self.prompt_lines = 0
-            self.prompt_width = 0
-            self.prompt_cursor_line_index = 0
-            self.prompt_cursor_column = 0
-            self.prompt_cursor_offset_from_bottom = 0
+            self._reset_prompt_state()
             return "".join(parts)
 
         rows_to_clear = self.prompt_lines * wrap_factor
@@ -3566,11 +3577,7 @@ class _LiveTerminal:
         for _ in range(rows_to_clear - 1):
             parts.append("\x1b[1A\r\x1b[2K")
         parts.append("\x1b[?25h")
-        self.prompt_lines = 0
-        self.prompt_width = 0
-        self.prompt_cursor_line_index = 0
-        self.prompt_cursor_column = 0
-        self.prompt_cursor_offset_from_bottom = 0
+        self._reset_prompt_state()
         return "".join(parts)
 
 

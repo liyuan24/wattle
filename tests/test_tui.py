@@ -2028,6 +2028,33 @@ def test_live_queued_image_inputs_keep_placeholder_order(tmp_path: Path) -> None
     assert str(second) not in rendered
 
 
+def test_live_finish_response_anchors_pending_image_input(tmp_path: Path) -> None:
+    image = tmp_path / "dragged image.png"
+    image.write_bytes(b"fake-png")
+    out = _TTYBuffer()
+    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+    live = tui._LiveTerminal(app)
+    live.streaming = True
+    escaped_path = str(image).replace(" ", "\\ ")
+    live.pending_user_inputs = [f"check {escaped_path}"]
+
+    live._finish_response(
+        CompletionResponse(content=[TextBlock(text="done")], stop_reason="end_turn")
+    )
+
+    rendered = out.getvalue()
+    assert "check [Image #1]" in rendered
+    assert str(image) not in rendered
+    assert [message.role for message in app.messages] == ["assistant", "user"]
+    followup = app.messages[1]
+    assert followup.content[0] == TextBlock(text="check [Image #1]")
+    assert any(
+        isinstance(block, ImageBlock) and block.filename == image.name
+        for block in followup.content
+    )
+
+
 def test_live_esc_interrupt_keeps_user_and_queued_messages_without_partial_assistant() -> None:
     out = _TTYBuffer()
     app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
