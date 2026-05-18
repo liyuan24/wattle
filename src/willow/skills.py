@@ -1,14 +1,10 @@
 """Discovery and explicit invocation helpers for Willow skills.
 
-Willow discovers skills from two roots, in order:
-
-* user skills: ``~/.willow``
-* project skills: ``<cwd>/.willow``
-
-The preferred layout mirrors Claude Code-style skill directories:
-``.willow/skills/<skill-name>/SKILL.md``. For small skills, Willow also accepts
-direct markdown files under ``.willow/skills/*.md``. Skill files may include a
-simple YAML-like frontmatter block with ``name`` and ``description`` fields.
+Willow discovers skills from ``~/.willow`` and from ``.willow`` directories
+walking from the current working directory up through its parents. Skills use
+the directory layout ``.willow/skills/<skill-name>/SKILL.md``. Skill files may
+include a simple YAML-like frontmatter block with ``name`` and ``description``
+fields.
 """
 
 from __future__ import annotations
@@ -38,18 +34,14 @@ class SkillNotFoundError(LookupError):
 
 
 def load_available_skills(cwd: str | Path) -> list[Skill]:
-    """Discover user and project skills visible from ``cwd``.
+    """Discover user and ancestor project skills visible from ``cwd``.
 
-    Project skills override user skills with the same name. Results are sorted
-    by name for stable prompt formatting and TUI suggestions.
+    More specific project skills override broader project and user skills with
+    the same name. Results are sorted by name for stable prompt formatting and
+    TUI suggestions.
     """
-    project_root = Path(cwd).expanduser().resolve()
-    roots = (
-        ("user", Path.home() / ".willow"),
-        ("project", project_root / ".willow"),
-    )
     by_name: dict[str, Skill] = {}
-    for location, root in roots:
+    for location, root in _skill_roots(cwd):
         for path in _iter_skill_files(root):
             skill = _read_skill_metadata(path, location=location)
             if skill.name:
@@ -105,7 +97,11 @@ def expand_skill_invocation(text: str, cwd: str | Path) -> str | None:
     task_text = rest.strip() or "(no task text provided)"
     return (
         f"Use the Willow skill {skill.name!r} from {skill.path}.\n\n"
-        f"<skill>\n{content}\n</skill>\n\n"
+        "<skill>\n"
+        f"  <name>{_escape_xml(skill.name)}</name>\n"
+        f"  <path>{_escape_xml(str(skill.path))}</path>\n"
+        f"{content}\n"
+        "</skill>\n\n"
         f"User task:\n{task_text}"
     )
 
@@ -139,15 +135,33 @@ def _iter_skill_files(root: Path) -> list[Path]:
             skill_file = child / SKILL_FILE_NAME
             if skill_file.is_file():
                 paths.append(skill_file)
-        elif child.is_file() and child.suffix.casefold() == ".md":
-            paths.append(child)
     return paths
+
+
+def _skill_roots(cwd: str | Path) -> list[tuple[str, Path]]:
+    resolved_cwd = Path(cwd).expanduser().resolve()
+    home = Path.home().expanduser().resolve()
+    roots: list[tuple[str, Path]] = [("user", home / ".willow")]
+    seen = {(home / ".willow").resolve()}
+
+    ancestor_dirs = [resolved_cwd, *resolved_cwd.parents]
+    if home in ancestor_dirs:
+        ancestor_dirs = ancestor_dirs[: ancestor_dirs.index(home) + 1]
+
+    for directory in reversed(ancestor_dirs):
+        root = directory / ".willow"
+        resolved_root = root.resolve()
+        if resolved_root in seen:
+            continue
+        roots.append(("project", root))
+        seen.add(resolved_root)
+    return roots
 
 
 def _read_skill_metadata(path: Path, *, location: str) -> Skill:
     content = path.read_text(encoding="utf-8")
     metadata, body = _split_frontmatter(content)
-    default_name = path.parent.name if path.name == SKILL_FILE_NAME else path.stem
+    default_name = path.parent.name
     name = metadata.get("name", default_name).strip()
     description = metadata.get("description", "").strip()
     if not description:
@@ -179,3 +193,13 @@ def _first_heading_or_paragraph(content: str) -> str:
             return stripped.lstrip("#").strip()
         return stripped
     return ""
+
+
+def _escape_xml(value: str) -> str:
+    return (
+        value.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+        .replace("'", "&apos;")
+    )

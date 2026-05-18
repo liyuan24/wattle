@@ -37,3 +37,23 @@ Run one prompt headlessly:
 ```bash
 willow -p "summarize this repository"
 ```
+
+Choose a provider and model:
+
+```bash
+willow --provider deepseek --model deepseek-v4-flash
+willow --provider kimi --model kimi-k2.6
+willow --provider minimax --model MiniMax-M2.7
+```
+
+Willow reads API credentials from `~/.willow/auth.json`:
+
+```json
+{
+  "anthropic": {"api_key": {"api_key": "sk-ant-..."}},
+  "deepseek": {"api_key": {"api_key": "sk-..."}},
+  "kimi": {"api_key": {"api_key": "sk-..."}},
+  "minimax": {"api_key": {"api_key": "sk-..."}},
+  "openai": {"oauth": {"access_token": "...", "refresh_token": "..."}}
+}
+```

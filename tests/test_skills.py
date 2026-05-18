@@ -25,15 +25,19 @@ def test_load_available_skills_discovers_user_and_project_layouts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     home = tmp_path / "home"
-    project = tmp_path / "project"
+    project = home / "repo" / "project"
     monkeypatch.setattr(Path, "home", lambda: home)
     _write(
         home / ".willow" / "skills" / "reviewer" / "SKILL.md",
         "---\nname: reviewer\ndescription: Review code carefully.\n---\nbody",
     )
     _write(
-        project / ".willow" / "skills" / "planner.md",
+        home / "repo" / ".willow" / "skills" / "planner" / "SKILL.md",
         "# Planner\nBreak work into steps.",
+    )
+    _write(
+        project / ".willow" / "skills" / "writer" / "SKILL.md",
+        "Write tersely.",
     )
 
     skills = load_available_skills(project)
@@ -41,17 +45,31 @@ def test_load_available_skills_discovers_user_and_project_layouts(
     assert [(skill.name, skill.description, skill.location) for skill in skills] == [
         ("planner", "Planner", "project"),
         ("reviewer", "Review code carefully.", "user"),
+        ("writer", "Write tersely.", "project"),
     ]
 
 
-def test_project_skill_overrides_user_skill_with_same_name(
+def test_direct_markdown_skill_files_are_ignored(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     home = tmp_path / "home"
-    project = tmp_path / "project"
+    project = home / "project"
+    monkeypatch.setattr(Path, "home", lambda: home)
+    _write(project / ".willow" / "skills" / "planner.md", "# Planner")
+
+    assert load_available_skills(project) == []
+
+
+def test_nearest_project_skill_overrides_parent_and_user_skill_with_same_name(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "home"
+    project = home / "repo" / "project"
     monkeypatch.setattr(Path, "home", lambda: home)
     _write(home / ".willow" / "skills" / "test" / "SKILL.md", "user body")
+    _write(home / "repo" / ".willow" / "skills" / "test" / "SKILL.md", "parent body")
     _write(project / ".willow" / "skills" / "test" / "SKILL.md", "project body")
 
     skill = resolve_skill("test", project)
@@ -93,6 +111,9 @@ def test_expand_skill_invocation_loads_skill_body_and_task(
 
     assert expanded is not None
     assert "Use the Willow skill 'writer'" in expanded
+    assert "  <name>writer</name>" in expanded
+    skill_path = project / ".willow" / "skills" / "writer" / "SKILL.md"
+    assert f"  <path>{skill_path}</path>" in expanded
     assert "Write tersely." in expanded
     assert "User task:\ndraft release notes" in expanded
 

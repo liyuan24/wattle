@@ -72,6 +72,42 @@ MODEL_CATALOG: tuple[ModelChoice, ...] = (
         vendor="anthropic",
         description="Fast Anthropic model for lightweight coding tasks.",
     ),
+    ModelChoice(
+        model="deepseek-v4-flash",
+        provider="deepseek",
+        vendor="deepseek",
+        description="DeepSeek fast model with 1M context and tool calling.",
+    ),
+    ModelChoice(
+        model="deepseek-v4-pro",
+        provider="deepseek",
+        vendor="deepseek",
+        description="DeepSeek stronger model with 1M context and tool calling.",
+    ),
+    ModelChoice(
+        model="kimi-k2.6",
+        provider="kimi",
+        vendor="kimi",
+        description="Moonshot Kimi flagship model for agentic coding.",
+    ),
+    ModelChoice(
+        model="kimi-k2.5",
+        provider="kimi",
+        vendor="kimi",
+        description="Moonshot Kimi long-context multimodal model.",
+    ),
+    ModelChoice(
+        model="MiniMax-M2.7",
+        provider="minimax",
+        vendor="minimax",
+        description="MiniMax latest OpenAI-compatible coding model.",
+    ),
+    ModelChoice(
+        model="MiniMax-M2.7-highspeed",
+        provider="minimax",
+        vendor="minimax",
+        description="MiniMax M2.7 optimized for faster output.",
+    ),
 )
 
 
@@ -110,7 +146,7 @@ def render_model_choices(
 ) -> str:
     """Render numbered model choices for slash-command output."""
     if not choices:
-        return "No models available. Add openai or anthropic auth to ~/.willow/auth.json."
+        return "No models available. Add provider auth to ~/.willow/auth.json."
 
     width = max(
         len(choice.model) + (10 if choice.model == current_model else 0)

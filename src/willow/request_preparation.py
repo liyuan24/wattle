@@ -32,6 +32,12 @@ MODEL_CONTEXT_TOKENS: dict[str, int] = {
     "claude-sonnet-4-6": 200_000,
     "claude-opus-4-6": 200_000,
     "claude-haiku-4-6": 200_000,
+    "deepseek-v4-flash": 1_000_000,
+    "deepseek-v4-pro": 1_000_000,
+    "kimi-k2.6": 256_000,
+    "kimi-k2.5": 256_000,
+    "MiniMax-M2.7": 204_800,
+    "MiniMax-M2.7-highspeed": 204_800,
 }
 
 
@@ -163,6 +169,12 @@ def context_window_for_model(model: str) -> int | None:
         return 400_000
     if model.startswith("claude-"):
         return 200_000
+    if model.startswith("deepseek-"):
+        return 1_000_000
+    if model.startswith("kimi-"):
+        return 256_000
+    if model.startswith("MiniMax-"):
+        return 204_800
     return None
 
 

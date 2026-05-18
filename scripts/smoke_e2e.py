@@ -19,6 +19,9 @@ SYSTEM = (
 
 CASES = [
     ("anthropic", "claude-haiku-4-5-20251001"),
+    ("deepseek", "deepseek-v4-flash"),
+    ("kimi", "kimi-k2.6"),
+    ("minimax", "MiniMax-M2.7"),
     ("openai_completions", "gpt-4.1-mini"),
     ("openai_responses", "gpt-4.1-mini"),
 ]

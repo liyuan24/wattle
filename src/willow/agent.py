@@ -32,10 +32,13 @@ from willow.skills import load_available_skills
 from willow.system_prompt import build_system_prompt
 from willow.tools import TOOLS_BY_NAME
 
-# Public mapping: provider name -> vendor name in willow.auth.
-# Both OpenAI providers share a single OpenAI vendor key.
+# Public mapping: provider name -> vendor name in willow.auth. Multiple
+# OpenAI-backed provider adapters can still use distinct vendor credentials.
 PROVIDER_TO_VENDOR: dict[str, str] = {
     "anthropic": "anthropic",
+    "deepseek": "deepseek",
+    "kimi": "kimi",
+    "minimax": "minimax",
     "openai_codex": "openai",
     "openai_completions": "openai",
     "openai_responses": "openai",
@@ -61,16 +64,43 @@ class _ProviderSpec[ClientT]:
         return self.provider_factory(self.client_factory(bearer_token))
 
 
+type _DispatchSpec = (
+    _ProviderSpec[anthropic.Anthropic] | _ProviderSpec[openai.OpenAI] | _ProviderSpec[str]
+)
+
+
 # Single principled dispatch. Adding a new provider = one entry here. The
 # value type erases `ClientT` (each entry's SDK client may differ); the
 # `build()` method preserves the per-entry consistency internally.
-_PROVIDER_DISPATCH: dict[
-    str, _ProviderSpec[anthropic.Anthropic] | _ProviderSpec[openai.OpenAI] | _ProviderSpec[str]
-] = {
+_PROVIDER_DISPATCH: dict[str, _DispatchSpec] = {
     "anthropic": _ProviderSpec[anthropic.Anthropic](
         vendor="anthropic",
         client_factory=lambda key: anthropic.Anthropic(api_key=key),
         provider_factory=lambda client: AnthropicProvider(client=client),
+    ),
+    "deepseek": _ProviderSpec[openai.OpenAI](
+        vendor="deepseek",
+        client_factory=lambda key: openai.OpenAI(
+            api_key=key,
+            base_url="https://api.deepseek.com",
+        ),
+        provider_factory=lambda client: OpenAICompletionsProvider(client=client),
+    ),
+    "kimi": _ProviderSpec[openai.OpenAI](
+        vendor="kimi",
+        client_factory=lambda key: openai.OpenAI(
+            api_key=key,
+            base_url="https://api.moonshot.ai/v1",
+        ),
+        provider_factory=lambda client: OpenAICompletionsProvider(client=client),
+    ),
+    "minimax": _ProviderSpec[openai.OpenAI](
+        vendor="minimax",
+        client_factory=lambda key: openai.OpenAI(
+            api_key=key,
+            base_url="https://api.minimax.io/v1",
+        ),
+        provider_factory=lambda client: OpenAICompletionsProvider(client=client),
     ),
     "openai_codex": _ProviderSpec[str](
         vendor="openai",
@@ -108,8 +138,7 @@ def run_agent(
     and run the agent loop with all registered tools.
 
     Args:
-        provider_name: ``"anthropic"``, ``"openai_codex"``,
-            ``"openai_completions"``, or ``"openai_responses"``.
+        provider_name: any key in :data:`PROVIDER_TO_VENDOR`.
         model: Model id passed through to the provider unchanged.
         user_input: First user turn.
         max_tokens: Forwarded to the provider per turn.

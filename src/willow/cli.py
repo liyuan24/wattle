@@ -39,13 +39,39 @@ from willow.providers import (
 
 # `_ProviderSpec` is reused from `willow.agent` so the dispatch tables share
 # the same typed surface while letting the TUI own a longer-lived provider.
-_PROVIDER_DISPATCH: dict[
-    str, _ProviderSpec[anthropic.Anthropic] | _ProviderSpec[openai.OpenAI] | _ProviderSpec[str]
-] = {
+type _DispatchSpec = (
+    _ProviderSpec[anthropic.Anthropic] | _ProviderSpec[openai.OpenAI] | _ProviderSpec[str]
+)
+
+_PROVIDER_DISPATCH: dict[str, _DispatchSpec] = {
     "anthropic": _ProviderSpec[anthropic.Anthropic](
         vendor="anthropic",
         client_factory=lambda key: anthropic.Anthropic(api_key=key),
         provider_factory=lambda client: AnthropicProvider(client=client),
+    ),
+    "deepseek": _ProviderSpec[openai.OpenAI](
+        vendor="deepseek",
+        client_factory=lambda key: openai.OpenAI(
+            api_key=key,
+            base_url="https://api.deepseek.com",
+        ),
+        provider_factory=lambda client: OpenAICompletionsProvider(client=client),
+    ),
+    "kimi": _ProviderSpec[openai.OpenAI](
+        vendor="kimi",
+        client_factory=lambda key: openai.OpenAI(
+            api_key=key,
+            base_url="https://api.moonshot.ai/v1",
+        ),
+        provider_factory=lambda client: OpenAICompletionsProvider(client=client),
+    ),
+    "minimax": _ProviderSpec[openai.OpenAI](
+        vendor="minimax",
+        client_factory=lambda key: openai.OpenAI(
+            api_key=key,
+            base_url="https://api.minimax.io/v1",
+        ),
+        provider_factory=lambda client: OpenAICompletionsProvider(client=client),
     ),
     "openai_codex": _ProviderSpec[str](
         vendor="openai",

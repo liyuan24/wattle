@@ -55,6 +55,9 @@ def loop_run_sentinel() -> Generator[MagicMock, None, None]:
 def test_provider_to_vendor_mapping_is_exact() -> None:
     assert PROVIDER_TO_VENDOR == {
         "anthropic": "anthropic",
+        "deepseek": "deepseek",
+        "kimi": "kimi",
+        "minimax": "minimax",
         "openai_codex": "openai",
         "openai_completions": "openai",
         "openai_responses": "openai",
@@ -199,6 +202,55 @@ def test_openai_completions_provider_wires_openai_vendor_key(
     assert result is loop_run_sentinel.sentinel
 
 
+@pytest.mark.parametrize(
+    ("provider_name", "vendor", "base_url", "model"),
+    [
+        ("deepseek", "deepseek", "https://api.deepseek.com", "deepseek-v4-flash"),
+        ("kimi", "kimi", "https://api.moonshot.ai/v1", "kimi-k2.6"),
+        ("minimax", "minimax", "https://api.minimax.io/v1", "MiniMax-M2.7"),
+    ],
+)
+def test_openai_compatible_providers_wire_custom_vendor_and_base_url(
+    provider_name: str,
+    vendor: str,
+    base_url: str,
+    model: str,
+    loop_run_sentinel: MagicMock,
+) -> None:
+    fake_client = object()
+    fake_provider = object()
+
+    with (
+        patch.object(
+            agent,
+            "get_credential",
+            return_value=AuthCredential(
+                kind="api_key",
+                bearer_token=f"fake-{vendor}-key",
+                source="test",
+            ),
+        ) as gc,
+        patch.object(agent.anthropic, "Anthropic") as anth,
+        patch.object(agent.openai, "OpenAI", return_value=fake_client) as oa,
+        patch.object(agent, "AnthropicProvider") as ap,
+        patch.object(agent, "OpenAICodexResponsesProvider") as xp,
+        patch.object(
+            agent, "OpenAICompletionsProvider", return_value=fake_provider
+        ) as cp,
+        patch.object(agent, "OpenAIResponsesProvider") as rp,
+    ):
+        result = run_agent(provider_name, model=model, user_input="hello")
+
+    gc.assert_called_once_with(vendor)
+    oa.assert_called_once_with(api_key=f"fake-{vendor}-key", base_url=base_url)
+    cp.assert_called_once_with(client=fake_client)
+    anth.assert_not_called()
+    ap.assert_not_called()
+    xp.assert_not_called()
+    rp.assert_not_called()
+    assert result is loop_run_sentinel.sentinel
+
+
 def test_openai_responses_provider_wires_openai_vendor_key(
     loop_run_sentinel: MagicMock,
 ) -> None:
@@ -242,7 +294,15 @@ def test_unknown_provider_raises_valueerror_with_helpful_message() -> None:
     msg = str(excinfo.value)
     assert "anthropik" in msg
     # All valid choices are listed, sorted.
-    for name in ("anthropic", "openai_codex", "openai_completions", "openai_responses"):
+    for name in (
+        "anthropic",
+        "deepseek",
+        "kimi",
+        "minimax",
+        "openai_codex",
+        "openai_completions",
+        "openai_responses",
+    ):
         assert name in msg
 
 

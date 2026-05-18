@@ -90,6 +90,17 @@ def _guidelines(
 ) -> list[str]:
     names = set(tools_by_name)
     guidelines: list[str] = [
+        "For any task with concrete instructions, first extract an internal "
+        "checklist of explicit requirements before acting. Preserve specified "
+        "names, formats, locations, behavior, ordering, and asymmetries "
+        "exactly. Before finalizing, compare the result against that checklist "
+        "and fix mismatches instead of choosing a cleaner or more consistent "
+        "variant.",
+        "When instructions specify exact identifiers or literals, copy them "
+        "verbatim into the artifact that uses them. Do not infer, rename, "
+        "abbreviate, expand, or harmonize identifiers across related parts of "
+        "the task. Check each named item independently against the original "
+        "instruction.",
         "Treat explicit task constraints as higher priority than convenient "
         "shortcuts. Before acting, identify required and forbidden methods, "
         "allowed interfaces, required output paths, and evaluation conditions. "

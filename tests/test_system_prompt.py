@@ -25,6 +25,10 @@ def test_build_system_prompt_uses_willow_default_without_pi_docs(tmp_path: Path)
     assert "Pi documentation" not in prompt
     assert "- read:" in prompt
     assert "- bash:" in prompt
+    assert "first extract an internal checklist of explicit requirements" in prompt
+    assert "Before finalizing, compare the result against that checklist" in prompt
+    assert "When instructions specify exact identifiers or literals" in prompt
+    assert "Do not infer, rename, abbreviate, expand, or harmonize identifiers" in prompt
     assert "Treat explicit task constraints as higher priority than convenient shortcuts" in prompt
     assert "derive the task contract" in prompt
     assert "assumptions that must be checked" in prompt

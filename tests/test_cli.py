@@ -6,10 +6,12 @@ import argparse
 import io
 import sys
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
 from willow import cli
+from willow.auth import AuthCredential
 from willow.providers import CompletionResponse, TextBlock, ToolUseBlock
 
 
@@ -147,6 +149,48 @@ def test_main_with_positional_prompt_runs_tui(monkeypatch: pytest.MonkeyPatch) -
     assert cli.main(["follow the prompt"]) == 42
     assert len(calls) == 1
     assert calls[0].prompt == "follow the prompt"
+
+
+@pytest.mark.parametrize(
+    ("provider_name", "vendor", "base_url"),
+    [
+        ("deepseek", "deepseek", "https://api.deepseek.com"),
+        ("kimi", "kimi", "https://api.moonshot.ai/v1"),
+        ("minimax", "minimax", "https://api.minimax.io/v1"),
+    ],
+)
+def test_build_provider_wires_openai_compatible_base_url(
+    provider_name: str,
+    vendor: str,
+    base_url: str,
+) -> None:
+    fake_client = object()
+    fake_provider = object()
+
+    with (
+        patch.object(
+            cli,
+            "get_credential",
+            return_value=AuthCredential(
+                kind="api_key",
+                bearer_token=f"fake-{vendor}-key",
+                source="test",
+            ),
+        ) as gc,
+        patch.object(cli.openai, "OpenAI", return_value=fake_client) as openai_client,
+        patch.object(
+            cli, "OpenAICompletionsProvider", return_value=fake_provider
+        ) as provider_factory,
+    ):
+        provider = cli._build_provider(provider_name)
+
+    gc.assert_called_once_with(vendor)
+    openai_client.assert_called_once_with(
+        api_key=f"fake-{vendor}-key",
+        base_url=base_url,
+    )
+    provider_factory.assert_called_once_with(client=fake_client)
+    assert provider is fake_provider
 
 
 def test_headless_calls_run_agent_and_prints_final_text(

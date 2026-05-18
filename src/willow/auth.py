@@ -10,6 +10,15 @@ Canonical file format::
       "anthropic": {
         "api_key": {"api_key": "sk-ant-..."}
       },
+      "deepseek": {
+        "api_key": {"api_key": "sk-..."}
+      },
+      "kimi": {
+        "api_key": {"api_key": "sk-..."}
+      },
+      "minimax": {
+        "api_key": {"api_key": "sk-..."}
+      },
       "openai": {
         "oauth": {
           "access_token": "...",
@@ -21,10 +30,10 @@ Canonical file format::
       }
     }
 
-The top-level keys are vendors (``"anthropic"``, ``"openai"``). Each value is
-an object containing auth method objects: ``"api_key"`` or ``"oauth"``. If a
-vendor has both, OAuth is used by default. Legacy flat entries are still
-accepted for compatibility.
+The top-level keys are vendors (for example ``"anthropic"``, ``"deepseek"``,
+``"kimi"``, ``"minimax"``, ``"openai"``). Each value is an object containing
+auth method objects: ``"api_key"`` or ``"oauth"``. If a vendor has both, OAuth
+is used by default. Legacy flat entries are still accepted for compatibility.
 
 Both OpenAI providers (Chat Completions and Responses) share one OpenAI key,
 hence the vendor name ``"openai"`` rather than provider-specific names.
@@ -72,6 +81,9 @@ _PROVIDER_OAUTH_DEFAULTS: dict[str, dict[str, str]] = {
 _EXPECTED_SHAPE = (
     '{\n'
     '  "anthropic": {"api_key": {"api_key": "sk-ant-..."}},\n'
+    '  "deepseek": {"api_key": {"api_key": "sk-..."}},\n'
+    '  "kimi": {"api_key": {"api_key": "sk-..."}},\n'
+    '  "minimax": {"api_key": {"api_key": "sk-..."}},\n'
     '  "openai": {"oauth": {"access_token": "...", "refresh_token": "..."}}\n'
     '}'
 )
