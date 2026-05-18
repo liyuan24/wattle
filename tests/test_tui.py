@@ -38,7 +38,7 @@ ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
 def _strip_ansi(text: str) -> str:
-    return ANSI_RE.sub("", text)
+    return ANSI_RE.sub("", text).replace("\r", "")
 
 
 class _ScriptedStreamProvider(Provider):
@@ -785,12 +785,36 @@ def test_tui_attaches_local_image_from_user_text(tmp_path: Path) -> None:
     message = app.messages[-1]
     assert message.role == "user"
     assert isinstance(message.content[0], TextBlock)
-    assert isinstance(message.content[1], TextBlock)
-    assert isinstance(message.content[2], ImageBlock)
-    assert message.content[2].path == str(image.resolve())
-    assert message.content[2].media_type == "image/png"
-    assert "Attached image: debug shot.png" in message.content[1].text
-    assert "[image] debug shot.png" in out.getvalue()
+    assert isinstance(message.content[1], ImageBlock)
+    assert message.content[0].text == "check image at [Image #1]"
+    assert message.content[1].path == str(image.resolve())
+    assert message.content[1].media_type == "image/png"
+    rendered = out.getvalue()
+    assert "check image at [Image #1]" in rendered
+    assert str(image) not in rendered
+    assert "[image] debug shot.png" in rendered
+
+
+def test_tui_numbers_multiple_local_images_in_user_text(tmp_path: Path) -> None:
+    first = tmp_path / "left.png"
+    second = tmp_path / "right.png"
+    first.write_bytes(b"fake-png-left")
+    second.write_bytes(b"fake-png-right")
+    out = _TTYBuffer()
+    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+
+    assert app._submit_user_text(f"compare {first} with {second}", render=True)
+
+    message = app.messages[-1]
+    assert message.role == "user"
+    assert message.content[0] == TextBlock(text="compare [Image #1] with [Image #2]")
+    assert [
+        block.filename for block in message.content if isinstance(block, ImageBlock)
+    ] == ["left.png", "right.png"]
+    rendered = out.getvalue()
+    assert "compare [Image #1] with [Image #2]" in rendered
+    assert str(first) not in rendered
+    assert str(second) not in rendered
 
 
 def test_tui_sends_text_file_path_as_text_context(tmp_path: Path) -> None:
@@ -829,12 +853,42 @@ def test_tui_supports_at_prefixed_image_and_file_paths(
     assert app._submit_user_text("check @shot.png and @notes.txt", render=True)
 
     message = app.messages[-1]
+    assert message.content[0] == TextBlock(text="check [Image #1] and @notes.txt")
     assert any(
         isinstance(block, ImageBlock) and block.filename == "shot.png"
         for block in message.content
     )
     assert TextBlock(text="notes.txt") in message.content
     assert "secret file content" not in str(message.content)
+
+
+def test_absolute_dragged_image_path_is_not_treated_as_slash_command(
+    tmp_path: Path,
+) -> None:
+    image = tmp_path / "Screenshot 2026-05-18.png"
+    image.write_bytes(b"fake-png")
+    dragged_path = str(image).replace(" ", "\\ ")
+    response = CompletionResponse(content=[TextBlock(text="ok")], stop_reason="end_turn")
+    provider = _ScriptedStreamProvider([[StreamComplete(response=response)]])
+
+    out, app = _drive(provider, [dragged_path, "/exit"])
+
+    assert "Unknown command" not in out
+    assert len(provider.requests) == 1
+    message = provider.requests[0].messages[0]
+    assert message.role == "user"
+    assert message.content[0] == TextBlock(text="[Image #1]")
+    assert any(
+        isinstance(block, ImageBlock) and block.filename == image.name
+        for block in message.content
+    )
+    assert app.messages[0].content == message.content
+
+
+def test_unknown_slash_text_still_routes_to_command_error() -> None:
+    out, _app = _drive(_ScriptedStreamProvider([]), ["/definitely-not-a-command", "/exit"])
+
+    assert "Unknown command: /definitely-not-a-command" in out
 
 
 def test_assistant_text_uses_terminal_background() -> None:
@@ -894,9 +948,24 @@ def test_user_history_block_clears_full_terminal_rows() -> None:
     assert rendered.count("\x1b[?7h") == 3
 
 
+def test_styled_transcript_block_returns_to_column_zero_before_painting() -> None:
+    out = _TTYBuffer()
+    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+    app._terminal_width = lambda: 10  # type: ignore[method-assign]
+    app._write("stale cursor column")
+
+    app._write_block("hello", tui.ASSISTANT_STYLE)
+
+    rendered = out.getvalue()
+    assert "stale cursor column\r" in rendered
+    assert f"\r\r\x1b[?7l{tui.RESET}\x1b[2K{tui.ASSISTANT_STYLE}" in rendered
+
+
 def test_styled_terminal_line_clears_before_applying_background() -> None:
     rendered = tui._styled_terminal_line("hi", tui.PROMPT_STYLE, 8)
 
+    assert rendered.startswith("\r")
     assert f"{tui.RESET}\x1b[2K{tui.PROMPT_STYLE}" in rendered
     assert f"{tui.PROMPT_STYLE}\x1b[2K" not in rendered
     assert _strip_ansi(rendered) == "hi".ljust(8)
@@ -1084,6 +1153,97 @@ def test_live_running_status_redraw_does_not_repaint_input_box() -> None:
     assert "\x1b[2K" in rendered
 
 
+def test_live_running_status_width_change_repaints_prompt_box() -> None:
+    out = _TTYBuffer()
+    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+    widths = [24]
+    app._terminal_width = lambda: widths[-1]  # type: ignore[method-assign]
+    live = tui._LiveTerminal(app)
+    live.streaming = True
+    live.working_started_at = time.monotonic() - 2
+    live.buffer = "queued text"
+    live.cursor = len(live.buffer)
+    live._draw_prompt()
+
+    out.seek(0)
+    out.truncate(0)
+    widths.append(10)
+    live._redraw_running_status_line()
+
+    rendered = out.getvalue()
+    assert tui.PROMPT_STYLE in rendered
+    assert " > queued" in rendered
+    assert "   text" in rendered
+    assert "\x1b[?7l" in rendered
+    assert "\x1b[40;" not in rendered[rendered.index(tui.PROMPT_STYLE) :]
+    assert live.prompt_width == 10
+
+
+def test_live_running_status_zoom_in_clears_reflowed_old_prompt_rows() -> None:
+    out = _TTYBuffer()
+    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+    app._statusline_enabled = False
+    widths = [28]
+    app._terminal_width = lambda: widths[-1]  # type: ignore[method-assign]
+    live = tui._LiveTerminal(app)
+    live.streaming = True
+    live.working_started_at = time.monotonic() - 2
+    live.buffer = "queued input that wraps after zoom"
+    live.cursor = len(live.buffer)
+    live._draw_prompt()
+
+    out.seek(0)
+    out.truncate(0)
+    widths.append(9)
+    live._redraw_running_status_line()
+
+    rendered = out.getvalue()
+    assert "\x1b[J" in rendered
+    assert "\x1b[1A\r\x1b[2K" not in rendered
+    visible_lines = _strip_ansi(rendered).splitlines()
+    input_line_index = next(
+        index for index, line in enumerate(visible_lines) if line.startswith(" > ")
+    )
+    assert visible_lines[input_line_index - 1].strip() == ""
+    assert visible_lines[input_line_index + 1].startswith("   ")
+    assert live.prompt_width == 9
+
+
+def test_live_prompt_survives_repeated_zoom_in_and_out_without_black_input_gap() -> None:
+    out = _TTYBuffer()
+    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+    widths = [34]
+    app._terminal_width = lambda: widths[-1]  # type: ignore[method-assign]
+    live = tui._LiveTerminal(app)
+    live.streaming = True
+    live.working_started_at = time.monotonic() - 2
+    live.buffer = "queued input that should stay in the teal input box"
+    live.cursor = len(live.buffer)
+    live._draw_prompt()
+
+    out.seek(0)
+    out.truncate(0)
+    for width in (12, 42, 9, 36):
+        widths.append(width)
+        live._redraw_running_status_line()
+
+    rendered = out.getvalue()
+    assert live.prompt_width == 36
+    assert rendered.count("\x1b[J") >= 4
+    final_prompt = rendered[rendered.rfind("\x1b[J") :]
+    input_box = final_prompt[final_prompt.index(tui.PROMPT_STYLE) :]
+    assert "\x1b[40;" not in input_box
+    visible_lines = _strip_ansi(final_prompt).splitlines()
+    input_line_index = next(
+        index for index, line in enumerate(visible_lines) if line.startswith(" > ")
+    )
+    assert visible_lines[input_line_index - 1].strip() == ""
+    assert visible_lines[input_line_index + 1].startswith("   ")
+
+
 def test_live_prompt_box_switches_to_type_box_when_streaming_with_input() -> None:
     out = _TTYBuffer()
     app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
@@ -1198,8 +1358,8 @@ def test_live_prompt_clear_accounts_for_terminal_zoom_in() -> None:
     live._draw_prompt()
 
     rendered = out.getvalue()
-    assert "\x1b[5B" in rendered
-    assert rendered.count("\x1b[1A\r\x1b[2K") >= 7
+    assert "\x1b[J" in rendered
+    assert "\x1b[1A\r\x1b[2K" not in rendered
     assert live.prompt_width == 10
 
 
@@ -1221,8 +1381,8 @@ def test_live_prompt_clear_accounts_for_cursor_line_reflow_after_zoom_in() -> No
     live._draw_prompt()
 
     rendered = out.getvalue()
-    assert "\x1b[5B" in rendered
-    assert rendered.count("\x1b[1A\r\x1b[2K") >= 8
+    assert "\x1b[J" in rendered
+    assert "\x1b[1A\r\x1b[2K" not in rendered
     assert live.prompt_width == 8
 
 
@@ -1836,6 +1996,36 @@ def test_live_submit_while_streaming_writes_queued_status_panel() -> None:
     assert live.pending_user_inputs == ["queued followup"]
     assert "Queued input while a turn is streaming" in rendered
     assert "press Esc to interrupt and send now" in rendered
+
+
+def test_live_queued_image_inputs_keep_placeholder_order(tmp_path: Path) -> None:
+    first = tmp_path / "first.png"
+    second = tmp_path / "second.png"
+    first.write_bytes(b"fake-png-first")
+    second.write_bytes(b"fake-png-second")
+    out = _TTYBuffer()
+    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+    live = tui._LiveTerminal(app)
+    live.pending_user_inputs = [f"first {first}", f"second {second}"]
+
+    live._append_pending_user_message(render=True)
+
+    message = app.messages[-1]
+    assert message.content[0] == TextBlock(
+        text="[queued user message 1 of 2]\nfirst [Image #1]"
+    )
+    assert message.content[1] == TextBlock(
+        text="[queued user message 2 of 2]\nsecond [Image #2]"
+    )
+    assert [
+        block.filename for block in message.content if isinstance(block, ImageBlock)
+    ] == ["first.png", "second.png"]
+    rendered = out.getvalue()
+    assert "first [Image #1]" in rendered
+    assert "second [Image #2]" in rendered
+    assert str(first) not in rendered
+    assert str(second) not in rendered
 
 
 def test_live_esc_interrupt_keeps_user_and_queued_messages_without_partial_assistant() -> None:

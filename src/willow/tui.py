@@ -671,6 +671,13 @@ class _RenderedTextLine:
     style: str
 
 
+@dataclass(frozen=True)
+class _PathReference:
+    path: Path
+    start: int
+    end: int
+
+
 def _merge_pasted_ranges(ranges: list[tuple[int, int]]) -> list[tuple[int, int]]:
     merged: list[tuple[int, int]] = []
     for start, end in sorted((start, end) for start, end in ranges if end > start):
@@ -880,18 +887,18 @@ def _styled_terminal_line(text: str, style: str, width: int) -> str:
     # This lets prompt rows occupy the full width without creating phantom
     # wrapped rows that survive terminal zoom/resizes.
     line = text[:visible_width].ljust(visible_width)
-    return f"\x1b[?7l{RESET}\x1b[2K{style}{line}{RESET}\x1b[?7h"
+    return f"\r\x1b[?7l{RESET}\x1b[2K{style}{line}{RESET}\x1b[?7h"
 
 
 def _filled_terminal_line(rendered: str, fill_style: str) -> str:
-    return f"\x1b[?7l{RESET}\x1b[2K{fill_style}{rendered}{RESET}\x1b[?7h"
+    return f"\r\x1b[?7l{RESET}\x1b[2K{fill_style}{rendered}{RESET}\x1b[?7h"
 
 
 def _running_terminal_line(text: str, width: int, *, frame: int) -> str:
     visible_width = _terminal_line_width(width)
     line = text[:visible_width].ljust(visible_width)
     highlight = frame % (visible_width + 8) - 4
-    parts = ["\x1b[?7l\x1b[0m\x1b[2K"]
+    parts = ["\r\x1b[?7l\x1b[0m\x1b[2K"]
     for index, char in enumerate(line):
         distance = abs(index - highlight)
         if distance == 0:
@@ -912,7 +919,7 @@ def _running_terminal_line(text: str, width: int, *, frame: int) -> str:
 def _black_terminal_line(text: str, width: int) -> str:
     visible_width = _terminal_line_width(width)
     line = text[:visible_width].ljust(visible_width)
-    return f"\x1b[?7l\x1b[0m\x1b[2K\x1b[40;38;5;255m{line}{RESET}\x1b[?7h"
+    return f"\r\x1b[?7l\x1b[0m\x1b[2K\x1b[40;38;5;255m{line}{RESET}\x1b[?7h"
 
 
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
@@ -1043,11 +1050,6 @@ def _image_summary(block: ImageBlock) -> str:
     return f"[image] {block.filename} ({block.media_type}, {size})"
 
 
-def _image_context_text(block: ImageBlock) -> str:
-    size = _format_bytes(block.size_bytes)
-    return f"Attached image: {block.filename} ({block.media_type}, {size})"
-
-
 def _file_context_text(path: Path, *, cwd: Path | None = None) -> str:
     return _relative_file_path(path, cwd=cwd)
 
@@ -1066,21 +1068,136 @@ def _format_bytes(size: int) -> str:
 
 
 def _candidate_file_paths(text: str, *, cwd: Path | None = None) -> list[Path]:
-    cwd = cwd or Path.cwd()
-    try:
-        tokens = shlex.split(text)
-    except ValueError:
-        tokens = text.split()
     candidates: list[Path] = []
     seen: set[Path] = set()
-    for token in tokens:
-        path = _token_to_path(token, cwd=cwd)
-        if path is None or path in seen:
+    for reference in _path_references_from_text(text, cwd=cwd):
+        if reference.path in seen:
             continue
-        if path.is_file():
-            candidates.append(path)
-            seen.add(path)
+        candidates.append(reference.path)
+        seen.add(reference.path)
     return candidates
+
+
+def _path_references_from_text(
+    text: str,
+    *,
+    cwd: Path | None = None,
+) -> list[_PathReference]:
+    cwd = cwd or Path.cwd()
+    references: list[_PathReference] = []
+    for token, raw_indexes in _shell_like_tokens_with_indexes(text):
+        path, start, end = _token_to_path_span(token, raw_indexes, cwd=cwd)
+        if path is not None and path.is_file():
+            if (
+                start > 0
+                and end < len(text)
+                and text[start - 1] == text[end]
+                and text[start - 1] in {"'", '"'}
+            ):
+                start -= 1
+                end += 1
+            references.append(_PathReference(path=path, start=start, end=end))
+    return references
+
+
+def _replace_text_ranges(
+    text: str,
+    replacements: list[tuple[int, int, str]],
+) -> str:
+    if not replacements:
+        return text
+    chunks: list[str] = []
+    cursor = 0
+    for start, end, replacement in sorted(replacements):
+        if start < cursor:
+            continue
+        chunks.append(text[cursor:start])
+        chunks.append(replacement)
+        cursor = end
+    chunks.append(text[cursor:])
+    return "".join(chunks)
+
+
+def _first_text_block_text(
+    content: list[ContentBlock],
+    *,
+    fallback: str,
+) -> str:
+    if content and isinstance(content[0], TextBlock):
+        return content[0].text
+    return fallback
+
+
+def _shell_like_tokens_with_indexes(text: str) -> list[tuple[str, list[int]]]:
+    tokens: list[tuple[str, list[int]]] = []
+    index = 0
+    length = len(text)
+    while index < length:
+        while index < length and text[index].isspace():
+            index += 1
+        if index >= length:
+            break
+
+        value: list[str] = []
+        raw_indexes: list[int] = []
+        quote: str | None = None
+        while index < length:
+            char = text[index]
+            if quote is None and char.isspace():
+                break
+            if quote is not None and char == quote:
+                quote = None
+                index += 1
+                continue
+            if quote is None and char in {"'", '"'}:
+                quote = char
+                index += 1
+                continue
+            if char == "\\" and quote != "'" and index + 1 < length:
+                index += 1
+                value.append(text[index])
+                raw_indexes.append(index)
+                index += 1
+                continue
+            value.append(char)
+            raw_indexes.append(index)
+            index += 1
+        if value:
+            tokens.append(("".join(value), raw_indexes))
+    return tokens
+
+
+def _token_to_path_span(
+    token: str,
+    raw_indexes: list[int],
+    *,
+    cwd: Path,
+) -> tuple[Path | None, int, int]:
+    start_index = 0
+    if token.startswith("@"):
+        start_index = 1
+    end_index = len(token)
+    while end_index > start_index and token[end_index - 1] in ".,;:)":
+        end_index -= 1
+    if start_index >= end_index:
+        return None, 0, 0
+
+    path = _token_to_path(token[start_index:end_index], cwd=cwd)
+    if path is None:
+        return None, 0, 0
+    start = raw_indexes[0] if start_index == 1 else raw_indexes[start_index]
+    end = raw_indexes[end_index - 1] + 1
+    return path, start, end
+
+
+def _should_route_slash_command(text: str, *, cwd: Path | None = None) -> bool:
+    stripped = text.strip()
+    if not stripped.startswith("/"):
+        return False
+    command = stripped.split(maxsplit=1)[0]
+    if command in BUILTIN_SLASH_COMMANDS:
+        return True
+    return not _candidate_file_paths(stripped, cwd=cwd)
 
 
 def _token_to_path(token: str, *, cwd: Path) -> Path | None:
@@ -1210,7 +1327,7 @@ class WillowApp:
             text = user_input.strip()
             if not text:
                 continue
-            if self._expand_skill_text(text) is None and text.startswith("/"):
+            if self._expand_skill_text(text) is None and _should_route_slash_command(text):
                 if self._handle_slash(text):
                     break
                 continue
@@ -1233,49 +1350,81 @@ class WillowApp:
             self._write_panel("error", str(exc), ERROR_STYLE)
             return False
         if render:
-            self._write_block(self._user_display_text(text, content), USER_STYLE)
+            self._write_block(
+                self._user_display_text(
+                    text,
+                    content,
+                    prefer_content_text=expanded_text is None,
+                ),
+                USER_STYLE,
+            )
         self.messages.append(Message(role="user", content=content))
         self._persist_session()
         return True
 
-    def _user_content_blocks(self, text: str) -> list[ContentBlock]:
+    def _user_content_blocks(
+        self,
+        text: str,
+        *,
+        image_index_start: int = 1,
+    ) -> list[ContentBlock]:
         content: list[ContentBlock] = []
-        if text.strip():
-            content.append(TextBlock(text=text))
-        for image in self._image_blocks_from_text(text):
-            content.append(TextBlock(text=_image_context_text(image)))
-            content.append(image)
+        display_text, images = self._image_placeholders_from_text(
+            text,
+            image_index_start=image_index_start,
+        )
+        if display_text.strip():
+            content.append(TextBlock(text=display_text))
+        content.extend(images)
         for path in self._file_context_paths_from_text(text):
             content.append(TextBlock(text=_file_context_text(path)))
         return content
 
-    def _user_display_text(self, text: str, content: list[ContentBlock]) -> str:
-        lines = [text] if text else []
+    def _user_display_text(
+        self,
+        text: str,
+        content: list[ContentBlock],
+        *,
+        prefer_content_text: bool = True,
+    ) -> str:
+        display_text = text
+        if prefer_content_text and content and isinstance(content[0], TextBlock):
+            display_text = content[0].text
+        lines = [display_text] if display_text else []
         lines.extend(_image_summary(block) for block in content if isinstance(block, ImageBlock))
         return "\n".join(lines)
 
-    def _image_blocks_from_text(self, text: str) -> list[ImageBlock]:
+    def _image_placeholders_from_text(
+        self,
+        text: str,
+        *,
+        image_index_start: int,
+    ) -> tuple[str, list[ImageBlock]]:
         blocks: list[ImageBlock] = []
-        for path in _candidate_file_paths(text):
-            size = path.stat().st_size
-            media_type, _encoding = mimetypes.guess_type(path.name)
+        replacements: list[tuple[int, int, str]] = []
+        image_index = image_index_start
+        for reference in _path_references_from_text(text):
+            size = reference.path.stat().st_size
+            media_type, _encoding = mimetypes.guess_type(reference.path.name)
             if media_type not in SUPPORTED_IMAGE_MEDIA_TYPES:
                 continue
             if size > MAX_IMAGE_ATTACHMENT_BYTES:
                 raise ValueError(
-                    f"Image is too large: {path} ({_format_bytes(size)}; "
+                    f"Image is too large: {reference.path} ({_format_bytes(size)}; "
                     f"max {_format_bytes(MAX_IMAGE_ATTACHMENT_BYTES)})"
                 )
-            stored_path = self._copy_image_asset(path)
+            stored_path = self._copy_image_asset(reference.path)
             blocks.append(
                 ImageBlock(
                     path=str(stored_path),
                     media_type=media_type,
-                    filename=path.name,
+                    filename=reference.path.name,
                     size_bytes=size,
                 )
             )
-        return blocks
+            replacements.append((reference.start, reference.end, f"[Image #{image_index}]"))
+            image_index += 1
+        return _replace_text_ranges(text, replacements), blocks
 
     def _file_context_paths_from_text(self, text: str) -> list[Path]:
         paths: list[Path] = []
@@ -1652,7 +1801,7 @@ class WillowApp:
             self._write_line("---")
             self._last_transcript_was_separator = True
             return
-        self._write(f"{SEPARATOR_STYLE}{'─' * self._terminal_width()}{RESET}\n")
+        self._write(f"\r{SEPARATOR_STYLE}{'─' * self._terminal_width()}{RESET}\n")
         self._last_transcript_was_separator = True
 
     def _handle_slash(self, text: str) -> bool:
@@ -2164,7 +2313,7 @@ class WillowApp:
 
         width = self._terminal_width()
         header = f" {label} "
-        self._write(f"{style}{header.ljust(width)}{RESET}\n")
+        self._write(f"\r{style}{header.ljust(width)}{RESET}\n")
         for line in (text.splitlines() or [""]):
             body = f" {line}"
             for wrapped in _wrap_terminal_line(body, width):
@@ -2185,6 +2334,7 @@ class WillowApp:
 
         width = self._terminal_width()
         should_pad = style in {USER_STYLE, ASSISTANT_STYLE}
+        self._write("\r")
         if should_pad:
             blank = f"{_styled_terminal_line('', style, width)}\n"
             self._write(blank * MESSAGE_BLOCK_VERTICAL_PADDING)
@@ -2690,7 +2840,11 @@ class _LiveTerminal:
             self._draw_prompt()
             return
         expanded_text = self.app._expand_skill_text(text)
-        if expanded_text is None and text.startswith("/") and not self.streaming:
+        if (
+            expanded_text is None
+            and _should_route_slash_command(text)
+            and not self.streaming
+        ):
             should_exit = self.app._handle_slash(text)
             if should_exit:
                 self.running = False
@@ -2705,11 +2859,19 @@ class _LiveTerminal:
             self.app._write_panel("error", str(exc), ERROR_STYLE)
             self._draw_prompt()
             return
-        self.app._write_block(self.app._user_display_text(text, message_content), USER_STYLE)
+        self.app._write_block(
+            self.app._user_display_text(
+                text,
+                message_content,
+                prefer_content_text=expanded_text is None,
+            ),
+            USER_STYLE,
+        )
         if self.interrupted_user_inputs:
+            submitted_text = _first_text_block_text(message_content, fallback=message_text)
             content = interrupted_user_text_blocks(
                 self.interrupted_user_inputs,
-                [message_text],
+                [submitted_text],
             )
             content.extend(message_content[1:])
             self.interrupted_user_inputs = []
@@ -2837,24 +2999,28 @@ class _LiveTerminal:
         self.interrupted_user_inputs = []
         self.pending_user_inputs = []
         self.pending_monitor_inputs = []
-        if render:
-            for text in pending:
-                try:
-                    content = self.app._user_content_blocks(text)
-                except ValueError as exc:
-                    self.app._write_panel("error", str(exc), ERROR_STYLE)
-                    continue
-                self.app._write_block(self.app._user_display_text(text, content), USER_STYLE)
+        prepared_pending: list[str] = []
         attachment_blocks: list[ContentBlock] = []
+        image_index = 1
         for text in pending:
             try:
-                attachment_blocks.extend(self.app._user_content_blocks(text)[1:])
-            except ValueError:
+                content = self.app._user_content_blocks(
+                    text,
+                    image_index_start=image_index,
+                )
+            except ValueError as exc:
+                if render:
+                    self.app._write_panel("error", str(exc), ERROR_STYLE)
                 continue
+            image_index += sum(isinstance(block, ImageBlock) for block in content)
+            prepared_pending.append(_first_text_block_text(content, fallback=text))
+            attachment_blocks.extend(content[1:])
+            if render:
+                self.app._write_block(self.app._user_display_text(text, content), USER_STYLE)
         if interrupted:
-            user_blocks = interrupted_user_text_blocks(interrupted, pending)
+            user_blocks = interrupted_user_text_blocks(interrupted, prepared_pending)
         else:
-            user_blocks = queued_user_text_blocks(pending)
+            user_blocks = queued_user_text_blocks(prepared_pending)
         blocks = [
             *user_blocks,
             *attachment_blocks,
@@ -2889,24 +3055,28 @@ class _LiveTerminal:
         self.pending_monitor_inputs = []
         interrupted = [*self.interrupted_user_inputs, *self._take_trailing_text_user_message()]
         self.interrupted_user_inputs = []
-        if render:
-            for text in pending:
-                try:
-                    content = self.app._user_content_blocks(text)
-                except ValueError as exc:
-                    self.app._write_panel("error", str(exc), ERROR_STYLE)
-                    continue
-                self.app._write_block(self.app._user_display_text(text, content), USER_STYLE)
+        prepared_pending: list[str] = []
         attachment_blocks: list[ContentBlock] = []
+        image_index = 1
         for text in pending:
             try:
-                attachment_blocks.extend(self.app._user_content_blocks(text)[1:])
-            except ValueError:
+                content = self.app._user_content_blocks(
+                    text,
+                    image_index_start=image_index,
+                )
+            except ValueError as exc:
+                if render:
+                    self.app._write_panel("error", str(exc), ERROR_STYLE)
                 continue
+            image_index += sum(isinstance(block, ImageBlock) for block in content)
+            prepared_pending.append(_first_text_block_text(content, fallback=text))
+            attachment_blocks.extend(content[1:])
+            if render:
+                self.app._write_block(self.app._user_display_text(text, content), USER_STYLE)
         user_blocks = (
-            interrupted_user_text_blocks(interrupted, pending)
+            interrupted_user_text_blocks(interrupted, prepared_pending)
             if interrupted
-            else queued_user_text_blocks(pending)
+            else queued_user_text_blocks(prepared_pending)
         )
         blocks = [
             *user_blocks,
@@ -3328,6 +3498,9 @@ class _LiveTerminal:
         if not self._running_status_active() or self.prompt_lines == 0:
             return
         width = self.app._terminal_width()
+        if _terminal_line_width(width) != self.prompt_width:
+            self._draw_prompt()
+            return
         parts = ["\x1b7\x1b[?25l"]
         running_status_line_index = 1
         rows_above_cursor = self.prompt_cursor_line_index - running_status_line_index
@@ -3362,11 +3535,24 @@ class _LiveTerminal:
         current_width = _terminal_line_width(self.app._terminal_width())
         previous_width = self.prompt_width or current_width
         wrap_factor = max(1, (previous_width + current_width - 1) // current_width)
-        rows_to_clear = self.prompt_lines * wrap_factor
         cursor_visual_row = min(
             wrap_factor - 1,
             max(0, self.prompt_cursor_column) // current_width,
         )
+        if current_width != previous_width:
+            rows_above_prompt_top = self.prompt_cursor_line_index * wrap_factor + cursor_visual_row
+            parts: list[str] = ["\x1b[?25l"]
+            if rows_above_prompt_top:
+                parts.append(f"\x1b[{rows_above_prompt_top}A")
+            parts.append("\r\x1b[J\x1b[?25h")
+            self.prompt_lines = 0
+            self.prompt_width = 0
+            self.prompt_cursor_line_index = 0
+            self.prompt_cursor_column = 0
+            self.prompt_cursor_offset_from_bottom = 0
+            return "".join(parts)
+
+        rows_to_clear = self.prompt_lines * wrap_factor
         rows_below_cursor_line = wrap_factor - cursor_visual_row - 1
         rows_down_to_prompt_bottom = (
             self.prompt_cursor_offset_from_bottom * wrap_factor
@@ -3384,6 +3570,7 @@ class _LiveTerminal:
         self.prompt_width = 0
         self.prompt_cursor_line_index = 0
         self.prompt_cursor_column = 0
+        self.prompt_cursor_offset_from_bottom = 0
         return "".join(parts)
 
 
