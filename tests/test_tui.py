@@ -637,6 +637,35 @@ def test_input_hints_filter_commands_and_skills_by_same_prefix(
     assert "/model" not in rendered
 
 
+def test_input_hints_fuzzy_match_at_file_paths(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    (project / "src" / "willow").mkdir(parents=True)
+    (project / "src" / "willow" / "tui.py").write_text("print('hi')", encoding="utf-8")
+    (project / "README.md").write_text("docs", encoding="utf-8")
+    (project / "notes draft.txt").write_text("draft", encoding="utf-8")
+    (project / "node_modules").mkdir()
+    (project / "node_modules" / "notes.js").write_text("ignored", encoding="utf-8")
+
+    rendered = tui._render_input_hints("please inspect @tui", project)
+
+    assert "@src/willow/tui.py" in rendered
+    assert "node_modules" not in rendered
+
+    rendered = tui._render_input_hints("please inspect @draft", project)
+
+    assert "@'notes draft.txt'" in rendered
+
+
+def test_apply_at_file_hint_replaces_active_token() -> None:
+    completed = tui._apply_hint_to_input(
+        "check this @rea",
+        "@README.md",
+        append_space_when_empty=True,
+    )
+
+    assert completed == "check this README.md "
+
+
 def test_render_statusline_includes_context_usage_and_total_tokens() -> None:
     rendered = tui._render_statusline(
         model="gpt-5.5",
@@ -762,6 +791,50 @@ def test_tui_attaches_local_image_from_user_text(tmp_path: Path) -> None:
     assert message.content[2].media_type == "image/png"
     assert "Attached image: debug shot.png" in message.content[1].text
     assert "[image] debug shot.png" in out.getvalue()
+
+
+def test_tui_sends_text_file_path_as_text_context(tmp_path: Path) -> None:
+    text_file = tmp_path / "notes.txt"
+    text_file.write_text("secret file content", encoding="utf-8")
+    cwd = Path.cwd()
+    out = _TTYBuffer()
+    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+
+    assert app._submit_user_text(f'check file "{text_file}"', render=True)
+
+    message = app.messages[-1]
+    assert message.role == "user"
+    assert message.content == [
+        TextBlock(text=f'check file "{text_file}"'),
+        TextBlock(text=Path(os.path.relpath(text_file.resolve(), cwd)).as_posix()),
+    ]
+    assert "secret file content" not in str(message.content)
+    rendered = out.getvalue()
+    assert "[file]" not in rendered
+    assert "(text/plain" not in rendered
+
+
+def test_tui_supports_at_prefixed_image_and_file_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image = tmp_path / "shot.png"
+    image.write_bytes(b"fake-png")
+    text_file = tmp_path / "notes.txt"
+    text_file.write_text("secret file content", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    out = _TTYBuffer()
+    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+
+    assert app._submit_user_text("check @shot.png and @notes.txt", render=True)
+
+    message = app.messages[-1]
+    assert any(
+        isinstance(block, ImageBlock) and block.filename == "shot.png"
+        for block in message.content
+    )
+    assert TextBlock(text="notes.txt") in message.content
+    assert "secret file content" not in str(message.content)
 
 
 def test_assistant_text_uses_terminal_background() -> None:
@@ -1305,6 +1378,51 @@ def test_live_tab_completes_selected_command_and_adds_space() -> None:
 
     assert completed is True
     assert live.buffer == "/help "
+    assert live.cursor == len(live.buffer)
+    assert app.messages == []
+
+
+def test_live_tab_completes_selected_at_file_without_submitting(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "notes.txt").write_text("secret", encoding="utf-8")
+    monkeypatch.chdir(project)
+    out = _TTYBuffer()
+    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+    live = tui._LiveTerminal(app)
+    live.buffer = "check @not"
+    live.cursor = len(live.buffer)
+
+    completed = live._complete_selected_hint()
+
+    assert completed is True
+    assert live.buffer == "check notes.txt "
+    assert live.cursor == len(live.buffer)
+    assert app.messages == []
+
+
+def test_live_input_hint_enter_selects_at_file_without_submitting(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    notes = project / "notes.txt"
+    notes.write_text("secret", encoding="utf-8")
+    monkeypatch.chdir(project)
+    out = _TTYBuffer()
+    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+    live = tui._LiveTerminal(app)
+    live.buffer = "check @not"
+    live.cursor = len(live.buffer)
+    live._submit_buffer()
+
+    assert live.buffer == "check notes.txt "
     assert live.cursor == len(live.buffer)
     assert app.messages == []
 
@@ -2694,15 +2812,212 @@ def test_terminal_compaction_uses_projection_but_persists_full_history(
     assert "[status] Auto-compacting..." in out.getvalue()
     assert len(provider.requests) == 2
     compacted_request = provider.requests[1]
-    assert compacted_request.messages[:10] == prior_messages[:10]
-    assert "middle summary" in _message_text(compacted_request.messages[10])
-    assert len(compacted_request.messages) == 21
+    assert "middle summary" in _message_text(compacted_request.messages[0])
+    assert compacted_request.messages[1:] == app.messages[15:25]
+    assert len(compacted_request.messages) == 11
     assert provider.reset_count >= 3
     assert len(app.messages) == 26
     assert all("middle summary" not in _message_text(message) for message in app.messages)
     assert app._session_path is not None
     saved = session.load_session(app._session_path)
     assert saved.messages == app.messages
+    assert len(saved.compactions) == 1
+    assert saved.compactions[0].first_kept_message_index == 15
+    assert saved.compactions[0].summarized_until_message_index == 15
+    assert saved.compactions[0].created_after_message_index == 25
+
+
+def test_resumed_compaction_rebuilds_projected_context() -> None:
+    record = _session_record("sess_compacted", text="old question")
+    messages = [
+        _text_message(index, f"message {index}")
+        for index in range(14)
+    ]
+    record = session.SessionRecord(
+        metadata=record.metadata,
+        settings=record.settings,
+        messages=messages,
+        compactions=[
+            session.SessionCompaction(
+                summary="durable summary",
+                first_kept_message_index=10,
+                summarized_until_message_index=10,
+                created_after_message_index=14,
+            )
+        ],
+    )
+    args = _make_args(persist_session=True)
+    args.provider = record.settings.provider
+    args.model = record.settings.model
+    args.max_tokens = record.settings.max_tokens
+    args.max_iterations = record.settings.max_iterations
+    args._resume_session_record = record
+    args._resume_session_path = Path("/tmp/sess_compacted.jsonl")
+    response = CompletionResponse(content=[TextBlock(text="new answer")], stop_reason="end_turn")
+    provider = _ScriptedStreamProvider([[StreamComplete(response=response)]])
+    inputs_iter = iter(["new question", "/exit"])
+
+    def input_func(_prompt: str = "") -> str:
+        try:
+            return next(inputs_iter)
+        except StopIteration as exc:
+            raise EOFError from exc
+
+    app = tui.WillowApp(
+        args,
+        provider,
+        state=tui._state_from_session(record),
+        input_func=input_func,
+        out=io.StringIO(),
+    )
+    assert app.run() == 0
+
+    request = provider.requests[0]
+    assert "durable summary" in _message_text(request.messages[0])
+    assert request.messages[1:] == [
+        *messages[10:],
+        Message(role="user", content=[TextBlock(text="new question")]),
+    ]
+
+
+def test_branch_copies_history_and_compaction_into_new_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(session.SESSION_DIR_ENV, str(tmp_path / "sessions"))
+    parent = _session_record("parent_session", text="old question")
+    messages = [_text_message(index, f"message {index}") for index in range(14)]
+    parent = session.SessionRecord(
+        metadata=parent.metadata,
+        settings=parent.settings,
+        messages=messages,
+        compactions=[
+            session.SessionCompaction(
+                summary="parent summary",
+                first_kept_message_index=10,
+                summarized_until_message_index=10,
+                created_after_message_index=14,
+            )
+        ],
+    )
+    parent_path = session.save_session(parent, session.default_session_path(parent.metadata.id))
+    response = CompletionResponse(content=[TextBlock(text="branch answer")], stop_reason="end_turn")
+    provider = _ScriptedStreamProvider([[StreamComplete(response=response)]])
+    args = _make_args(persist_session=True)
+    args.provider = parent.settings.provider
+    args.model = parent.settings.model
+    args.max_tokens = parent.settings.max_tokens
+    args.max_iterations = parent.settings.max_iterations
+    args._resume_session_record = parent
+    args._resume_session_path = parent_path
+    inputs_iter = iter(["/branch", "branch question", "/exit"])
+
+    def input_func(_prompt: str = "") -> str:
+        try:
+            return next(inputs_iter)
+        except StopIteration as exc:
+            raise EOFError from exc
+
+    out = io.StringIO()
+    app = tui.WillowApp(
+        args,
+        provider,
+        state=tui._state_from_session(parent),
+        input_func=input_func,
+        out=out,
+    )
+    assert app.run() == 0
+
+    assert app._session_record is not None
+    branch = app._session_record
+    assert branch.metadata.id != parent.metadata.id
+    assert branch.metadata.parent_session_id == parent.metadata.id
+    assert branch.compactions == parent.compactions
+    assert session.load_session(parent_path).messages == parent.messages
+    assert app._session_path is not None
+    saved_branch = session.load_session(app._session_path)
+    assert saved_branch.metadata.parent_session_id == parent.metadata.id
+    assert saved_branch.messages[:14] == parent.messages
+    assert [block.text for block in saved_branch.messages[-2].content] == ["branch question"]
+
+    rendered = out.getvalue()
+    assert "Branched conversation" in rendered
+    assert f"session {branch.metadata.id}" in rendered
+    assert f"/resume {parent.metadata.id}" in rendered
+    assert f"willow -r {parent.metadata.id}" in rendered
+
+    request = provider.requests[0]
+    assert "parent summary" in _message_text(request.messages[0])
+    assert request.messages[1:] == [
+        *messages[10:],
+        Message(role="user", content=[TextBlock(text="branch question")]),
+    ]
+
+
+def test_tui_resume_command_switches_sessions_and_projection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(session.SESSION_DIR_ENV, str(tmp_path / "sessions"))
+    parent = _session_record("parent_session", text="old question")
+    parent_messages = [_text_message(index, f"parent {index}") for index in range(12)]
+    parent = session.SessionRecord(
+        metadata=parent.metadata,
+        settings=parent.settings,
+        messages=parent_messages,
+        compactions=[
+            session.SessionCompaction(
+                summary="parent durable summary",
+                first_kept_message_index=8,
+                summarized_until_message_index=8,
+                created_after_message_index=12,
+            )
+        ],
+    )
+    session.save_session(parent, session.default_session_path(parent.metadata.id))
+    branch = _session_record("branch_session", text="branch question")
+    branch = session.SessionRecord(
+        metadata=branch.metadata,
+        settings=branch.settings,
+        messages=[Message(role="user", content=[TextBlock(text="branch only")])],
+    )
+    branch_path = session.save_session(branch, session.default_session_path(branch.metadata.id))
+    response = CompletionResponse(content=[TextBlock(text="parent answer")], stop_reason="end_turn")
+    provider = _ScriptedStreamProvider([[StreamComplete(response=response)]])
+    args = _make_args(persist_session=True)
+    args.provider = branch.settings.provider
+    args.model = branch.settings.model
+    args.max_tokens = branch.settings.max_tokens
+    args.max_iterations = branch.settings.max_iterations
+    args._resume_session_record = branch
+    args._resume_session_path = branch_path
+    inputs_iter = iter([f"/resume {parent.metadata.id}", "parent followup", "/exit"])
+
+    def input_func(_prompt: str = "") -> str:
+        try:
+            return next(inputs_iter)
+        except StopIteration as exc:
+            raise EOFError from exc
+
+    out = io.StringIO()
+    app = tui.WillowApp(
+        args,
+        provider,
+        state=tui._state_from_session(branch),
+        input_func=input_func,
+        out=out,
+    )
+    assert app.run() == 0
+
+    assert app._session_record is not None
+    assert app._session_record.metadata.id == parent.metadata.id
+    assert "Resumed session parent_session" in out.getvalue()
+    request = provider.requests[0]
+    assert "parent durable summary" in _message_text(request.messages[0])
+    assert request.messages[1:] == [
+        *parent_messages[8:],
+        Message(role="user", content=[TextBlock(text="parent followup")]),
+    ]
 
 
 def _message_text(message: Message) -> str:

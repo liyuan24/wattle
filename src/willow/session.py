@@ -39,11 +39,12 @@ _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 class SessionMetadata:
     """Human-inspectable metadata for one saved conversation."""
 
-    id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))
     created_at: str = field(default_factory=lambda: _utc_now_iso())
     updated_at: str = field(default_factory=lambda: _utc_now_iso())
     title: str | None = None
     cwd: str | None = field(default_factory=lambda: str(Path.cwd()))
+    parent_session_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,12 +61,27 @@ class SessionSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class SessionCompaction:
+    """Durable checkpoint describing one compacted request projection."""
+
+    summary: str
+    first_kept_message_index: int
+    summarized_until_message_index: int
+    created_after_message_index: int
+    reason: str = "threshold"
+    tokens_before: int = 0
+    tokens_after: int = 0
+    created_at: str = field(default_factory=lambda: _utc_now_iso())
+
+
+@dataclass(frozen=True, slots=True)
 class SessionRecord:
     """A complete persisted Willow chat session."""
 
     metadata: SessionMetadata
     settings: SessionSettings
     messages: list[Message] = field(default_factory=list)
+    compactions: list[SessionCompaction] = field(default_factory=list)
     schema_version: int = SCHEMA_VERSION
 
 
@@ -88,10 +104,15 @@ def new_session(
     effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None,
     title: str | None = None,
     cwd: str | None = None,
+    parent_session_id: str | None = None,
 ) -> SessionRecord:
     """Create an empty session record with fresh metadata."""
     return SessionRecord(
-        metadata=SessionMetadata(title=title, cwd=str(Path.cwd()) if cwd is None else cwd),
+        metadata=SessionMetadata(
+            title=title,
+            cwd=str(Path.cwd()) if cwd is None else cwd,
+            parent_session_id=parent_session_id,
+        ),
         settings=SessionSettings(
             provider=provider,
             model=model,
@@ -199,17 +220,27 @@ def session_to_jsonl_lines(record: SessionRecord) -> list[str]:
         "metadata": metadata_to_dict(record.metadata),
         "settings": settings_to_dict(record.settings),
     }
-    return [
-        json.dumps(header, ensure_ascii=False, separators=(",", ":")),
-        *(
-            json.dumps(
-                {"type": "message", "message": message_to_dict(message)},
-                ensure_ascii=False,
-                separators=(",", ":"),
-            )
-            for message in record.messages
-        ),
-    ]
+    lines = [json.dumps(header, ensure_ascii=False, separators=(",", ":"))]
+    compactions_by_message_index: dict[int, list[SessionCompaction]] = {}
+    for compaction in record.compactions:
+        compactions_by_message_index.setdefault(
+            compaction.created_after_message_index,
+            [],
+        ).append(compaction)
+
+    for compaction in compactions_by_message_index.get(0, []):
+        lines.append(_compaction_jsonl_line(compaction))
+
+    for index, message in enumerate(record.messages, start=1):
+        lines.append(_jsonl_line({"type": "message", "message": message_to_dict(message)}))
+        for compaction in compactions_by_message_index.get(index, []):
+            lines.append(_compaction_jsonl_line(compaction))
+
+    for index in sorted(key for key in compactions_by_message_index if key > len(record.messages)):
+        for compaction in compactions_by_message_index[index]:
+            lines.append(_compaction_jsonl_line(compaction))
+
+    return lines
 
 
 def session_from_jsonl_lines(lines: list[str]) -> SessionRecord:
@@ -224,15 +255,24 @@ def session_from_jsonl_lines(lines: list[str]) -> SessionRecord:
     if version != SCHEMA_VERSION:
         raise ValueError(f"unsupported session schema_version: {version!r}")
     messages: list[Message] = []
+    compactions: list[SessionCompaction] = []
     for index, item in enumerate(objects[1:], start=2):
-        if not isinstance(item, dict) or item.get("type") != "message":
-            raise ValueError(f"session JSONL line {index} must be a message object")
-        messages.append(message_from_dict(_require_dict(item, "message")))
+        if not isinstance(item, dict):
+            raise ValueError(f"session JSONL line {index} must be an object")
+        item_type = item.get("type")
+        if item_type == "message":
+            messages.append(message_from_dict(_require_dict(item, "message")))
+            continue
+        if item_type == "compaction":
+            compactions.append(compaction_from_dict(_require_dict(item, "compaction")))
+            continue
+        raise ValueError(f"session JSONL line {index} must be a message or compaction object")
     return SessionRecord(
         schema_version=version,
         metadata=metadata_from_dict(_require_dict(header, "metadata")),
         settings=settings_from_dict(_require_dict(header, "settings")),
         messages=messages,
+        compactions=compactions,
     )
 
 
@@ -243,6 +283,9 @@ def session_to_dict(record: SessionRecord) -> dict[str, Any]:
         "metadata": metadata_to_dict(record.metadata),
         "settings": settings_to_dict(record.settings),
         "messages": [message_to_dict(message) for message in record.messages],
+        "compactions": [
+            compaction_to_dict(compaction) for compaction in record.compactions
+        ],
     }
 
 
@@ -251,6 +294,9 @@ def session_from_dict(data: dict[str, Any]) -> SessionRecord:
     version = data.get("schema_version")
     if version != SCHEMA_VERSION:
         raise ValueError(f"unsupported session schema_version: {version!r}")
+    compactions_data = data.get("compactions", [])
+    if not isinstance(compactions_data, list):
+        raise ValueError("'compactions' must be a list")
     return SessionRecord(
         schema_version=version,
         metadata=metadata_from_dict(_require_dict(data, "metadata")),
@@ -258,6 +304,10 @@ def session_from_dict(data: dict[str, Any]) -> SessionRecord:
         messages=[
             message_from_dict(item)
             for item in _require_list(data, "messages")
+        ],
+        compactions=[
+            compaction_from_dict(item)
+            for item in cast(list[dict[str, Any]], compactions_data)
         ],
     )
 
@@ -269,6 +319,7 @@ def metadata_to_dict(metadata: SessionMetadata) -> dict[str, Any]:
         "updated_at": metadata.updated_at,
         "title": metadata.title,
         "cwd": metadata.cwd,
+        "parent_session_id": metadata.parent_session_id,
     }
 
 
@@ -279,6 +330,7 @@ def metadata_from_dict(data: dict[str, Any]) -> SessionMetadata:
         updated_at=_require_str(data, "updated_at"),
         title=_optional_str(data, "title"),
         cwd=_optional_str(data, "cwd"),
+        parent_session_id=_optional_str(data, "parent_session_id"),
     )
 
 
@@ -303,6 +355,35 @@ def settings_from_dict(data: dict[str, Any]) -> SessionSettings:
         max_iterations=_require_int(data, "max_iterations"),
         thinking=_optional_bool(data, "thinking", default=False),
         effort=_optional_effort(data, "effort"),
+    )
+
+
+def compaction_to_dict(compaction: SessionCompaction) -> dict[str, Any]:
+    return {
+        "summary": compaction.summary,
+        "first_kept_message_index": compaction.first_kept_message_index,
+        "summarized_until_message_index": compaction.summarized_until_message_index,
+        "created_after_message_index": compaction.created_after_message_index,
+        "reason": compaction.reason,
+        "tokens_before": compaction.tokens_before,
+        "tokens_after": compaction.tokens_after,
+        "created_at": compaction.created_at,
+    }
+
+
+def compaction_from_dict(data: dict[str, Any]) -> SessionCompaction:
+    return SessionCompaction(
+        summary=_require_str(data, "summary"),
+        first_kept_message_index=_require_int(data, "first_kept_message_index"),
+        summarized_until_message_index=_require_int(
+            data,
+            "summarized_until_message_index",
+        ),
+        created_after_message_index=_require_int(data, "created_after_message_index"),
+        reason=_optional_str(data, "reason") or "threshold",
+        tokens_before=_optional_int(data, "tokens_before", default=0),
+        tokens_after=_optional_int(data, "tokens_after", default=0),
+        created_at=_optional_str(data, "created_at") or _utc_now_iso(),
     )
 
 
@@ -413,6 +494,16 @@ def content_block_from_dict(data: Any) -> ContentBlock:
 
 def _utc_now_iso() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _jsonl_line(data: dict[str, Any]) -> str:
+    return json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+
+
+def _compaction_jsonl_line(compaction: SessionCompaction) -> str:
+    return _jsonl_line(
+        {"type": "compaction", "compaction": compaction_to_dict(compaction)}
+    )
 
 
 def _require_dict(data: dict[str, Any], key: str) -> dict[str, Any]:

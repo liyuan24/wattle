@@ -78,6 +78,18 @@ def _sample_record() -> session.SessionRecord:
                 cached_tokens=80,
             ),
         ],
+        compactions=[
+            session.SessionCompaction(
+                summary="Earlier work was summarized.",
+                first_kept_message_index=2,
+                summarized_until_message_index=2,
+                created_after_message_index=4,
+                reason="threshold",
+                tokens_before=1200,
+                tokens_after=300,
+                created_at="2026-05-08T10:05:00Z",
+            )
+        ],
     )
 
 
@@ -94,6 +106,7 @@ def test_session_record_round_trips_through_jsonl_file(tmp_path: Path) -> None:
     assert loaded.metadata.updated_at.endswith("Z")
     assert loaded.settings == record.settings
     assert loaded.messages == record.messages
+    assert loaded.compactions == record.compactions
 
     lines = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
     assert lines[0]["type"] == "session"
@@ -122,6 +135,17 @@ def test_session_record_round_trips_through_jsonl_file(tmp_path: Path) -> None:
     assert lines[4]["message"]["content"][0] == {
         "type": "redacted_thinking",
         "data": "opaque-redacted-payload",
+    }
+    assert lines[5]["type"] == "compaction"
+    assert lines[5]["compaction"] == {
+        "summary": "Earlier work was summarized.",
+        "first_kept_message_index": 2,
+        "summarized_until_message_index": 2,
+        "created_after_message_index": 4,
+        "reason": "threshold",
+        "tokens_before": 1200,
+        "tokens_after": 300,
+        "created_at": "2026-05-08T10:05:00Z",
     }
 
 

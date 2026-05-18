@@ -66,6 +66,9 @@ class RequestPreparer:
         state: RuntimeCompaction | None = None,
         on_compaction_start: Callable[[], None] | None = None,
         on_compaction_end: Callable[[], None] | None = None,
+        on_compaction_record: (
+            Callable[[RuntimeCompaction, str, int, int], None] | None
+        ) = None,
     ) -> None:
         self.provider = provider
         self.model = model
@@ -80,6 +83,7 @@ class RequestPreparer:
         self.state = state
         self.on_compaction_start = on_compaction_start
         self.on_compaction_end = on_compaction_end
+        self.on_compaction_record = on_compaction_record
 
     def prepare(
         self,
@@ -87,6 +91,12 @@ class RequestPreparer:
         *,
         force_compaction: bool = False,
     ) -> PreparedRequest:
+        previous_state = self.state
+        raw_context_tokens = estimate_request_context_tokens(
+            system=self.system,
+            messages=messages,
+            tools=self.tools,
+        )
         request_messages, state = maybe_compact_messages(
             provider=self.provider,
             model=self.model,
@@ -109,6 +119,13 @@ class RequestPreparer:
             messages=request_messages,
             tools=self.tools,
         )
+        if (
+            self.on_compaction_record is not None
+            and state is not None
+            and state != previous_state
+        ):
+            reason = "overflow" if force_compaction else "threshold"
+            self.on_compaction_record(state, reason, raw_context_tokens, context_tokens)
         return PreparedRequest(
             request=CompletionRequest(
                 model=self.model,

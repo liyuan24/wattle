@@ -23,7 +23,6 @@ from willow.providers import (
 )
 
 COMPACTION_TRIGGER_RATIO = 0.80
-FIRST_MESSAGES_TO_KEEP = 10
 LAST_MESSAGES_TO_KEEP = 10
 SUMMARY_MAX_TOKENS = 2048
 
@@ -40,6 +39,7 @@ class RuntimeCompaction:
 
     summary: str
     summarized_until: int
+    first_kept_index: int
 
 
 def maybe_compact_messages(
@@ -66,13 +66,18 @@ def maybe_compact_messages(
         context_window=context_window,
     )
     should_start = should_start or (force and state is None)
-    if (
-        not force
-        and not should_start
-        and state is None
-        and len(messages) <= FIRST_MESSAGES_TO_KEEP + LAST_MESSAGES_TO_KEEP
-    ):
+    if not force and not should_start and state is None:
         return list(messages), None
+
+    if state is not None:
+        first_end, last_start = _compaction_bounds(messages, force=force)
+        should_update = force or state.summarized_until < last_start
+        if not should_update:
+            return _build_compacted_messages(
+                messages,
+                state.first_kept_index,
+                state.summary,
+            ), state
 
     first_end, last_start = _compaction_bounds(messages, force=force)
     if last_start <= first_end and should_start:
@@ -80,13 +85,11 @@ def maybe_compact_messages(
     if last_start <= first_end:
         if state is None:
             return list(messages), None
-        return _build_compacted_messages(messages, first_end, last_start, state.summary), state
-    should_update = state is not None and (force or state.summarized_until < last_start)
-
-    if not should_start and not should_update:
-        if state is None:
-            return list(messages), None
-        return _build_compacted_messages(messages, first_end, last_start, state.summary), state
+        return _build_compacted_messages(
+            messages,
+            state.first_kept_index,
+            state.summary,
+        ), state
 
     if on_start is not None:
         on_start()
@@ -111,33 +114,31 @@ def maybe_compact_messages(
         if on_end is not None:
             on_end()
 
-    next_state = RuntimeCompaction(summary=summary, summarized_until=last_start)
-    return _build_compacted_messages(messages, first_end, last_start, summary), next_state
+    next_state = RuntimeCompaction(
+        summary=summary,
+        summarized_until=last_start,
+        first_kept_index=last_start,
+    )
+    return _build_compacted_messages(messages, last_start, summary), next_state
 
 
 def compacted_message_count() -> int:
-    return FIRST_MESSAGES_TO_KEEP + 1 + LAST_MESSAGES_TO_KEEP
+    return 1 + LAST_MESSAGES_TO_KEEP
 
 
 def _compaction_bounds(messages: list[Message], *, force: bool) -> tuple[int, int]:
     if not force:
-        first_end = _first_keep_end(messages, FIRST_MESSAGES_TO_KEEP)
+        first_end = 0
         last_start = _last_keep_start(messages, first_end, LAST_MESSAGES_TO_KEEP)
         return first_end, last_start
 
     if len(messages) <= 1:
         return len(messages), len(messages)
-    if len(messages) <= 3:
-        return 1, len(messages)
 
-    first_end = _first_keep_end(messages, min(2, len(messages)))
-    # Recovery compaction should shrink much more aggressively than the
-    # proactive path while still preserving the freshest tool/result pair.
-    last_keep = min(8, max(1, len(messages) - first_end - 1))
-    last_start = _last_keep_start(messages, first_end, last_keep)
-    if last_start <= first_end and first_end < len(messages) - 1:
-        last_start = first_end + 1
-    return first_end, last_start
+    first_end = 0
+    # Recovery compaction must be able to remove a huge most-recent tool result
+    # after a provider context-length error.
+    return first_end, len(messages)
 
 
 def _should_start_compaction(
@@ -156,8 +157,7 @@ def _should_start_compaction(
 
 def _build_compacted_messages(
     messages: list[Message],
-    first_end: int,
-    last_start: int,
+    first_kept_index: int,
     summary: str,
 ) -> list[Message]:
     summary_message = Message(
@@ -165,14 +165,15 @@ def _build_compacted_messages(
         content=[
             TextBlock(
                 text=(
-                    "Context summary of omitted middle messages. "
+                    "The conversation history before this point was compacted into "
+                    "the following summary. "
                     "Use this as prior conversation context, not as a new user request.\n\n"
                     f"{summary}"
                 )
             )
         ],
     )
-    return [*messages[:first_end], summary_message, *messages[last_start:]]
+    return [summary_message, *messages[first_kept_index:]]
 
 
 def _summarize_messages(
@@ -268,13 +269,6 @@ def _truncate_tool_result(text: str, max_chars: int = 2000) -> str:
     if len(text) <= max_chars:
         return text
     return f"{text[:max_chars]}\n\n[... {len(text) - max_chars} more characters truncated]"
-
-
-def _first_keep_end(messages: list[Message], desired: int) -> int:
-    end = min(desired, len(messages))
-    while end < len(messages) and _is_tool_result_message(messages[end]):
-        end += 1
-    return end
 
 
 def _last_keep_start(messages: list[Message], first_end: int, desired: int) -> int:

@@ -39,7 +39,7 @@ def _message(index: int, text: str | None = None) -> Message:
     )
 
 
-def test_compaction_keeps_first_summary_and_last_messages() -> None:
+def test_compaction_keeps_summary_and_last_messages() -> None:
     provider = _ScriptedProvider(
         [
             CompletionResponse(
@@ -64,11 +64,11 @@ def test_compaction_keeps_first_summary_and_last_messages() -> None:
     assert state is not None
     assert state.summary == "summary of middle"
     assert state.summarized_until == 15
-    assert request_messages[:10] == messages[:10]
-    assert "summary of middle" in cast_text(request_messages[10])
-    assert request_messages[11:] == messages[15:]
+    assert state.first_kept_index == 15
+    assert "summary of middle" in cast_text(request_messages[0])
+    assert request_messages[1:] == messages[15:]
     assert provider.reset_count == 2
-    assert provider.requests[0].messages[0].content[0].text.count("x" * 80) == 5
+    assert provider.requests[0].messages[0].content[0].text.count("x" * 80) == 15
 
 
 def test_compaction_waits_until_threshold() -> None:
@@ -159,7 +159,9 @@ def test_compaction_updates_previous_summary_with_new_middle_messages() -> None:
     assert state is not None
     assert state.summary == "updated summary"
     assert state.summarized_until == 17
-    assert "updated summary" in cast_text(request_messages[10])
+    assert state.first_kept_index == 17
+    assert "updated summary" in cast_text(request_messages[0])
+    assert request_messages[1:] == extended[17:]
     assert "initial summary" in cast_text(provider.requests[1].messages[0])
     assert "new middle" in cast_text(provider.requests[1].messages[0])
 

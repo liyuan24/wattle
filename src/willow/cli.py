@@ -241,6 +241,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Reasoning effort to request when --thinking is enabled.",
     )
     parser.add_argument(
+        "-r",
         "--resume",
         nargs="?",
         const="",

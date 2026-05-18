@@ -24,7 +24,7 @@ import textwrap
 import threading
 import time
 import tty
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -73,6 +73,7 @@ from willow.request_preparation import (
     stream_with_recovery,
 )
 from willow.session import (
+    SessionCompaction,
     SessionEntry,
     SessionRecord,
     SessionSettings,
@@ -98,12 +99,14 @@ with contextlib.suppress(ImportError):
     import readline  # noqa: F401
 
 SLASH_COMMAND_HINTS: tuple[tuple[str, str], ...] = (
+    ("/branch", "copy this conversation into a new session branch"),
     ("/clear", "reset conversation history"),
     ("/exit", "exit the TUI"),
     ("/help", "show commands and settings"),
     ("/login", "authenticate OpenAI Codex with OAuth"),
     ("/model", "choose what model to use"),
     ("/quit", "exit the TUI"),
+    ("/resume", "switch to a saved session"),
     ("/session", "show persistence and saved session path"),
     ("/status", "show session and status details"),
     ("/statusline", "toggle status snapshots in the prompt"),
@@ -427,6 +430,10 @@ def _render_command_hints(value: str) -> str:
 
 def _render_input_hints(value: str, cwd: str | Path | None = None) -> str:
     rows: list[str] = []
+    file_hints = _render_file_hints(value, cwd or Path.cwd())
+    if file_hints:
+        rows.extend(file_hints.splitlines())
+        return "\n".join(rows)
     command_hints = _render_command_hints(value)
     if command_hints:
         rows.extend(command_hints.splitlines())
@@ -434,6 +441,76 @@ def _render_input_hints(value: str, cwd: str | Path | None = None) -> str:
     if skill_hints:
         rows.extend(skill_hints.splitlines())
     return "\n".join(rows)
+
+
+def _render_file_hints(value: str, cwd: str | Path, *, limit: int = 8) -> str:
+    token = _active_at_token(value)
+    if token is None:
+        return ""
+    root = Path(cwd)
+    query = token[1:]
+    matches: list[tuple[int, str]] = []
+    for path in _iter_project_files(root):
+        rel = path.relative_to(root).as_posix()
+        score = _fuzzy_file_score(query, rel)
+        if score is not None:
+            matches.append((score, rel))
+    matches.sort(key=lambda item: (item[0], len(item[1]), item[1]))
+    return "\n".join(_format_at_file_hint(rel) for _score, rel in matches[:limit])
+
+
+def _active_at_token(value: str) -> str | None:
+    stripped = value.rstrip()
+    if not stripped:
+        return None
+    token = stripped.split()[-1]
+    return token if token.startswith("@") else None
+
+
+def _iter_project_files(root: Path) -> Iterator[Path]:
+    ignored_dirs = {
+        ".cache",
+        ".git",
+        ".hg",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".svn",
+        ".venv",
+        "__pycache__",
+        "build",
+        "dist",
+        "node_modules",
+        "venv",
+    }
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        if any(part in ignored_dirs for part in path.relative_to(root).parts):
+            continue
+        yield path
+
+
+def _fuzzy_file_score(query: str, candidate: str) -> int | None:
+    if not query:
+        return 0
+    query_lower = query.lower()
+    candidate_lower = candidate.lower()
+    if query_lower in candidate_lower:
+        return candidate_lower.index(query_lower)
+    position = -1
+    score = 0
+    for char in query_lower:
+        next_position = candidate_lower.find(char, position + 1)
+        if next_position == -1:
+            return None
+        score += next_position - position
+        position = next_position
+    return score + 100
+
+
+def _format_at_file_hint(relative_path: str) -> str:
+    return f"@{shlex.quote(relative_path)}"
 
 
 def _is_incomplete_escape_sequence(text: str) -> bool:
@@ -444,6 +521,8 @@ def _is_incomplete_escape_sequence(text: str) -> bool:
 
 
 def _hint_command(row: str) -> str:
+    if row.startswith("@"):
+        return row
     return row.split(maxsplit=1)[0]
 
 
@@ -522,6 +601,13 @@ def _apply_hint_to_input(
     append_space_when_empty: bool = False,
 ) -> str:
     selected_command = _hint_command(hint_row)
+    if selected_command.startswith("@"):
+        replacement = selected_command[1:]
+        return _replace_active_at_token(
+            buffer,
+            replacement,
+            append_space=append_space_when_empty,
+        )
     stripped = buffer.strip()
     if not stripped:
         return f"{selected_command} " if append_space_when_empty else selected_command
@@ -530,6 +616,24 @@ def _apply_hint_to_input(
     if not rest and append_space_when_empty:
         rest = " "
     return f"{selected_command}{rest}"
+
+
+def _replace_active_at_token(
+    buffer: str,
+    replacement: str,
+    *,
+    append_space: bool = False,
+) -> str:
+    trailing = len(buffer) - len(buffer.rstrip())
+    searchable = buffer.rstrip()
+    token_start = searchable.rfind("@")
+    if token_start == -1:
+        suffix = "" if trailing else (" " if append_space else "")
+        return f"{buffer}{replacement}{suffix}"
+    suffix = " " * trailing
+    if append_space and not suffix:
+        suffix = " "
+    return f"{searchable[:token_start]}{replacement}{suffix}"
 
 
 def _strip_control(text: str) -> str:
@@ -944,6 +1048,15 @@ def _image_context_text(block: ImageBlock) -> str:
     return f"Attached image: {block.filename} ({block.media_type}, {size})"
 
 
+def _file_context_text(path: Path, *, cwd: Path | None = None) -> str:
+    return _relative_file_path(path, cwd=cwd)
+
+
+def _relative_file_path(path: Path, *, cwd: Path | None = None) -> str:
+    root = (cwd or Path.cwd()).resolve()
+    return Path(os.path.relpath(path.resolve(), root)).as_posix()
+
+
 def _format_bytes(size: int) -> str:
     if size >= 1024 * 1024:
         return f"{size / (1024 * 1024):.1f} MB"
@@ -952,7 +1065,7 @@ def _format_bytes(size: int) -> str:
     return f"{size} B"
 
 
-def _candidate_image_paths(text: str, *, cwd: Path | None = None) -> list[Path]:
+def _candidate_file_paths(text: str, *, cwd: Path | None = None) -> list[Path]:
     cwd = cwd or Path.cwd()
     try:
         tokens = shlex.split(text)
@@ -964,8 +1077,7 @@ def _candidate_image_paths(text: str, *, cwd: Path | None = None) -> list[Path]:
         path = _token_to_path(token, cwd=cwd)
         if path is None or path in seen:
             continue
-        media_type, _encoding = mimetypes.guess_type(path.name)
-        if media_type in SUPPORTED_IMAGE_MEDIA_TYPES and path.is_file():
+        if path.is_file():
             candidates.append(path)
             seen.add(path)
     return candidates
@@ -973,6 +1085,8 @@ def _candidate_image_paths(text: str, *, cwd: Path | None = None) -> list[Path]:
 
 def _token_to_path(token: str, *, cwd: Path) -> Path | None:
     stripped = token.strip().strip(".,;:)")
+    if stripped.startswith("@"):
+        stripped = stripped[1:]
     if not stripped:
         return None
     parsed = urlparse(stripped)
@@ -1055,6 +1169,7 @@ class WillowApp:
                 self._session_record = resume_record
                 self._session_path = resume_path or default_session_path(resume_record.metadata.id)
                 self._resume_history_pending = bool(resume_record.messages)
+                self._compaction_state = _runtime_compaction_from_session(resume_record)
             else:
                 self._session_record = new_session(
                     provider=self.current_provider_name,
@@ -1130,6 +1245,8 @@ class WillowApp:
         for image in self._image_blocks_from_text(text):
             content.append(TextBlock(text=_image_context_text(image)))
             content.append(image)
+        for path in self._file_context_paths_from_text(text):
+            content.append(TextBlock(text=_file_context_text(path)))
         return content
 
     def _user_display_text(self, text: str, content: list[ContentBlock]) -> str:
@@ -1139,16 +1256,16 @@ class WillowApp:
 
     def _image_blocks_from_text(self, text: str) -> list[ImageBlock]:
         blocks: list[ImageBlock] = []
-        for path in _candidate_image_paths(text):
+        for path in _candidate_file_paths(text):
             size = path.stat().st_size
+            media_type, _encoding = mimetypes.guess_type(path.name)
+            if media_type not in SUPPORTED_IMAGE_MEDIA_TYPES:
+                continue
             if size > MAX_IMAGE_ATTACHMENT_BYTES:
                 raise ValueError(
                     f"Image is too large: {path} ({_format_bytes(size)}; "
                     f"max {_format_bytes(MAX_IMAGE_ATTACHMENT_BYTES)})"
                 )
-            media_type, _encoding = mimetypes.guess_type(path.name)
-            if media_type not in SUPPORTED_IMAGE_MEDIA_TYPES:
-                continue
             stored_path = self._copy_image_asset(path)
             blocks.append(
                 ImageBlock(
@@ -1159,6 +1276,15 @@ class WillowApp:
                 )
             )
         return blocks
+
+    def _file_context_paths_from_text(self, text: str) -> list[Path]:
+        paths: list[Path] = []
+        for path in _candidate_file_paths(text):
+            media_type, _encoding = mimetypes.guess_type(path.name)
+            if media_type in SUPPORTED_IMAGE_MEDIA_TYPES:
+                continue
+            paths.append(path)
+        return paths
 
     def _copy_image_asset(self, path: Path) -> Path:
         if self._session_record is None:
@@ -1196,6 +1322,7 @@ class WillowApp:
             "effort": self.effort,
             "permission_mode": self.permission_mode,
             "messages": list(self.messages),
+            "compaction_state": self._compaction_state,
             "statusline_enabled": self._statusline_enabled,
             "last_context_tokens": self._last_context_tokens,
             "total_input_tokens": self._total_input_tokens,
@@ -1224,7 +1351,10 @@ class WillowApp:
             prompt=self._ask_tool_permission,
         )
         self.messages = list(cast(list[Message], state.get("messages", self.messages)))
-        self._compaction_state = None
+        self._compaction_state = cast(
+            RuntimeCompaction | None,
+            state.get("compaction_state"),
+        )
         self._statusline_enabled = bool(
             state.get("statusline_enabled", self._statusline_enabled)
         )
@@ -1330,6 +1460,7 @@ class WillowApp:
                 on_compaction_start or self._write_auto_compacting_status
             ),
             on_compaction_end=on_compaction_end,
+            on_compaction_record=self._record_compaction_checkpoint,
         )
 
     def _messages_for_request(
@@ -1536,6 +1667,7 @@ class WillowApp:
             self._total_input_tokens = 0
             self._total_cached_tokens = 0
             self._total_output_tokens = 0
+            self._clear_compaction_records()
             self._write_panel("system", "Conversation cleared.", STATUS_STYLE)
             self._persist_session()
             return False
@@ -1544,6 +1676,12 @@ class WillowApp:
             return False
         if cmd == "/login":
             self._handle_login(rest)
+            return False
+        if cmd == "/branch":
+            self._handle_branch()
+            return False
+        if cmd == "/resume":
+            self._handle_resume(rest)
             return False
         if cmd in ("/session", "/status"):
             self._write_session_status()
@@ -1561,6 +1699,105 @@ class WillowApp:
             return False
         self._write_panel("error", f"Unknown command: {cmd}", ERROR_STYLE)
         return False
+
+    def _handle_branch(self) -> None:
+        if self._session_record is None:
+            self._session_record = new_session(
+                provider=self.current_provider_name,
+                model=self.current_model,
+                system=self.system,
+                max_tokens=self.max_tokens,
+                max_iterations=self.max_iterations,
+                thinking=self.thinking,
+                effort=cast(Any, self.effort),
+            )
+            self._session_path = default_session_path(self._session_record.metadata.id)
+        self._persist_session()
+
+        assert self._session_record is not None
+        parent_record = self._session_record
+        parent_session_id = parent_record.metadata.id
+        branch_record = new_session(
+            provider=self.current_provider_name,
+            model=self.current_model,
+            system=self.system,
+            max_tokens=self.max_tokens,
+            max_iterations=self.max_iterations,
+            thinking=self.thinking,
+            effort=cast(Any, self.effort),
+            title=parent_record.metadata.title,
+            cwd=parent_record.metadata.cwd,
+            parent_session_id=parent_session_id,
+        )
+        branch_record = replace(
+            branch_record,
+            messages=list(self.messages),
+            compactions=list(parent_record.compactions),
+        )
+        self._session_record = branch_record
+        self._session_path = default_session_path(branch_record.metadata.id)
+        self._compaction_state = _runtime_compaction_from_session(branch_record)
+        self._resume_history_pending = False
+        self._persist_session()
+
+        branch_session_id = branch_record.metadata.id
+        self._write_panel(
+            "branch",
+            (
+                "Branched conversation. You are now in the new branch "
+                f"(session {branch_session_id}).\n\n"
+                f"Use /resume {parent_session_id} to return to the original, or run:\n"
+                f"  willow -r {parent_session_id}\n"
+                "in a new terminal."
+            ),
+            STATUS_STYLE,
+        )
+
+    def _handle_resume(self, rest: str) -> None:
+        selector = rest.strip()
+        if not selector:
+            self._write_panel("error", "Usage: /resume SESSION", ERROR_STYLE)
+            return
+        try:
+            record, path = _load_resume_arg(selector)
+            self._switch_to_session(record, path)
+        except Exception as exc:  # noqa: BLE001
+            self._write_panel("error", f"Could not resume session: {exc}", ERROR_STYLE)
+            return
+        self._write_panel(
+            "resumed",
+            f"Resumed session {record.metadata.id}.",
+            STATUS_STYLE,
+        )
+
+    def _switch_to_session(self, record: SessionRecord, path: Path) -> None:
+        if record.settings.provider != self.current_provider_name:
+            from willow.cli import _build_provider
+
+            self.provider = _build_provider(record.settings.provider)
+        self.current_provider_name = record.settings.provider
+        self.current_model = record.settings.model
+        self.system = record.settings.system
+        self.max_tokens = record.settings.max_tokens
+        self.max_iterations = record.settings.max_iterations
+        self.thinking = record.settings.thinking
+        self.effort = cast(str | None, record.settings.effort)
+        self.messages = list(record.messages)
+        self._session_record = record
+        self._session_path = path
+        self._compaction_state = _runtime_compaction_from_session(record)
+        self._resume_history_pending = False
+        self._last_context_tokens = next(
+            (
+                message.input_tokens
+                for message in reversed(record.messages)
+                if message.role == "assistant" and message.input_tokens > 0
+            ),
+            None,
+        )
+        self._total_input_tokens = sum(message.input_tokens for message in record.messages)
+        self._total_cached_tokens = sum(message.cached_tokens for message in record.messages)
+        self._total_output_tokens = sum(message.output_tokens for message in record.messages)
 
     def _handle_login(self, rest: str) -> None:
         provider = rest.strip() or "openai-codex"
@@ -1635,11 +1872,13 @@ class WillowApp:
 
     def _print_help(self) -> None:
         self._write_line("Commands:")
+        self._write_line("  /branch           Copy conversation into a new session branch.")
         self._write_line("  /exit, /quit       Exit Willow.")
         self._write_line("  /clear             Reset conversation history.")
         self._write_line("  /help              Show this message.")
         self._write_line("  /login [openai-codex] Authenticate OpenAI Codex.")
         self._write_line("  /model [name|#]    List or switch models.")
+        self._write_line("  /resume SESSION    Switch to a saved session.")
         self._write_line("  /session, /status  Show persistence and session status.")
         self._write_line("  /statusline [on|off] Toggle status snapshots.")
         self._write_line("")
@@ -1860,8 +2099,38 @@ class WillowApp:
                 effort=cast(Any, self.effort),
             ),
             messages=list(self.messages),
+            compactions=list(self._session_record.compactions),
         )
         self._session_path = save_session(self._session_record, self._session_path)
+
+    def _record_compaction_checkpoint(
+        self,
+        state: RuntimeCompaction,
+        reason: str,
+        tokens_before: int,
+        tokens_after: int,
+    ) -> None:
+        if self._session_record is None:
+            return
+        compaction = SessionCompaction(
+            summary=state.summary,
+            first_kept_message_index=state.first_kept_index,
+            summarized_until_message_index=state.summarized_until,
+            created_after_message_index=len(self.messages),
+            reason=reason,
+            tokens_before=tokens_before,
+            tokens_after=tokens_after,
+        )
+        self._session_record = replace(
+            self._session_record,
+            compactions=[*self._session_record.compactions, compaction],
+        )
+        self._persist_session()
+
+    def _clear_compaction_records(self) -> None:
+        if self._session_record is None:
+            return
+        self._session_record = replace(self._session_record, compactions=[])
 
     def _write(self, text: str) -> None:
         self.out.write(text)
@@ -2456,6 +2725,20 @@ class _LiveTerminal:
         if not rows:
             return False
         selected = rows[self.input_hint_selected]
+        selected_command = _hint_command(selected)
+        if selected_command.startswith("@"):
+            self.buffer = _apply_hint_to_input(
+                self.buffer,
+                selected,
+                append_space_when_empty=True,
+            )
+            self.cursor = len(self.buffer)
+            self.pasted_ranges = []
+            self.input_hint_rows = None
+            self.input_hint_source = ""
+            self.input_hint_selected = 0
+            self._draw_prompt()
+            return True
         text = _apply_hint_to_input(self.buffer, selected)
         if text.strip() in {"/login", "/model"}:
             self.buffer = text.strip()
@@ -3122,12 +3405,24 @@ def _state_from_session(record: SessionRecord) -> dict[str, object]:
         "thinking": record.settings.thinking,
         "effort": record.settings.effort,
         "messages": list(record.messages),
+        "compaction_state": _runtime_compaction_from_session(record),
         "statusline_enabled": True,
         "last_context_tokens": last_context_tokens,
         "total_input_tokens": sum(message.input_tokens for message in record.messages),
         "total_cached_tokens": sum(message.cached_tokens for message in record.messages),
         "total_output_tokens": sum(message.output_tokens for message in record.messages),
     }
+
+
+def _runtime_compaction_from_session(record: SessionRecord) -> RuntimeCompaction | None:
+    if not record.compactions:
+        return None
+    compaction = record.compactions[-1]
+    return RuntimeCompaction(
+        summary=compaction.summary,
+        summarized_until=compaction.summarized_until_message_index,
+        first_kept_index=compaction.first_kept_message_index,
+    )
 
 
 def _apply_resumed_session(

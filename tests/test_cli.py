@@ -68,9 +68,11 @@ def test_build_parser_resume_accepts_optional_session() -> None:
 
     choose_args = parser.parse_args(["--resume"])
     direct_args = parser.parse_args(["--resume", "sess_123"])
+    short_args = parser.parse_args(["-r", "sess_456"])
 
     assert choose_args.resume == ""
     assert direct_args.resume == "sess_123"
+    assert short_args.resume == "sess_456"
 
 
 def test_build_parser_accepts_positional_prompt_for_tui() -> None:
