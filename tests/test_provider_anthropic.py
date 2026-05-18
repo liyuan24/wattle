@@ -14,6 +14,7 @@ import pytest
 from willow.providers import (
     AnthropicProvider,
     CompletionRequest,
+    ImageBlock,
     Message,
     RedactedThinkingBlock,
     StreamComplete,
@@ -141,6 +142,49 @@ def test_request_translation_full_round_trip() -> None:
                 }
             ],
         },
+    ]
+
+
+def test_user_image_block_translates_to_anthropic_image(tmp_path) -> None:
+    image = tmp_path / "shot.png"
+    image.write_bytes(b"image-bytes")
+    request = CompletionRequest(
+        model="claude-opus-4-7",
+        max_tokens=512,
+        messages=[
+            Message(
+                role="user",
+                content=[
+                    TextBlock(text="What is shown?"),
+                    ImageBlock(
+                        path=str(image),
+                        media_type="image/png",
+                        filename="shot.png",
+                        size_bytes=11,
+                    ),
+                ],
+            )
+        ],
+    )
+    provider, client = _make_provider(_canned_response())
+
+    provider.complete(request)
+
+    assert client.messages.create.call_args.kwargs["messages"] == [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "What is shown?"},
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/png",
+                        "data": "aW1hZ2UtYnl0ZXM=",
+                    },
+                },
+            ],
+        }
     ]
 
 

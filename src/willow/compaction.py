@@ -12,6 +12,7 @@ from dataclasses import dataclass
 
 from willow.providers import (
     CompletionRequest,
+    ImageBlock,
     Message,
     Provider,
     StreamComplete,
@@ -242,6 +243,11 @@ def serialize_messages(messages: list[Message]) -> str:
 def _serialize_block(block: object) -> str:
     if isinstance(block, TextBlock):
         return block.text
+    if isinstance(block, ImageBlock):
+        return (
+            f"[image] {block.filename} media_type={block.media_type} "
+            f"size_bytes={block.size_bytes}"
+        )
     if isinstance(block, ToolUseBlock):
         args = json.dumps(block.input, sort_keys=True, default=str)
         return f"[tool use] id={block.id} name={block.name} input={args}"
@@ -325,6 +331,8 @@ def _estimate_text_tokens(text: str) -> int:
 def _estimate_content_block_tokens(block: object) -> int:
     if isinstance(block, TextBlock):
         return _estimate_text_tokens(block.text)
+    if isinstance(block, ImageBlock):
+        return 1024 + _estimate_text_tokens(block.filename)
     if isinstance(block, ToolResultBlock):
         return _estimate_text_tokens(block.tool_use_id) + _estimate_text_tokens(block.content)
     if isinstance(block, ToolUseBlock):

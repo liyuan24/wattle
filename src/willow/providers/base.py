@@ -49,6 +49,23 @@ class TextBlock:
 
 
 @dataclass(frozen=True, slots=True)
+class ImageBlock:
+    """A local image attachment supplied by the user.
+
+    ``path`` points at a readable local file, usually copied into Willow's
+    session assets directory. Provider adapters read and encode the file at
+    request time so session records stay inspectable instead of embedding
+    base64 payloads inline.
+    """
+
+    path: str
+    media_type: str
+    filename: str
+    size_bytes: int
+    type: Literal["image"] = "image"
+
+
+@dataclass(frozen=True, slots=True)
 class ToolUseBlock:
     """An assistant request to invoke a tool.
 
@@ -129,7 +146,12 @@ class RedactedThinkingBlock:
 
 
 ContentBlock = (
-    TextBlock | ToolUseBlock | ToolResultBlock | ThinkingBlock | RedactedThinkingBlock
+    TextBlock
+    | ImageBlock
+    | ToolUseBlock
+    | ToolResultBlock
+    | ThinkingBlock
+    | RedactedThinkingBlock
 )
 
 
@@ -146,7 +168,7 @@ class Message:
     """One turn in the conversation.
 
     Assistant messages may contain TextBlock and ToolUseBlock entries.
-    User messages may contain TextBlock and ToolResultBlock entries.
+    User messages may contain TextBlock, ImageBlock, and ToolResultBlock entries.
     The loop never produces a raw string — content is always a list of blocks.
 
     Content is a list because a single turn can carry multiple blocks: an

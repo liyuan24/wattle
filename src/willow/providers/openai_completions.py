@@ -52,8 +52,10 @@ Responses provider for reasoning-heavy tasks.
 
 from __future__ import annotations
 
+import base64
 import json
 from collections.abc import Iterable, Iterator
+from pathlib import Path
 from typing import Any, Literal, TypedDict
 
 import openai
@@ -64,6 +66,7 @@ from .base import (
     CompletionRequest,
     CompletionResponse,
     ContentBlock,
+    ImageBlock,
     Message,
     Provider,
     StopReason,
@@ -369,15 +372,24 @@ def _message_to_wire(message: Message) -> list[dict[str, Any]]:
 
     if message.role == "user":
         tool_results = [b for b in blocks if isinstance(b, ToolResultBlock)]
+        image_blocks = [b for b in blocks if isinstance(b, ImageBlock)]
         text = _concat_text(blocks, separator="\n\n")
+        user_content: str | list[dict[str, Any]]
+        if image_blocks:
+            user_content = []
+            if text:
+                user_content.append({"type": "text", "text": text})
+            user_content.extend(_image_to_wire_part(block) for block in image_blocks)
+        else:
+            user_content = text
         if tool_results:
             user_wire: list[dict[str, Any]] = [
                 _tool_result_to_wire(b) for b in tool_results
             ]
-            if text:
-                user_wire.append({"role": "user", "content": text})
+            if text or image_blocks:
+                user_wire.append({"role": "user", "content": user_content})
             return user_wire
-        return [{"role": "user", "content": text}]
+        return [{"role": "user", "content": user_content}]
 
     # assistant
     text = _concat_text(blocks)
@@ -415,6 +427,14 @@ def _tool_result_to_wire(block: ToolResultBlock) -> dict[str, Any]:
         "role": "tool",
         "tool_call_id": block.tool_use_id,
         "content": content,
+    }
+
+
+def _image_to_wire_part(block: ImageBlock) -> dict[str, Any]:
+    data = base64.b64encode(Path(block.path).read_bytes()).decode("ascii")
+    return {
+        "type": "image_url",
+        "image_url": {"url": f"data:{block.media_type};base64,{data}"},
     }
 
 

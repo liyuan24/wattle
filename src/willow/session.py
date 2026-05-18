@@ -19,6 +19,7 @@ from typing import Any, Literal, cast
 
 from willow.providers import (
     ContentBlock,
+    ImageBlock,
     Message,
     RedactedThinkingBlock,
     Role,
@@ -339,6 +340,14 @@ def content_block_to_dict(block: ContentBlock) -> dict[str, Any]:
     """Serialize the current Willow content block union."""
     if isinstance(block, TextBlock):
         return {"type": "text", "text": block.text}
+    if isinstance(block, ImageBlock):
+        return {
+            "type": "image",
+            "path": block.path,
+            "media_type": block.media_type,
+            "filename": block.filename,
+            "size_bytes": block.size_bytes,
+        }
     if isinstance(block, ToolUseBlock):
         return {
             "type": "tool_use",
@@ -372,6 +381,13 @@ def content_block_from_dict(data: Any) -> ContentBlock:
     block_type = _require_str(data, "type")
     if block_type == "text":
         return TextBlock(text=_require_str(data, "text"))
+    if block_type == "image":
+        return ImageBlock(
+            path=_require_str(data, "path"),
+            media_type=_require_str(data, "media_type"),
+            filename=_require_str(data, "filename"),
+            size_bytes=_require_int(data, "size_bytes"),
+        )
     if block_type == "tool_use":
         return ToolUseBlock(
             id=_require_str(data, "id"),

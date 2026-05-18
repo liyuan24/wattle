@@ -19,6 +19,7 @@ import pytest
 
 from willow.providers import (
     CompletionRequest,
+    ImageBlock,
     Message,
     OpenAICompletionsProvider,
     StreamComplete,
@@ -151,6 +152,47 @@ def test_request_translation_full_shape() -> None:
         "content": "file.txt",
     }
     assert len(messages) == 4
+
+
+def test_user_image_block_translates_to_chat_image_part(tmp_path) -> None:
+    image = tmp_path / "shot.png"
+    image.write_bytes(b"image-bytes")
+    client = _make_client(_fake_response(content="ok"))
+    provider = OpenAICompletionsProvider(client=client)
+
+    provider.complete(
+        CompletionRequest(
+            model="gpt-4o-mini",
+            max_tokens=64,
+            messages=[
+                Message(
+                    role="user",
+                    content=[
+                        TextBlock(text="What is shown?"),
+                        ImageBlock(
+                            path=str(image),
+                            media_type="image/png",
+                            filename="shot.png",
+                            size_bytes=11,
+                        ),
+                    ],
+                )
+            ],
+        )
+    )
+
+    assert client.chat.completions.create.call_args.kwargs["messages"] == [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "What is shown?"},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "data:image/png;base64,aW1hZ2UtYnl0ZXM="},
+                },
+            ],
+        }
+    ]
 
 
 def test_user_text_blocks_are_separated_when_flattened() -> None:

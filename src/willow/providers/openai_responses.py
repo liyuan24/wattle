@@ -79,8 +79,10 @@ When `True`, the effort is resolved in this order:
 
 from __future__ import annotations
 
+import base64
 import json
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any, Literal
 
 import openai
@@ -91,6 +93,7 @@ from .base import (
     CompletionRequest,
     CompletionResponse,
     ContentBlock,
+    ImageBlock,
     Message,
     Provider,
     StopReason,
@@ -375,6 +378,19 @@ def _block_to_input_item(role: str, block: ContentBlock) -> dict[str, Any] | Non
             "role": "user",
             "content": [{"type": "input_text", "text": block.text}],
         }
+    if isinstance(block, ImageBlock):
+        if role != "user":
+            return None
+        return {
+            "type": "message",
+            "role": "user",
+            "content": [
+                {
+                    "type": "input_image",
+                    "image_url": _image_data_url(block),
+                }
+            ],
+        }
     if isinstance(block, ToolUseBlock):
         return {
             "type": "function_call",
@@ -407,6 +423,11 @@ def _block_to_input_item(role: str, block: ContentBlock) -> dict[str, Any] | Non
             item["encrypted_content"] = block.encrypted_content
         return item
     raise TypeError(f"Unknown content block type: {type(block).__name__}")
+
+
+def _image_data_url(block: ImageBlock) -> str:
+    data = base64.b64encode(Path(block.path).read_bytes()).decode("ascii")
+    return f"data:{block.media_type};base64,{data}"
 
 
 # ---------------------------------------------------------------------------

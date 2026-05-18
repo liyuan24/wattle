@@ -15,6 +15,7 @@ import pytest
 
 from willow.providers import (
     CompletionRequest,
+    ImageBlock,
     Message,
     OpenAIResponsesProvider,
     StreamComplete,
@@ -156,6 +157,50 @@ def test_first_call_translation_full_round_trip() -> None:
             "type": "function_call_output",
             "call_id": "call_42",
             "output": "sunny, 22C",
+        },
+    ]
+
+
+def test_user_image_block_translates_to_input_image(tmp_path) -> None:
+    image = tmp_path / "shot.png"
+    image.write_bytes(b"image-bytes")
+    request = CompletionRequest(
+        model="gpt-5",
+        max_tokens=512,
+        messages=[
+            Message(
+                role="user",
+                content=[
+                    TextBlock(text="What is shown?"),
+                    ImageBlock(
+                        path=str(image),
+                        media_type="image/png",
+                        filename="shot.png",
+                        size_bytes=11,
+                    ),
+                ],
+            )
+        ],
+    )
+    provider, client = _make_provider(_canned_response())
+
+    provider.complete(request)
+
+    assert client.responses.create.call_args.kwargs["input"] == [
+        {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "What is shown?"}],
+        },
+        {
+            "type": "message",
+            "role": "user",
+            "content": [
+                {
+                    "type": "input_image",
+                    "image_url": "data:image/png;base64,aW1hZ2UtYnl0ZXM=",
+                }
+            ],
         },
     ]
 

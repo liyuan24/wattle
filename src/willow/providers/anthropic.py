@@ -47,7 +47,9 @@ Anthropic prompt caching is enabled for every request:
 
 from __future__ import annotations
 
+import base64
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 import anthropic
@@ -56,6 +58,7 @@ from .base import (
     CompletionRequest,
     CompletionResponse,
     ContentBlock,
+    ImageBlock,
     Message,
     Provider,
     RedactedThinkingBlock,
@@ -224,6 +227,15 @@ def _system_text_block(system: str) -> dict[str, Any]:
 def _block_to_api(block: ContentBlock) -> dict[str, Any]:
     if isinstance(block, TextBlock):
         return {"type": "text", "text": block.text}
+    if isinstance(block, ImageBlock):
+        return {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": block.media_type,
+                "data": base64.b64encode(Path(block.path).read_bytes()).decode("ascii"),
+            },
+        }
     if isinstance(block, ToolUseBlock):
         return {
             "type": "tool_use",

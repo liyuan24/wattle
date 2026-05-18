@@ -10,6 +10,7 @@ import pytest
 
 from willow import session
 from willow.providers import (
+    ImageBlock,
     Message,
     RedactedThinkingBlock,
     TextBlock,
@@ -129,6 +130,12 @@ def test_message_and_content_block_helpers_are_explicit() -> None:
         role="assistant",
         content=[
             TextBlock(text="hello"),
+            ImageBlock(
+                path="/tmp/screenshot.png",
+                media_type="image/png",
+                filename="screenshot.png",
+                size_bytes=123,
+            ),
             ToolUseBlock(id="call_1", name="read", input={"path": "README.md"}),
         ],
     )
@@ -142,6 +149,13 @@ def test_message_and_content_block_helpers_are_explicit() -> None:
         "cached_tokens": 0,
         "content": [
             {"type": "text", "text": "hello"},
+            {
+                "type": "image",
+                "path": "/tmp/screenshot.png",
+                "media_type": "image/png",
+                "filename": "screenshot.png",
+                "size_bytes": 123,
+            },
             {
                 "type": "tool_use",
                 "id": "call_1",
@@ -240,7 +254,7 @@ def test_load_rejects_unknown_schema_version(tmp_path: Path) -> None:
 
 def test_load_rejects_unknown_content_block_type() -> None:
     with pytest.raises(ValueError, match="unsupported content block type"):
-        session.content_block_from_dict({"type": "image", "url": "https://example.test/x.png"})
+        session.content_block_from_dict({"type": "audio", "url": "https://example.test/x.mp3"})
 
 
 def test_load_rejects_invalid_message_role() -> None:

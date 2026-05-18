@@ -20,6 +20,7 @@ from willow.models import ModelChoice
 from willow.providers import (
     CompletionRequest,
     CompletionResponse,
+    ImageBlock,
     Message,
     Provider,
     StreamComplete,
@@ -730,6 +731,39 @@ def test_terminal_appends_without_rewriting_scrollback() -> None:
     assert all(sequence not in out for sequence in forbidden)
 
 
+def test_basic_tui_writes_worked_duration_when_turn_finishes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ticks = iter([10.0, 75.0])
+    monkeypatch.setattr(tui.time, "monotonic", lambda: next(ticks))
+    response = CompletionResponse(content=[TextBlock(text="done")], stop_reason="end_turn")
+    provider = _ScriptedStreamProvider([[StreamComplete(response=response)]])
+
+    out, _app = _drive(provider, ["hello", "/exit"])
+
+    assert "Worked for 1m 5s" in out
+    assert "[status] Worked" not in out
+
+
+def test_tui_attaches_local_image_from_user_text(tmp_path: Path) -> None:
+    image = tmp_path / "debug shot.png"
+    image.write_bytes(b"fake-png")
+    out = _TTYBuffer()
+    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+
+    assert app._submit_user_text(f'check image at "{image}"', render=True)
+
+    message = app.messages[-1]
+    assert message.role == "user"
+    assert isinstance(message.content[0], TextBlock)
+    assert isinstance(message.content[1], TextBlock)
+    assert isinstance(message.content[2], ImageBlock)
+    assert message.content[2].path == str(image.resolve())
+    assert message.content[2].media_type == "image/png"
+    assert "Attached image: debug shot.png" in message.content[1].text
+    assert "[image] debug shot.png" in out.getvalue()
+
+
 def test_assistant_text_uses_terminal_background() -> None:
     out = _TTYBuffer()
     app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
@@ -746,9 +780,67 @@ def test_assistant_text_uses_terminal_background() -> None:
     assert "48;5" not in tui.ASSISTANT_STYLE
     assert "48;5" not in tui.THINKING_STYLE
     assert "48;5" in tui.PROMPT_STYLE
+    assert "48;5;30" in tui.USER_STYLE
+    assert tui.USER_STYLE == tui.PROMPT_STYLE
     assert "you" not in rendered
     assert "assistant" not in rendered
     assert rendered.count(tui.RESET) >= 3
+
+
+def test_chat_text_blocks_have_vertical_padding() -> None:
+    out = _TTYBuffer()
+    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+    app._terminal_width = lambda: 10  # type: ignore[method-assign]
+
+    app._write_block("hello", tui.USER_STYLE)
+    app._write_block("hi", tui.ASSISTANT_STYLE)
+
+    rendered_lines = _strip_ansi(out.getvalue()).splitlines()
+    assert rendered_lines == [
+        " " * 10,
+        " hello    ",
+        " " * 10,
+        " " * 10,
+        " hi       ",
+        " " * 10,
+    ]
+
+
+def test_user_history_block_clears_full_terminal_rows() -> None:
+    out = _TTYBuffer()
+    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+    app._terminal_width = lambda: 10  # type: ignore[method-assign]
+
+    app._write_block("hello", tui.USER_STYLE)
+
+    rendered = out.getvalue()
+    assert rendered.count("\x1b[?7l") == 3
+    assert rendered.count("\x1b[2K") == 3
+    assert rendered.count("\x1b[?7h") == 3
+
+
+def test_styled_terminal_line_clears_before_applying_background() -> None:
+    rendered = tui._styled_terminal_line("hi", tui.PROMPT_STYLE, 8)
+
+    assert f"{tui.RESET}\x1b[2K{tui.PROMPT_STYLE}" in rendered
+    assert f"{tui.PROMPT_STYLE}\x1b[2K" not in rendered
+    assert _strip_ansi(rendered) == "hi".ljust(8)
+
+
+def test_terminal_width_allows_zoomed_terminals_below_forty_columns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    out = _TTYBuffer()
+    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    monkeypatch.setattr(
+        tui.shutil,
+        "get_terminal_size",
+        lambda _fallback: os.terminal_size((28, 24)),
+    )
+
+    assert app._terminal_width() == 28
 
 
 def test_styled_transcript_wraps_long_lines_without_dropping_text() -> None:
@@ -764,6 +856,30 @@ def test_styled_transcript_wraps_long_lines_without_dropping_text() -> None:
     assert "mnopqrstuvw" in rendered
     assert "xyz" in rendered
     assert "z           " in rendered
+
+
+def test_assistant_markdown_renders_as_terminal_text() -> None:
+    out = _TTYBuffer()
+    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+    app._terminal_width = lambda: 40  # type: ignore[method-assign]
+
+    app._write_block(
+        "# Plan\n\n- **Build** it\n- Use `pytest`\n\n```python\nprint('ok')\n```",
+        tui.ASSISTANT_STYLE,
+    )
+
+    rendered = out.getvalue()
+    visible = _strip_ansi(rendered)
+    assert "Plan" in visible
+    assert "• Build it" in visible
+    assert "• Use pytest" in visible
+    assert "print('ok')" in visible
+    assert "# Plan" not in visible
+    assert "**Build**" not in visible
+    assert "`pytest`" not in visible
+    assert "```" not in visible
+    assert tui.TOOL_PREVIEW_STYLE in rendered
 
 
 def test_running_terminal_line_animates_without_changing_text() -> None:
@@ -792,6 +908,10 @@ def test_running_terminal_line_animates_without_changing_text() -> None:
 )
 def test_format_elapsed_compact(seconds: int, expected: str) -> None:
     assert tui._format_elapsed_compact(seconds) == expected
+
+
+def test_worked_duration_text_uses_compact_elapsed_format() -> None:
+    assert tui._worked_duration_text(10.0, ended_at=85.0) == "Worked for 1m 15s"
 
 
 def test_tool_running_title_collapses_multiline_bash_command() -> None:
@@ -835,6 +955,13 @@ def test_live_prompt_box_shows_working_when_streaming_without_input() -> None:
     assert live.prompt_lines == 7
     assert live.prompt_cursor_offset_from_bottom == 2
     assert "\r\x1b[3C\x1b[?25h" in rendered
+    visible_lines = _strip_ansi(rendered).splitlines()
+    working_line_index = next(
+        index for index, line in enumerate(visible_lines) if "working..." in line
+    )
+    assert working_line_index > 0
+    assert visible_lines[working_line_index - 1].strip() == ""
+    assert visible_lines[working_line_index + 1].strip() == ""
     assert _strip_ansi(rendered).index("working...") < _strip_ansi(rendered).index(" > ")
     assert "streaming" not in rendered
     assert "ready" not in rendered
@@ -853,6 +980,13 @@ def test_live_active_tool_status_has_gap_before_input_box() -> None:
     rendered = _strip_ansi(out.getvalue())
     assert "running bash - pytest" in rendered
     assert "running bash - pytest" in rendered[: rendered.index(" > ")]
+    visible_lines = rendered.splitlines()
+    running_line_index = next(
+        index for index, line in enumerate(visible_lines) if "running bash - pytest" in line
+    )
+    assert running_line_index > 0
+    assert visible_lines[running_line_index - 1].strip() == ""
+    assert visible_lines[running_line_index + 1].strip() == ""
     assert live.prompt_lines == 7
     assert live.prompt_cursor_offset_from_bottom == 2
 
@@ -874,7 +1008,7 @@ def test_live_running_status_redraw_does_not_repaint_input_box() -> None:
     assert "running bash - pytest" in _strip_ansi(rendered)
     assert " > " not in rendered
     assert tui.PROMPT_STYLE not in rendered
-    assert "\x1b[2K" not in rendered
+    assert "\x1b[2K" in rendered
 
 
 def test_live_prompt_box_switches_to_type_box_when_streaming_with_input() -> None:
@@ -934,6 +1068,30 @@ def test_live_prompt_wraps_long_input_across_lines() -> None:
     assert "\x1b[8C\x1b[?25h" in rendered
 
 
+def test_live_prompt_growing_input_overwrites_without_full_clear() -> None:
+    out = _TTYBuffer()
+    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+    app._statusline_enabled = False
+    app._terminal_width = lambda: 10  # type: ignore[method-assign]
+    live = tui._LiveTerminal(app)
+    live.buffer = "abcdefg"
+    live.cursor = len(live.buffer)
+    live._draw_prompt()
+
+    out.seek(0)
+    out.truncate(0)
+    live.buffer = "abcdefghijkl"
+    live.cursor = len(live.buffer)
+    live._draw_prompt()
+
+    rendered = out.getvalue()
+    assert " > abcdefg" in rendered
+    assert "   hijkl" in rendered
+    assert "\x1b[1A\r\x1b[2K" not in rendered
+    assert live.prompt_lines == 4
+
+
 def test_live_prompt_collapses_pasted_content_placeholder() -> None:
     out = _TTYBuffer()
     app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
@@ -967,8 +1125,32 @@ def test_live_prompt_clear_accounts_for_terminal_zoom_in() -> None:
     live._draw_prompt()
 
     rendered = out.getvalue()
-    assert rendered.count("\x1b[1A\r\x1b[2K") >= 3
+    assert "\x1b[5B" in rendered
+    assert rendered.count("\x1b[1A\r\x1b[2K") >= 7
     assert live.prompt_width == 10
+
+
+def test_live_prompt_clear_accounts_for_cursor_line_reflow_after_zoom_in() -> None:
+    out = _TTYBuffer()
+    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+    app._statusline_enabled = False
+    widths = [24]
+    app._terminal_width = lambda: widths[-1]  # type: ignore[method-assign]
+    live = tui._LiveTerminal(app)
+    live.buffer = "abc"
+    live.cursor = len(live.buffer)
+
+    live._draw_prompt()
+    out.seek(0)
+    out.truncate(0)
+    widths.append(8)
+    live._draw_prompt()
+
+    rendered = out.getvalue()
+    assert "\x1b[5B" in rendered
+    assert rendered.count("\x1b[1A\r\x1b[2K") >= 8
+    assert live.prompt_width == 8
 
 
 def test_live_prompt_redraw_flushes_one_frame() -> None:
@@ -2324,6 +2506,34 @@ def test_edit_tool_result_renders_diff_review_style() -> None:
     assert "    1 +hello" in rendered
     assert "    2 +world" in rendered
     assert tui.DIFF_ADD_STYLE in rendered
+
+
+def test_write_added_file_renders_full_diff_preview() -> None:
+    out = _TTYBuffer()
+    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+    path = "/app/kv-store.proto"
+    added_lines = [f"+line {index}" for index in range(1, 24)]
+    block = ToolUseBlock(id="call_1", name="write", input={"path": path})
+    result = ToolResultBlock(
+        tool_use_id="call_1",
+        content="\n".join(
+            [
+                f"Wrote 200 bytes to {path}",
+                f"--- {path} (before)",
+                f"+++ {path} (after)",
+                "@@ -0,0 +1,23 @@",
+                *added_lines,
+            ]
+        ),
+    )
+
+    app._write_tool_result(block, result)
+
+    rendered = out.getvalue()
+    assert f"write ok - added {path} (+23 -0)" in rendered
+    assert "   23 +line 23" in rendered
+    assert "changed lines" not in rendered
 
 
 def test_terminal_deduplicates_separators_between_consecutive_tool_turns(

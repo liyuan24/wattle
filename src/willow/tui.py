@@ -10,9 +10,13 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
+import mimetypes
 import os
 import queue
+import re
 import select
+import shlex
 import shutil
 import sys
 import termios
@@ -25,6 +29,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, TextIO, cast
+from urllib.parse import unquote, urlparse
 
 from willow.auth import login_openai_codex
 from willow.compaction import RuntimeCompaction
@@ -50,6 +55,7 @@ from willow.permissions import (
 from willow.providers import (
     CompletionResponse,
     ContentBlock,
+    ImageBlock,
     Message,
     Provider,
     StreamComplete,
@@ -70,6 +76,7 @@ from willow.session import (
     SessionEntry,
     SessionRecord,
     SessionSettings,
+    default_session_dir,
     default_session_path,
     list_sessions,
     load_session,
@@ -106,6 +113,10 @@ LOGIN_PROVIDER_CHOICES: tuple[tuple[str, str], ...] = (
     ("openai-codex", "ChatGPT Plus/Pro Codex OAuth"),
 )
 PASTE_PLACEHOLDER_MIN_CHARS = 200
+MAX_IMAGE_ATTACHMENT_BYTES = 20 * 1024 * 1024
+SUPPORTED_IMAGE_MEDIA_TYPES = frozenset(
+    {"image/png", "image/jpeg", "image/webp", "image/gif"}
+)
 ESCAPE_SEQUENCE_TIMEOUT_SECONDS = 0.05
 KEYBOARD_ENHANCEMENT_ENABLE = "\x1b[>1u\x1b[>4;2m"
 KEYBOARD_ENHANCEMENT_DISABLE = "\x1b[<u\x1b[>4m"
@@ -141,7 +152,8 @@ KNOWN_ESCAPE_SEQUENCES = (
 RESET = "\x1b[0m"
 DIM = "\x1b[2m"
 BOLD = "\x1b[1m"
-USER_STYLE = "\x1b[48;5;24;38;5;231m"
+USER_STYLE = "\x1b[48;5;30;38;5;231m"
+MESSAGE_BLOCK_VERTICAL_PADDING = 1
 ASSISTANT_STYLE = "\x1b[38;5;255m"
 THINKING_STYLE = "\x1b[38;5;245;3m"
 TOOL_STYLE = "\x1b[48;5;58;38;5;230m"
@@ -162,7 +174,7 @@ STATUS_STYLE = "\x1b[48;5;238;38;5;250m"
 STATUS_MODEL_STYLE = "\x1b[48;5;238;38;5;82;1m"
 STATUS_TOKEN_STYLE = "\x1b[48;5;238;38;5;203;1m"
 COMPACTION_STYLE = "\x1b[48;5;54;38;5;231;1m"
-PROMPT_STYLE = "\x1b[48;5;23;38;5;231m"
+PROMPT_STYLE = "\x1b[48;5;30;38;5;231m"
 ERROR_STYLE = "\x1b[48;5;52;38;5;231m"
 PROMPT_MARKER_STYLE = "\x1b[48;5;23;38;5;51;1m"
 SELECTED_ROW_STYLE = "\x1b[48;5;240;38;5;255;1m"
@@ -251,7 +263,13 @@ def _diff_counts(diff_lines: list[str]) -> tuple[int, int]:
     return added, deleted
 
 
-def _diff_preview_lines(diff_lines: list[str], *, max_changes: int = 12) -> list[tuple[str, str]]:
+def _diff_starts_from_empty_old_file(diff_lines: list[str]) -> bool:
+    return any(line.startswith("@@ -0,0 ") for line in diff_lines)
+
+
+def _diff_preview_lines(
+    diff_lines: list[str], *, max_changes: int | None = 12
+) -> list[tuple[str, str]]:
     rows: list[tuple[str, str]] = []
     old_line = 0
     new_line = 0
@@ -299,11 +317,11 @@ def _append_diff_row(
     *,
     shown_changes: int,
     omitted_changes: int,
-    max_changes: int,
+    max_changes: int | None,
     kind: str,
     line: str,
 ) -> tuple[int, int]:
-    if shown_changes < max_changes:
+    if max_changes is None or shown_changes < max_changes:
         rows.append((kind, line))
         shown_changes += 1
     else:
@@ -419,7 +437,10 @@ def _render_input_hints(value: str, cwd: str | Path | None = None) -> str:
 
 
 def _is_incomplete_escape_sequence(text: str) -> bool:
-    return any(sequence != text and sequence.startswith(text) for sequence in KNOWN_ESCAPE_SEQUENCES)
+    return any(
+        sequence != text and sequence.startswith(text)
+        for sequence in KNOWN_ESCAPE_SEQUENCES
+    )
 
 
 def _hint_command(row: str) -> str:
@@ -435,7 +456,7 @@ def _render_model_picker_rows(
     styles_enabled: bool,
 ) -> list[str]:
     if not choices:
-        text = " No models available. Add openai or anthropic auth to ~/.willow/auth.json."
+        text = " No models available. Add provider auth to ~/.willow/auth.json."
         return [f"{STATUS_STYLE}{text[:width].ljust(width)}{RESET}" if styles_enabled else text]
 
     model_width = max(len(choice.model) for choice in choices)
@@ -530,6 +551,20 @@ class _PromptInputLines:
     lines: list[str]
     cursor_line: int
     cursor_column: int
+
+
+@dataclass(frozen=True)
+class _PromptFrame:
+    rows: list[str]
+    width: int
+    cursor_line_index: int
+    cursor_column: int
+
+
+@dataclass(frozen=True)
+class _RenderedTextLine:
+    text: str
+    style: str
 
 
 def _merge_pasted_ranges(ranges: list[tuple[int, int]]) -> list[tuple[int, int]]:
@@ -740,14 +775,19 @@ def _styled_terminal_line(text: str, style: str, width: int) -> str:
     # Temporarily disable terminal autowrap while filling the final column.
     # This lets prompt rows occupy the full width without creating phantom
     # wrapped rows that survive terminal zoom/resizes.
-    return f"\x1b[?7l{style}{text[:visible_width].ljust(visible_width)}{RESET}\x1b[?7h"
+    line = text[:visible_width].ljust(visible_width)
+    return f"\x1b[?7l{RESET}\x1b[2K{style}{line}{RESET}\x1b[?7h"
+
+
+def _filled_terminal_line(rendered: str, fill_style: str) -> str:
+    return f"\x1b[?7l{RESET}\x1b[2K{fill_style}{rendered}{RESET}\x1b[?7h"
 
 
 def _running_terminal_line(text: str, width: int, *, frame: int) -> str:
     visible_width = _terminal_line_width(width)
     line = text[:visible_width].ljust(visible_width)
     highlight = frame % (visible_width + 8) - 4
-    parts = ["\x1b[?7l"]
+    parts = ["\x1b[?7l\x1b[0m\x1b[2K"]
     for index, char in enumerate(line):
         distance = abs(index - highlight)
         if distance == 0:
@@ -767,7 +807,112 @@ def _running_terminal_line(text: str, width: int, *, frame: int) -> str:
 
 def _black_terminal_line(text: str, width: int) -> str:
     visible_width = _terminal_line_width(width)
-    return f"\x1b[?7l\x1b[40;38;5;255m{text[:visible_width].ljust(visible_width)}{RESET}\x1b[?7h"
+    line = text[:visible_width].ljust(visible_width)
+    return f"\x1b[?7l\x1b[0m\x1b[2K\x1b[40;38;5;255m{line}{RESET}\x1b[?7h"
+
+
+_HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
+_BULLET_RE = re.compile(r"^(\s*)[-*+]\s+(.+)$")
+_NUMBERED_RE = re.compile(r"^(\s*)(\d+[.)])\s+(.+)$")
+_LINK_RE = re.compile(r"!?\[([^\]]*)\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
+_INLINE_CODE_RE = re.compile(r"`([^`]+)`")
+_STRONG_RE = re.compile(r"(\*\*|__)(.+?)\1")
+_EMPHASIS_RE = re.compile(r"(?<!\*)\*([^*\n]+)\*(?!\*)|(?<!_)_([^_\n]+)_(?!_)")
+_STRIKE_RE = re.compile(r"~~(.+?)~~")
+
+
+def _strip_inline_markdown(text: str) -> str:
+    def link_replacement(match: re.Match[str]) -> str:
+        label = match.group(1).strip()
+        target = match.group(2).strip()
+        if not label:
+            return target
+        if match.group(0).startswith("!"):
+            return label
+        return f"{label} ({target})"
+
+    text = _LINK_RE.sub(link_replacement, text)
+    text = _INLINE_CODE_RE.sub(lambda match: match.group(1), text)
+    text = _STRONG_RE.sub(lambda match: match.group(2), text)
+    text = _EMPHASIS_RE.sub(lambda match: match.group(1) or match.group(2), text)
+    text = _STRIKE_RE.sub(lambda match: match.group(1), text)
+    return re.sub(r"\\([\\`*_{}\[\]()#+\-.!|>])", r"\1", text)
+
+
+def _render_markdown_text(text: str, *, width: int) -> list[_RenderedTextLine]:
+    rows: list[_RenderedTextLine] = []
+    in_code_fence = False
+
+    for raw_line in text.splitlines() or [""]:
+        line = raw_line.rstrip()
+        stripped = line.strip()
+
+        if stripped.startswith(("```", "~~~")):
+            in_code_fence = not in_code_fence
+            continue
+
+        if in_code_fence:
+            rows.append(_RenderedTextLine(f"    {line}", TOOL_PREVIEW_STYLE))
+            continue
+
+        if not stripped:
+            rows.append(_RenderedTextLine("", ASSISTANT_STYLE))
+            continue
+
+        heading = _HEADING_RE.match(line)
+        if heading:
+            rows.append(
+                _RenderedTextLine(
+                    _strip_inline_markdown(heading.group(2).strip()),
+                    f"{ASSISTANT_STYLE}{BOLD}",
+                )
+            )
+            continue
+
+        if re.fullmatch(r"\s{0,3}([-*_])(?:\s*\1){2,}\s*", line):
+            rows.append(_RenderedTextLine("─" * max(3, width - 1), SEPARATOR_STYLE))
+            continue
+
+        quote_depth = 0
+        quote_text = line.lstrip()
+        while quote_text.startswith(">"):
+            quote_depth += 1
+            quote_text = quote_text[1:].lstrip()
+        if quote_depth:
+            rows.append(
+                _RenderedTextLine(
+                    f"{'│ ' * quote_depth}{_strip_inline_markdown(quote_text)}",
+                    THINKING_STYLE,
+                )
+            )
+            continue
+
+        bullet = _BULLET_RE.match(line)
+        if bullet:
+            indent = " " * len(bullet.group(1).expandtabs(2))
+            rows.append(
+                _RenderedTextLine(
+                    f"{indent}• {_strip_inline_markdown(bullet.group(2).strip())}",
+                    ASSISTANT_STYLE,
+                )
+            )
+            continue
+
+        numbered = _NUMBERED_RE.match(line)
+        if numbered:
+            indent = " " * len(numbered.group(1).expandtabs(2))
+            rows.append(
+                _RenderedTextLine(
+                    f"{indent}{numbered.group(2)} "
+                    f"{_strip_inline_markdown(numbered.group(3).strip())}",
+                    ASSISTANT_STYLE,
+                )
+            )
+            continue
+
+        rows.append(_RenderedTextLine(_strip_inline_markdown(line), ASSISTANT_STYLE))
+
+    return rows
 
 
 def _format_elapsed_compact(seconds: int) -> str:
@@ -781,6 +926,65 @@ def _format_elapsed_compact(seconds: int) -> str:
     if remaining_minutes == 0:
         return f"{hours}h"
     return f"{hours}h {remaining_minutes}m"
+
+
+def _worked_duration_text(started_at: float, *, ended_at: float | None = None) -> str:
+    ended = time.monotonic() if ended_at is None else ended_at
+    elapsed_seconds = max(0, int(ended - started_at))
+    return f"Worked for {_format_elapsed_compact(elapsed_seconds)}"
+
+
+def _image_summary(block: ImageBlock) -> str:
+    size = _format_bytes(block.size_bytes)
+    return f"[image] {block.filename} ({block.media_type}, {size})"
+
+
+def _image_context_text(block: ImageBlock) -> str:
+    size = _format_bytes(block.size_bytes)
+    return f"Attached image: {block.filename} ({block.media_type}, {size})"
+
+
+def _format_bytes(size: int) -> str:
+    if size >= 1024 * 1024:
+        return f"{size / (1024 * 1024):.1f} MB"
+    if size >= 1024:
+        return f"{size / 1024:.1f} KB"
+    return f"{size} B"
+
+
+def _candidate_image_paths(text: str, *, cwd: Path | None = None) -> list[Path]:
+    cwd = cwd or Path.cwd()
+    try:
+        tokens = shlex.split(text)
+    except ValueError:
+        tokens = text.split()
+    candidates: list[Path] = []
+    seen: set[Path] = set()
+    for token in tokens:
+        path = _token_to_path(token, cwd=cwd)
+        if path is None or path in seen:
+            continue
+        media_type, _encoding = mimetypes.guess_type(path.name)
+        if media_type in SUPPORTED_IMAGE_MEDIA_TYPES and path.is_file():
+            candidates.append(path)
+            seen.add(path)
+    return candidates
+
+
+def _token_to_path(token: str, *, cwd: Path) -> Path | None:
+    stripped = token.strip().strip(".,;:)")
+    if not stripped:
+        return None
+    parsed = urlparse(stripped)
+    if parsed.scheme == "file":
+        path = Path(unquote(parsed.path)).expanduser()
+    elif parsed.scheme:
+        return None
+    else:
+        path = Path(stripped).expanduser()
+    if not path.is_absolute():
+        path = cwd / path
+    return path.resolve()
 
 
 class WillowApp:
@@ -876,8 +1080,7 @@ class WillowApp:
         self._write_resume_history_if_pending()
         self._continue_resumed_turn_if_needed()
         positional_prompt = self._positional_prompt_text()
-        if positional_prompt:
-            self._submit_user_text(positional_prompt, render=True)
+        if positional_prompt and self._submit_user_text(positional_prompt, render=True):
             self._run_turn_recovering()
         while True:
             try:
@@ -897,8 +1100,8 @@ class WillowApp:
                     break
                 continue
 
-            self._submit_user_text(text, render=True)
-            self._run_turn_recovering()
+            if self._submit_user_text(text, render=True):
+                self._run_turn_recovering()
 
         self._write_line("Goodbye.")
         return 0
@@ -907,14 +1110,67 @@ class WillowApp:
         prompt = getattr(self.args, "prompt", None)
         return prompt.strip() if isinstance(prompt, str) else ""
 
-    def _submit_user_text(self, text: str, *, render: bool) -> None:
+    def _submit_user_text(self, text: str, *, render: bool) -> bool:
         expanded_text = self._expand_skill_text(text)
+        try:
+            content = self._user_content_blocks(expanded_text or text)
+        except ValueError as exc:
+            self._write_panel("error", str(exc), ERROR_STYLE)
+            return False
         if render:
-            self._write_block(text, USER_STYLE)
-        self.messages.append(
-            Message(role="user", content=[TextBlock(text=expanded_text or text)])
-        )
+            self._write_block(self._user_display_text(text, content), USER_STYLE)
+        self.messages.append(Message(role="user", content=content))
         self._persist_session()
+        return True
+
+    def _user_content_blocks(self, text: str) -> list[ContentBlock]:
+        content: list[ContentBlock] = []
+        if text.strip():
+            content.append(TextBlock(text=text))
+        for image in self._image_blocks_from_text(text):
+            content.append(TextBlock(text=_image_context_text(image)))
+            content.append(image)
+        return content
+
+    def _user_display_text(self, text: str, content: list[ContentBlock]) -> str:
+        lines = [text] if text else []
+        lines.extend(_image_summary(block) for block in content if isinstance(block, ImageBlock))
+        return "\n".join(lines)
+
+    def _image_blocks_from_text(self, text: str) -> list[ImageBlock]:
+        blocks: list[ImageBlock] = []
+        for path in _candidate_image_paths(text):
+            size = path.stat().st_size
+            if size > MAX_IMAGE_ATTACHMENT_BYTES:
+                raise ValueError(
+                    f"Image is too large: {path} ({_format_bytes(size)}; "
+                    f"max {_format_bytes(MAX_IMAGE_ATTACHMENT_BYTES)})"
+                )
+            media_type, _encoding = mimetypes.guess_type(path.name)
+            if media_type not in SUPPORTED_IMAGE_MEDIA_TYPES:
+                continue
+            stored_path = self._copy_image_asset(path)
+            blocks.append(
+                ImageBlock(
+                    path=str(stored_path),
+                    media_type=media_type,
+                    filename=path.name,
+                    size_bytes=size,
+                )
+            )
+        return blocks
+
+    def _copy_image_asset(self, path: Path) -> Path:
+        if self._session_record is None:
+            return path
+        data = path.read_bytes()
+        digest = hashlib.sha256(data).hexdigest()[:16]
+        asset_dir = default_session_dir() / "assets" / self._session_record.metadata.id
+        asset_dir.mkdir(parents=True, exist_ok=True)
+        target = asset_dir / f"{digest}{path.suffix.lower()}"
+        if not target.exists():
+            target.write_bytes(data)
+        return target
 
     def _can_run_live(self) -> bool:
         return (
@@ -986,7 +1242,9 @@ class WillowApp:
             cast(Any, state.get("total_output_tokens", self._total_output_tokens))
         )
 
-    def _run_turn(self) -> None:
+    def _run_turn(self, *, started_at: float | None = None) -> None:
+        if started_at is None:
+            started_at = time.monotonic()
         preparer = self._request_preparer()
         for _ in range(self.max_iterations):
             response = self._drive_stream_with_recovery(preparer)
@@ -1008,6 +1266,7 @@ class WillowApp:
                         self._write_separator()
                     continue
                 self._write_status_snapshot()
+                self._write_worked_duration(started_at)
                 return
 
             monitor_events = self.runtime.events.drain()
@@ -1020,16 +1279,20 @@ class WillowApp:
             self._persist_session()
             if not step.continue_running:
                 self._write_status_snapshot()
+                self._write_worked_duration(started_at)
                 return
 
         self._write_line(f"[hit max_iterations={self.max_iterations}; returning control]")
         self._write_status_snapshot()
+        self._write_worked_duration(started_at)
 
     def _run_turn_recovering(self) -> None:
+        started_at = time.monotonic()
         try:
-            self._run_turn()
+            self._run_turn(started_at=started_at)
         except Exception as exc:  # noqa: BLE001
             self._write_turn_error(exc)
+            self._write_worked_duration(started_at)
 
     def _write_turn_error(self, error: BaseException) -> None:
         self._write_panel("error", _turn_error_text(error), ERROR_STYLE)
@@ -1092,6 +1355,15 @@ class WillowApp:
         in_thinking = False
         in_text = False
         wrote_content = False
+        text_buffer: list[str] = []
+
+        def flush_text_buffer() -> None:
+            nonlocal in_text
+            if not text_buffer:
+                return
+            self._write_block("".join(text_buffer), ASSISTANT_STYLE)
+            text_buffer.clear()
+            in_text = False
 
         try:
             events = stream_with_recovery(preparer, self.messages)
@@ -1100,14 +1372,13 @@ class WillowApp:
                     if in_thinking:
                         self._write(f"{RESET}\n" if self._styles_enabled() else "\n")
                         in_thinking = False
-                    self._write_styled(event.text, ASSISTANT_STYLE)
+                    text_buffer.append(event.text)
                     in_text = True
                     wrote_content = True
                 elif isinstance(event, ThinkingDelta):
                     if not in_thinking:
                         if in_text:
-                            self._write(f"{RESET}\n" if self._styles_enabled() else "\n")
-                            in_text = False
+                            flush_text_buffer()
                         if self._styles_enabled():
                             self._write(f"{THINKING_STYLE} thinking {RESET}\n")
                         else:
@@ -1119,14 +1390,15 @@ class WillowApp:
                     if event.id not in seen_tools and event.name is not None:
                         seen_tools.add(event.id)
                         if in_thinking or in_text:
+                            flush_text_buffer()
                             self._write(f"{RESET}\n" if self._styles_enabled() else "\n")
                             in_thinking = False
-                            in_text = False
                 elif isinstance(event, StreamComplete):
                     final_response = event.response
         finally:
             self._compaction_state = preparer.state
 
+        flush_text_buffer()
         if wrote_content:
             self._write(f"{RESET}\n" if self._styles_enabled() else "\n")
         if final_response is None:
@@ -1207,7 +1479,17 @@ class WillowApp:
         diff_lines = lines[1:] if lines else []
         added, deleted = _diff_counts(diff_lines)
         title = _tool_edit_title(block, path=path, added=added, deleted=deleted)
-        rows = _diff_preview_lines(diff_lines)
+        max_changes = (
+            None
+            if (
+                block.name == "write"
+                and added > 0
+                and deleted == 0
+                and _diff_starts_from_empty_old_file(diff_lines)
+            )
+            else 12
+        )
+        rows = _diff_preview_lines(diff_lines, max_changes=max_changes)
         if not rows:
             rows = [("meta", lines[0] if lines else "[no changes]")]
 
@@ -1418,6 +1700,10 @@ class WillowApp:
         if self._statusline_enabled or force:
             self._write_panel("status", self._status_text(), STATUS_STYLE)
 
+    def _write_worked_duration(self, started_at: float) -> None:
+        self._last_transcript_was_separator = False
+        self._write_line(_worked_duration_text(started_at))
+
     def _write_resume_history_if_pending(self) -> None:
         if not self._resume_history_pending:
             return
@@ -1450,11 +1736,14 @@ class WillowApp:
         text_parts: list[str] = []
         tool_results: list[ToolResultBlock] = []
         tool_uses: list[ToolUseBlock] = []
+        images: list[ImageBlock] = []
         thinking_parts: list[str] = []
         redacted_thinking = 0
         for block in message.content:
             if isinstance(block, TextBlock):
                 text_parts.append(block.text)
+            elif isinstance(block, ImageBlock):
+                images.append(block)
             elif isinstance(block, ThinkingBlock):
                 thinking_parts.append(block.thinking)
             elif isinstance(block, ToolUseBlock):
@@ -1474,6 +1763,9 @@ class WillowApp:
             )
 
         text = "\n".join(part for part in text_parts if part)
+        if images:
+            image_text = "\n".join(_image_summary(block) for block in images)
+            text = f"{text}\n{image_text}" if text else image_text
         if text:
             self._write_block(text, USER_STYLE if message.role == "user" else ASSISTANT_STYLE)
         elif not tool_uses and not tool_results and not thinking_parts and not redacted_thinking:
@@ -1586,7 +1878,7 @@ class WillowApp:
         )
 
     def _terminal_width(self) -> int:
-        return max(40, shutil.get_terminal_size((88, 24)).columns)
+        return max(1, shutil.get_terminal_size((88, 24)).columns)
 
     def _write_styled(self, text: str, style: str) -> None:
         self._last_transcript_was_separator = False
@@ -1615,14 +1907,30 @@ class WillowApp:
     def _write_block(self, text: str, style: str) -> None:
         self._last_transcript_was_separator = False
         if not self._styles_enabled():
-            self._write_line(text)
+            if style == ASSISTANT_STYLE:
+                for row in _render_markdown_text(text, width=self._terminal_width()):
+                    self._write_line(row.text)
+            else:
+                self._write_line(text)
             return
 
         width = self._terminal_width()
-        for line in (text.splitlines() or [""]):
-            body = f" {line}"
+        should_pad = style in {USER_STYLE, ASSISTANT_STYLE}
+        if should_pad:
+            blank = f"{_styled_terminal_line('', style, width)}\n"
+            self._write(blank * MESSAGE_BLOCK_VERTICAL_PADDING)
+        rows = (
+            _render_markdown_text(text, width=width)
+            if style == ASSISTANT_STYLE
+            else [_RenderedTextLine(line, style) for line in (text.splitlines() or [""])]
+        )
+        for row in rows:
+            body = f" {row.text}"
             for wrapped in _wrap_terminal_line(body, width):
-                self._write(f"{style}{wrapped.ljust(width)}{RESET}\n")
+                self._write(f"{_styled_terminal_line(wrapped, row.style, width)}\n")
+        if should_pad:
+            blank = f"{_styled_terminal_line('', style, width)}\n"
+            self._write(blank * MESSAGE_BLOCK_VERTICAL_PADDING)
 
 
 class _LiveTerminal:
@@ -1653,7 +1961,9 @@ class _LiveTerminal:
         self.prompt_lines = 0
         self.prompt_width = 0
         self.prompt_cursor_line_index = 0
+        self.prompt_cursor_column = 0
         self.prompt_cursor_offset_from_bottom = 0
+        self.turn_started_at: float | None = None
         self.pending_paste_chunks: list[str] | None = None
         self.pending_escape_sequence: str | None = None
         self.pending_escape_started_at = 0.0
@@ -1689,8 +1999,10 @@ class _LiveTerminal:
                 self._start_worker()
             else:
                 positional_prompt = self.app._positional_prompt_text()
-                if positional_prompt:
-                    self.app._submit_user_text(positional_prompt, render=True)
+                if positional_prompt and self.app._submit_user_text(
+                    positional_prompt,
+                    render=True,
+                ):
                     self._start_worker()
             self._draw_prompt()
             try:
@@ -2117,16 +2429,23 @@ class _LiveTerminal:
             self._draw_prompt()
             return
 
-        self.app._write_block(text, USER_STYLE)
         message_text = expanded_text or text
+        try:
+            message_content = self.app._user_content_blocks(message_text)
+        except ValueError as exc:
+            self.app._write_panel("error", str(exc), ERROR_STYLE)
+            self._draw_prompt()
+            return
+        self.app._write_block(self.app._user_display_text(text, message_content), USER_STYLE)
         if self.interrupted_user_inputs:
             content = interrupted_user_text_blocks(
                 self.interrupted_user_inputs,
                 [message_text],
             )
+            content.extend(message_content[1:])
             self.interrupted_user_inputs = []
         else:
-            content = [TextBlock(text=message_text)]
+            content = message_content
         self.app.messages.append(Message(role="user", content=content))
         self.app._persist_session()
         self._start_worker()
@@ -2168,7 +2487,7 @@ class _LiveTerminal:
         if not choices:
             self.app._write_panel(
                 "model",
-                "No models available. Add openai or anthropic auth to ~/.willow/auth.json.",
+                "No models available. Add provider auth to ~/.willow/auth.json.",
                 ERROR_STYLE,
             )
             self._draw_prompt()
@@ -2214,6 +2533,7 @@ class _LiveTerminal:
         self.compacting = False
         self.active_tool_status = None
         self.working_started_at = None
+        self.turn_started_at = None
         self.app._write_panel(
             "status",
             "Interrupted current turn; it will be sent again with your next message.",
@@ -2236,13 +2556,25 @@ class _LiveTerminal:
         self.pending_monitor_inputs = []
         if render:
             for text in pending:
-                self.app._write_block(text, USER_STYLE)
+                try:
+                    content = self.app._user_content_blocks(text)
+                except ValueError as exc:
+                    self.app._write_panel("error", str(exc), ERROR_STYLE)
+                    continue
+                self.app._write_block(self.app._user_display_text(text, content), USER_STYLE)
+        attachment_blocks: list[ContentBlock] = []
+        for text in pending:
+            try:
+                attachment_blocks.extend(self.app._user_content_blocks(text)[1:])
+            except ValueError:
+                continue
         if interrupted:
             user_blocks = interrupted_user_text_blocks(interrupted, pending)
         else:
             user_blocks = queued_user_text_blocks(pending)
         blocks = [
             *user_blocks,
+            *attachment_blocks,
             *(TextBlock(text=text) for text in monitor_pending),
         ]
         if not blocks:
@@ -2261,6 +2593,7 @@ class _LiveTerminal:
             "Interrupted current turn; sending queued input now.",
             STATUS_STYLE,
         )
+        self.turn_started_at = None
         self._append_interrupted_user_message(render=True)
         self._reset_provider_for_interrupt()
         self._start_worker()
@@ -2275,7 +2608,18 @@ class _LiveTerminal:
         self.interrupted_user_inputs = []
         if render:
             for text in pending:
-                self.app._write_block(text, USER_STYLE)
+                try:
+                    content = self.app._user_content_blocks(text)
+                except ValueError as exc:
+                    self.app._write_panel("error", str(exc), ERROR_STYLE)
+                    continue
+                self.app._write_block(self.app._user_display_text(text, content), USER_STYLE)
+        attachment_blocks: list[ContentBlock] = []
+        for text in pending:
+            try:
+                attachment_blocks.extend(self.app._user_content_blocks(text)[1:])
+            except ValueError:
+                continue
         user_blocks = (
             interrupted_user_text_blocks(interrupted, pending)
             if interrupted
@@ -2283,6 +2627,7 @@ class _LiveTerminal:
         )
         blocks = [
             *user_blocks,
+            *attachment_blocks,
             *(TextBlock(text=text) for text in monitor_pending),
         ]
         if not blocks:
@@ -2306,6 +2651,8 @@ class _LiveTerminal:
 
     def _start_worker(self) -> None:
         self.streaming = True
+        if self.turn_started_at is None:
+            self.turn_started_at = time.monotonic()
         self.working_started_at = time.monotonic()
         self.active_turn_id += 1
         self.in_text = False
@@ -2362,11 +2709,14 @@ class _LiveTerminal:
                 self._clear_prompt()
                 self._flush_stream_buffer()
                 self.app._write_turn_error(cast(BaseException, payload))
+                if self.turn_started_at is not None:
+                    self.app._write_worked_duration(self.turn_started_at)
                 self.streaming = False
                 self.compacting = False
                 self.worker = None
                 self.active_tool_status = None
                 self.working_started_at = None
+                self.turn_started_at = None
             elif kind == "compact_start":
                 self.compacting = True
                 self._last_compaction_frame_at = 0.0
@@ -2416,6 +2766,9 @@ class _LiveTerminal:
         if not self.streaming:
             if has_tool_uses and tool_results:
                 self.app._append_followup_user(list(tool_results))
+            if self.turn_started_at is not None:
+                self.app._write_worked_duration(self.turn_started_at)
+                self.turn_started_at = None
             return
         interrupted_texts = self.interrupted_user_inputs
         pending_texts = self.pending_user_inputs
@@ -2452,6 +2805,9 @@ class _LiveTerminal:
             self.streaming = False
             self.working_started_at = None
             self.app._write_status_snapshot()
+            if self.turn_started_at is not None:
+                self.app._write_worked_duration(self.turn_started_at)
+                self.turn_started_at = None
 
     def _dispatch_tools_with_prompt(
         self,
@@ -2548,45 +2904,39 @@ class _LiveTerminal:
         self.stream_tool_names = []
 
     def _draw_prompt(self) -> None:
-        parts = [self._clear_prompt_sequence()]
+        frame = self._build_prompt_frame()
+        self._write_prompt_frame(frame)
+
+    def _build_prompt_frame(self) -> _PromptFrame:
+        rows: list[str] = []
         width = self.app._terminal_width()
         line_width = _terminal_line_width(width)
         status = self.app._status_text()
         rendered_input = _render_prompt_input(self.buffer, self.pasted_ranges, self.cursor)
         preview = rendered_input.text
         cursor = min(len(preview), rendered_input.cursor)
-        parts.append("\x1b[?25l")
-        prompt_lines = 0
         if self.compacting:
             frame = COMPACTION_FRAMES[int(time.monotonic() * 8) % len(COMPACTION_FRAMES)]
             line = f" {frame} Auto-compacting..."
-            parts.append(f"{_styled_terminal_line(line, COMPACTION_STYLE, width)}\n")
-            prompt_lines += 1
+            rows.append(_styled_terminal_line(line, COMPACTION_STYLE, width))
         elif self.streaming:
-            parts.append(f"{self._running_status_line(width)}\n")
-            prompt_lines += 1
-            for _ in range(2):
-                parts.append(f"{_black_terminal_line('', width)}\n")
-                prompt_lines += 1
+            rows.append(_black_terminal_line("", width))
+            rows.append(self._running_status_line(width))
+            rows.append(_black_terminal_line("", width))
         if self.interrupted_user_inputs:
             title = " Interrupted messages to be sent with your next message"
-            parts.append(f"{_styled_terminal_line(title, STATUS_STYLE, width)}\n")
-            prompt_lines += 1
+            rows.append(_styled_terminal_line(title, STATUS_STYLE, width))
             for text in self.interrupted_user_inputs:
                 line = f"  ↳ {_strip_control(text)}"
-                parts.append(f"{_styled_terminal_line(line, STATUS_STYLE, width)}\n")
-                prompt_lines += 1
+                rows.append(_styled_terminal_line(line, STATUS_STYLE, width))
         if self.pending_user_inputs:
             title = " Messages to be submitted after next tool call"
             hint = " (press esc to interrupt and send immediately)"
-            parts.append(f"{_styled_terminal_line(title, STATUS_STYLE, width)}\n")
-            prompt_lines += 1
-            parts.append(f"{_styled_terminal_line(hint, STATUS_STYLE, width)}\n")
-            prompt_lines += 1
+            rows.append(_styled_terminal_line(title, STATUS_STYLE, width))
+            rows.append(_styled_terminal_line(hint, STATUS_STYLE, width))
             for text in self.pending_user_inputs:
                 line = f"  ↳ {_strip_control(text)}"
-                parts.append(f"{_styled_terminal_line(line, STATUS_STYLE, width)}\n")
-                prompt_lines += 1
+                rows.append(_styled_terminal_line(line, STATUS_STYLE, width))
         prefix = " > "
         continuation_prefix = " " * len(prefix)
         first_input_width = max(1, line_width - len(prefix))
@@ -2604,64 +2954,75 @@ class _LiveTerminal:
             cursor_column += len(prefix)
         else:
             cursor_column += len(continuation_prefix)
-        input_box_start = prompt_lines
-        parts.append(_styled_terminal_line("", PROMPT_STYLE, width))
-        parts.append("\n")
-        prompt_lines += 1
+        input_box_start = len(rows)
+        rows.append(_styled_terminal_line("", PROMPT_STYLE, width))
         prompt_line_index = input_box_start + 1 + cursor_line
         for line_index, line in enumerate(input_lines):
-            if line_index:
-                parts.append("\n")
             display = f"{prefix}{line}" if line_index == 0 else f"{continuation_prefix}{line}"
-            parts.append(_styled_terminal_line(display, PROMPT_STYLE, width))
-            prompt_lines += 1
-        parts.append("\n")
-        parts.append(_styled_terminal_line("", PROMPT_STYLE, width))
-        prompt_lines += 1
+            rows.append(_styled_terminal_line(display, PROMPT_STYLE, width))
+        rows.append(_styled_terminal_line("", PROMPT_STYLE, width))
         model_picker_choices = self._ensure_model_picker()
         if model_picker_choices is not None:
-            rows = _render_model_picker_rows(
+            picker_rows = _render_model_picker_rows(
                 model_picker_choices,
                 current_model=self.app.current_model,
                 selected_index=self.model_picker_selected,
                 width=line_width,
                 styles_enabled=self.app._styles_enabled(),
             )
-            for row in rows:
-                parts.append(f"\n\x1b[?7l{row}\x1b[?7h")
-                prompt_lines += 1
+            rows.extend(_filled_terminal_line(row, STATUS_STYLE) for row in picker_rows)
         elif self._login_picker_active():
-            rows = _render_login_picker_rows(
+            login_rows = _render_login_picker_rows(
                 selected_index=self.login_picker_selected,
                 width=line_width,
                 styles_enabled=self.app._styles_enabled(),
             )
-            for row in rows:
-                parts.append(f"\n\x1b[?7l{row}\x1b[?7h")
-                prompt_lines += 1
+            rows.extend(_filled_terminal_line(row, STATUS_STYLE) for row in login_rows)
         else:
             input_hints = self._ensure_input_hints()
             if input_hints:
-                rows = _render_input_hint_rows(
+                hint_rows = _render_input_hint_rows(
                     input_hints,
                     selected_index=self.input_hint_selected,
                     width=line_width,
                     styles_enabled=self.app._styles_enabled(),
                 )
-                for row in rows:
-                    parts.append(f"\n\x1b[?7l{row}\x1b[?7h")
-                    prompt_lines += 1
+                rows.extend(_filled_terminal_line(row, STATUS_STYLE) for row in hint_rows)
             elif self.app._statusline_enabled:
                 line = f" {status}"[:line_width].ljust(line_width)
-                parts.append(
-                    f"\n\x1b[?7l{STATUS_STYLE}{_style_statusline_text(line)}{RESET}\x1b[?7h"
-                )
-                prompt_lines += 1
-        self.prompt_lines = prompt_lines
-        self.prompt_width = line_width
-        self.prompt_cursor_line_index = prompt_line_index
-        self.prompt_cursor_offset_from_bottom = prompt_lines - prompt_line_index - 1
-        parts.append(self._place_prompt_cursor_sequence(cursor_column))
+                statusline = f"{STATUS_STYLE}{_style_statusline_text(line)}{RESET}"
+                rows.append(_filled_terminal_line(statusline, STATUS_STYLE))
+        return _PromptFrame(
+            rows=rows,
+            width=line_width,
+            cursor_line_index=prompt_line_index,
+            cursor_column=cursor_column,
+        )
+
+    def _write_prompt_frame(self, frame: _PromptFrame) -> None:
+        can_overwrite_in_place = (
+            self.prompt_lines > 0
+            and self.prompt_width == frame.width
+            and len(frame.rows) >= self.prompt_lines
+        )
+        parts: list[str] = []
+        if can_overwrite_in_place:
+            parts.append("\x1b[?25l")
+            if self.prompt_cursor_line_index:
+                parts.append(f"\x1b[{self.prompt_cursor_line_index}A")
+            parts.append("\r")
+        else:
+            parts.append(self._clear_prompt_sequence())
+            parts.append("\x1b[?25l")
+        parts.append("\n".join(frame.rows))
+        self.prompt_lines = len(frame.rows)
+        self.prompt_width = frame.width
+        self.prompt_cursor_line_index = frame.cursor_line_index
+        self.prompt_cursor_column = frame.cursor_column
+        self.prompt_cursor_offset_from_bottom = (
+            self.prompt_lines - self.prompt_cursor_line_index - 1
+        )
+        parts.append(self._place_prompt_cursor_sequence(frame.cursor_column))
         self.app._write("".join(parts))
 
     def _running_status_line(self, width: int) -> str:
@@ -2685,8 +3046,10 @@ class _LiveTerminal:
             return
         width = self.app._terminal_width()
         parts = ["\x1b7\x1b[?25l"]
-        if self.prompt_cursor_line_index:
-            parts.append(f"\x1b[{self.prompt_cursor_line_index}A")
+        running_status_line_index = 1
+        rows_above_cursor = self.prompt_cursor_line_index - running_status_line_index
+        if rows_above_cursor > 0:
+            parts.append(f"\x1b[{rows_above_cursor}A")
         parts.append("\r")
         parts.append(self._running_status_line(width))
         parts.append("\x1b8\x1b[?25h")
@@ -2717,9 +3080,18 @@ class _LiveTerminal:
         previous_width = self.prompt_width or current_width
         wrap_factor = max(1, (previous_width + current_width - 1) // current_width)
         rows_to_clear = self.prompt_lines * wrap_factor
+        cursor_visual_row = min(
+            wrap_factor - 1,
+            max(0, self.prompt_cursor_column) // current_width,
+        )
+        rows_below_cursor_line = wrap_factor - cursor_visual_row - 1
+        rows_down_to_prompt_bottom = (
+            self.prompt_cursor_offset_from_bottom * wrap_factor
+            + rows_below_cursor_line
+        )
         parts: list[str] = []
-        if self.prompt_cursor_offset_from_bottom:
-            parts.append(f"\x1b[{self.prompt_cursor_offset_from_bottom * wrap_factor}B")
+        if rows_down_to_prompt_bottom:
+            parts.append(f"\x1b[{rows_down_to_prompt_bottom}B")
             self.prompt_cursor_offset_from_bottom = 0
         parts.append("\x1b[?25l\r\x1b[2K")
         for _ in range(rows_to_clear - 1):
@@ -2728,6 +3100,7 @@ class _LiveTerminal:
         self.prompt_lines = 0
         self.prompt_width = 0
         self.prompt_cursor_line_index = 0
+        self.prompt_cursor_column = 0
         return "".join(parts)
 
 
