@@ -84,6 +84,7 @@ def test_pty_dragged_image_uses_anchor_while_queued_and_after_finish(tmp_path: P
         session.read_until("working...", timeout=3)
         session.write(f"check {escaped_path}\n")
         session.read_until("Messages to be submitted after next tool call", timeout=3)
+        session.read_until("check [image#1]", timeout=3)
 
         screen_text = session.screen.text()
         assert "check [image#1]" in screen_text
