@@ -134,11 +134,11 @@ def _guidelines(
         )
     if "view_image" in names:
         guidelines.append(
-            "When the user asks to inspect an image, screenshot, visual UI issue, "
-            "or the latest debug image, use view_image first so the image is "
-            "attached to the model context. Do not start with bash, PIL, OCR, "
-            "tesseract, or metadata-only file commands for visual inspection. "
-            "For 'latest debug image', call view_image with latest_debug=true."
+            "When the user asks to inspect an image, screenshot, or visual UI issue, "
+            "use view_image first with an explicit image path so the image is attached "
+            "to the model context. For requests like the latest debug image, first find "
+            "the image path using available file-search tools, then call view_image with "
+            "that path."
         )
 
     if "read" in names and "edit" in names:

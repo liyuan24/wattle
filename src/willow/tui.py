@@ -186,6 +186,7 @@ WELCOME_TITLE_STYLE = "\x1b[38;5;255;1m"
 WELCOME_LABEL_STYLE = "\x1b[38;5;245m"
 WELCOME_VALUE_STYLE = "\x1b[38;5;255;1m"
 STATUS_STYLE = "\x1b[48;5;236;38;5;248m"
+SUBAGENT_WAIT_TITLE_STYLE = "\x1b[48;5;236;38;5;255m"
 STATUS_MODEL_STYLE = "\x1b[48;5;236;38;5;82m"
 STATUS_TOKEN_STYLE = "\x1b[48;5;236;38;5;203m"
 COMPACTION_STYLE = "\x1b[48;5;54;38;5;231;1m"
@@ -194,6 +195,7 @@ ERROR_STYLE = "\x1b[48;5;52;38;5;231m"
 PROMPT_MARKER_STYLE = "\x1b[48;5;235;38;5;51;1m"
 SELECTED_ROW_STYLE = "\x1b[48;5;240;38;5;255;1m"
 COMPACTION_FRAMES = ("◐", "◓", "◑", "◒")
+WAIT_AGENT_RUNNING_TITLE = "Waiting for subagent"
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b[78]")
 
 WILLOW_LOGO_LINES: tuple[str, ...] = (
@@ -306,7 +308,7 @@ def _tool_running_title(block: ToolUseBlock) -> str:
     if block.name in {"read", "write", "edit"}:
         return f"running {block.name} - {_tool_arg(block, 'path', '<missing path>')}"
     if block.name == "wait_agent":
-        return "Waiting for subagent(s)"
+        return WAIT_AGENT_RUNNING_TITLE
     return f"running {block.name}"
 
 
@@ -3589,19 +3591,25 @@ class _LiveTerminal:
         )
         preview = rendered_input.text
         cursor = min(len(preview), rendered_input.cursor)
+        active_subagents = self._active_subagent_snapshots()
         if self.compacting:
             frame = COMPACTION_FRAMES[int(time.monotonic() * 8) % len(COMPACTION_FRAMES)]
             line = f" {frame} Auto-compacting..."
             rows.append(_styled_terminal_line(line, COMPACTION_STYLE, width))
-        elif self.streaming:
+        elif self.streaming and not self._suppress_running_status_line(active_subagents):
             rows.append(_black_terminal_line("", width))
             rows.append(self._running_status_line(width))
             rows.append(_black_terminal_line("", width))
-        active_subagents = self._active_subagent_snapshots()
         if active_subagents:
             count = len(active_subagents)
             noun = "subagent" if count == 1 else "subagents"
-            rows.append(_styled_terminal_line(f" Waiting for {count} {noun}", STATUS_STYLE, width))
+            rows.append(
+                _styled_terminal_line(
+                    f" Waiting for {count} {noun}",
+                    SUBAGENT_WAIT_TITLE_STYLE,
+                    width,
+                )
+            )
             for snapshot in active_subagents[:3]:
                 name = str(snapshot.get("display_name") or snapshot.get("subagent_id"))
                 role = str(snapshot.get("role") or "subagent")
@@ -3744,7 +3752,17 @@ class _LiveTerminal:
         return f"working... ({elapsed}, press esc to interrupt)"
 
     def _running_status_active(self) -> bool:
-        return self.streaming and not self.compacting
+        return (
+            self.streaming
+            and not self.compacting
+            and not self._suppress_running_status_line(self._active_subagent_snapshots())
+        )
+
+    def _suppress_running_status_line(
+        self,
+        active_subagents: list[dict[str, object]],
+    ) -> bool:
+        return self.active_tool_status == WAIT_AGENT_RUNNING_TITLE and bool(active_subagents)
 
     def _redraw_running_status_line(self) -> None:
         if not self._running_status_active() or self.prompt_lines == 0:

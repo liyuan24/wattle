@@ -160,21 +160,17 @@ def test_read_tool_large_output_is_externalized(monkeypatch, tmp_path: Path) -> 
     assert len(output) < len(full_output)
 
 
-def test_view_image_tool_returns_latest_debug_image(tmp_path: Path) -> None:
-    debug_dir = tmp_path / "debug_images"
-    debug_dir.mkdir()
-    old = debug_dir / "old.png"
-    latest = debug_dir / "latest.png"
-    old.write_bytes(b"old")
-    latest.write_bytes(b"new")
+def test_view_image_tool_requires_explicit_path(tmp_path: Path) -> None:
+    image = tmp_path / "shot.png"
+    image.write_bytes(b"png")
 
     tool = ViewImageTool(cwd=tmp_path)
-    block = tool.run(latest_debug=True)
+    block = tool.run(path="shot.png")
 
     assert block.type == "image"
-    assert block.path == str(latest.resolve())
+    assert block.path == str(image.resolve())
     assert block.media_type == "image/png"
-    assert block.filename == "latest.png"
+    assert block.filename == "shot.png"
 
 
 def test_view_image_dispatch_attaches_image_block(tmp_path: Path) -> None:

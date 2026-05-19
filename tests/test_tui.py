@@ -1150,7 +1150,7 @@ def test_tool_running_title_describes_wait_agent() -> None:
         input={"subagent_id": "subagent-123"},
     )
 
-    assert tui._tool_running_title(block) == "Waiting for subagent(s)"
+    assert tui._tool_running_title(block) == "Waiting for subagent"
 
 
 def test_live_prompt_box_shows_working_when_streaming_without_input() -> None:
@@ -2009,7 +2009,21 @@ def test_live_prompt_shows_active_subagent_waiting_status(
                     "role": "explorer",
                     "status": "running",
                     "task": "Inspect the prompt state",
-                }
+                },
+                {
+                    "subagent_id": "subagent-456",
+                    "display_name": "Grace",
+                    "role": "explorer",
+                    "status": "pending",
+                    "task": "Inspect tool flows",
+                },
+                {
+                    "subagent_id": "subagent-789",
+                    "display_name": "Ada",
+                    "role": "worker",
+                    "status": "closing",
+                    "task": "Patch tests",
+                },
             ]
 
     monkeypatch.setattr(app.runtime, "_subagents", FakeSubagents())
@@ -2017,8 +2031,43 @@ def test_live_prompt_shows_active_subagent_waiting_status(
     live._draw_prompt()
 
     rendered = out.getvalue()
-    assert "Waiting for 1 subagent" in rendered
+    assert f"{tui.SUBAGENT_WAIT_TITLE_STYLE}\x1b[2K Waiting for 3 subagents" in rendered
+    assert "Waiting for subagent(s)" not in rendered
+    assert "Waiting for 3 subagents" in rendered
     assert "Hopper [explorer] Inspect the prompt state" in rendered
+    assert "Grace [explorer] Inspect tool flows" in rendered
+    assert "Ada [worker] Patch tests" in rendered
+
+
+def test_live_prompt_suppresses_generic_wait_agent_status_for_active_subagents(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    out = _TTYBuffer()
+    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+    live = tui._LiveTerminal(app)
+    live.streaming = True
+    live.active_tool_status = "Waiting for subagent"
+
+    class FakeSubagents:
+        def snapshots(self) -> list[dict[str, object]]:
+            return [
+                {
+                    "subagent_id": "subagent-123",
+                    "display_name": "Hopper",
+                    "role": "explorer",
+                    "status": "running",
+                    "task": "Inspect the prompt state",
+                }
+            ]
+
+    monkeypatch.setattr(app.runtime, "_subagents", FakeSubagents())
+
+    live._draw_prompt()
+
+    rendered = _strip_ansi(out.getvalue())
+    assert "Waiting for 1 subagent" in rendered
+    assert "Waiting for subagent\n" not in rendered
 
 
 def test_live_prompt_shows_queued_image_messages_as_anchors(tmp_path: Path) -> None:
