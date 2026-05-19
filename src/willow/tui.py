@@ -18,6 +18,7 @@ import re
 import select
 import shlex
 import shutil
+import signal
 import sys
 import termios
 import textwrap
@@ -155,12 +156,14 @@ KNOWN_ESCAPE_SEQUENCES = (
 RESET = "\x1b[0m"
 DIM = "\x1b[2m"
 BOLD = "\x1b[1m"
-USER_STYLE = "\x1b[48;5;30;38;5;231m"
+USER_STYLE = "\x1b[48;5;235;38;5;231m"
 MESSAGE_BLOCK_VERTICAL_PADDING = 1
-ASSISTANT_STYLE = "\x1b[38;5;255m"
+ASSISTANT_STYLE = "\x1b[40;38;5;255m"
 THINKING_STYLE = "\x1b[38;5;245;3m"
+WORKED_DURATION_STYLE = "\x1b[38;5;240m"
 TOOL_STYLE = "\x1b[48;5;58;38;5;230m"
-TOOL_DOT_STYLE = "\x1b[38;5;82;1m"
+TOOL_MARKER_STYLE = "\x1b[38;5;82m"
+TOOL_MARKER = "|"
 TOOL_TITLE_STYLE = "\x1b[38;5;255;1m"
 TOOL_PREVIEW_STYLE = "\x1b[38;5;245m"
 DIFF_ADD_STYLE = "\x1b[48;5;22;38;5;231m"
@@ -173,15 +176,16 @@ WELCOME_LOGO_STYLE = "\x1b[38;5;107;1m"
 WELCOME_TITLE_STYLE = "\x1b[38;5;255;1m"
 WELCOME_LABEL_STYLE = "\x1b[38;5;245m"
 WELCOME_VALUE_STYLE = "\x1b[38;5;255;1m"
-STATUS_STYLE = "\x1b[48;5;238;38;5;250m"
-STATUS_MODEL_STYLE = "\x1b[48;5;238;38;5;82;1m"
-STATUS_TOKEN_STYLE = "\x1b[48;5;238;38;5;203;1m"
+STATUS_STYLE = "\x1b[48;5;236;38;5;248m"
+STATUS_MODEL_STYLE = "\x1b[48;5;236;38;5;82m"
+STATUS_TOKEN_STYLE = "\x1b[48;5;236;38;5;203m"
 COMPACTION_STYLE = "\x1b[48;5;54;38;5;231;1m"
-PROMPT_STYLE = "\x1b[48;5;30;38;5;231m"
+PROMPT_STYLE = "\x1b[48;5;235;38;5;231m"
 ERROR_STYLE = "\x1b[48;5;52;38;5;231m"
-PROMPT_MARKER_STYLE = "\x1b[48;5;23;38;5;51;1m"
+PROMPT_MARKER_STYLE = "\x1b[48;5;235;38;5;51;1m"
 SELECTED_ROW_STYLE = "\x1b[48;5;240;38;5;255;1m"
 COMPACTION_FRAMES = ("◐", "◓", "◑", "◒")
+ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b[78]")
 
 WILLOW_LOGO_LINES: tuple[str, ...] = (
     "   \\ | /   ",
@@ -883,22 +887,19 @@ def _terminal_line_width(width: int) -> int:
 
 def _styled_terminal_line(text: str, style: str, width: int) -> str:
     visible_width = _terminal_line_width(width)
-    # Temporarily disable terminal autowrap while filling the final column.
-    # This lets prompt rows occupy the full width without creating phantom
-    # wrapped rows that survive terminal zoom/resizes.
-    line = text[:visible_width].ljust(visible_width)
-    return f"\r\x1b[?7l{RESET}\x1b[2K{style}{line}{RESET}\x1b[?7h"
+    line = text[:visible_width]
+    return f"\r\x1b[?7l{style}\x1b[2K{line}{RESET}\x1b[?7h"
 
 
-def _filled_terminal_line(rendered: str, fill_style: str) -> str:
-    return f"\r\x1b[?7l{RESET}\x1b[2K{fill_style}{rendered}{RESET}\x1b[?7h"
+def _filled_terminal_line(rendered: str, fill_style: str, _width: int) -> str:
+    return f"\r\x1b[?7l{fill_style}\x1b[2K{rendered}{RESET}\x1b[?7h"
 
 
 def _running_terminal_line(text: str, width: int, *, frame: int) -> str:
     visible_width = _terminal_line_width(width)
-    line = text[:visible_width].ljust(visible_width)
+    line = text[:visible_width]
     highlight = frame % (visible_width + 8) - 4
-    parts = ["\r\x1b[?7l\x1b[0m\x1b[2K"]
+    parts = ["\r\x1b[?7l\x1b[40;38;5;255m\x1b[2K"]
     for index, char in enumerate(line):
         distance = abs(index - highlight)
         if distance == 0:
@@ -918,8 +919,8 @@ def _running_terminal_line(text: str, width: int, *, frame: int) -> str:
 
 def _black_terminal_line(text: str, width: int) -> str:
     visible_width = _terminal_line_width(width)
-    line = text[:visible_width].ljust(visible_width)
-    return f"\r\x1b[?7l\x1b[0m\x1b[2K\x1b[40;38;5;255m{line}{RESET}\x1b[?7h"
+    line = text[:visible_width]
+    return f"\r\x1b[?7l\x1b[40;38;5;255m\x1b[2K{line}{RESET}\x1b[?7h"
 
 
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
@@ -1116,6 +1117,22 @@ def _replace_text_ranges(
         cursor = end
     chunks.append(text[cursor:])
     return "".join(chunks)
+
+
+def _image_placeholder_text(
+    text: str,
+    *,
+    image_index_start: int = 1,
+) -> tuple[str, int]:
+    replacements: list[tuple[int, int, str]] = []
+    image_index = image_index_start
+    for reference in _path_references_from_text(text):
+        media_type, _encoding = mimetypes.guess_type(reference.path.name)
+        if media_type not in SUPPORTED_IMAGE_MEDIA_TYPES:
+            continue
+        replacements.append((reference.start, reference.end, f"[Image #{image_index}]"))
+        image_index += 1
+    return _replace_text_ranges(text, replacements), image_index
 
 
 def _first_text_block_text(
@@ -1401,8 +1418,10 @@ class WillowApp:
         image_index_start: int,
     ) -> tuple[str, list[ImageBlock]]:
         blocks: list[ImageBlock] = []
-        replacements: list[tuple[int, int, str]] = []
-        image_index = image_index_start
+        display_text, _next_image_index = _image_placeholder_text(
+            text,
+            image_index_start=image_index_start,
+        )
         for reference in _path_references_from_text(text):
             size = reference.path.stat().st_size
             media_type, _encoding = mimetypes.guess_type(reference.path.name)
@@ -1422,9 +1441,7 @@ class WillowApp:
                     size_bytes=size,
                 )
             )
-            replacements.append((reference.start, reference.end, f"[Image #{image_index}]"))
-            image_index += 1
-        return _replace_text_ranges(text, replacements), blocks
+        return display_text, blocks
 
     def _file_context_paths_from_text(self, text: str) -> list[Path]:
         paths: list[Path] = []
@@ -1738,14 +1755,14 @@ class WillowApp:
         if not preview:
             preview = ["[no output]"]
         if not self._styles_enabled():
-            self._write_line(f"● {title}")
+            self._write_line(f"{TOOL_MARKER} {title}")
             for line in preview:
                 self._write_line(f"  {line}")
             return
 
-        dot_style = ERROR_TEXT_STYLE if result.is_error else TOOL_DOT_STYLE
+        marker_style = ERROR_TEXT_STYLE if result.is_error else TOOL_MARKER_STYLE
         title_style = ERROR_TEXT_STYLE if result.is_error else TOOL_TITLE_STYLE
-        self._write(f"{dot_style}●{RESET} {title_style}{title}{RESET}\n")
+        self._write(f"{marker_style}{TOOL_MARKER}{RESET} {title_style}{title}{RESET}\n")
         for line in preview:
             self._write(f"{TOOL_PREVIEW_STYLE}  {line}{RESET}\n")
 
@@ -1774,12 +1791,12 @@ class WillowApp:
             rows = [("meta", lines[0] if lines else "[no changes]")]
 
         if not self._styles_enabled():
-            self._write_line(f"● {title}")
+            self._write_line(f"{TOOL_MARKER} {title}")
             for _, line in rows:
                 self._write_line(line)
             return
 
-        self._write(f"{TOOL_DOT_STYLE}●{RESET} {TOOL_TITLE_STYLE}{title}{RESET}\n")
+        self._write(f"{TOOL_MARKER_STYLE}{TOOL_MARKER}{RESET} {TOOL_TITLE_STYLE}{title}{RESET}\n")
         width = self._terminal_width()
         for kind, line in rows:
             if kind == "add":
@@ -2090,7 +2107,11 @@ class WillowApp:
 
     def _write_worked_duration(self, started_at: float) -> None:
         self._last_transcript_was_separator = False
-        self._write_line(_worked_duration_text(started_at))
+        text = _worked_duration_text(started_at)
+        if self._styles_enabled():
+            self._write(f"{WORKED_DURATION_STYLE}{text}{RESET}\n")
+        else:
+            self._write_line(text)
 
     def _write_resume_history_if_pending(self) -> None:
         if not self._resume_history_pending:
@@ -2382,6 +2403,7 @@ class _LiveTerminal:
         self.prompt_cursor_line_index = 0
         self.prompt_cursor_column = 0
         self.prompt_cursor_offset_from_bottom = 0
+        self.resize_pending = False
         self.turn_started_at: float | None = None
         self.pending_paste_chunks: list[str] | None = None
         self.pending_escape_sequence: str | None = None
@@ -2448,6 +2470,9 @@ class _LiveTerminal:
                     if should_animate_running:
                         self._last_running_frame_at = time.monotonic()
                         self._redraw_running_status_line()
+                    if self._prompt_needs_resize_repaint():
+                        self._draw_prompt(force_reflow_clear=self.resize_pending)
+                        self.resize_pending = False
                 if (
                     not self.streaming
                     and self.worker is None
@@ -2468,15 +2493,29 @@ class _LiveTerminal:
     @contextmanager
     def _raw_terminal(self):
         old = termios.tcgetattr(self.fd)
+        old_winch_handler = signal.getsignal(signal.SIGWINCH)
+
+        def mark_resize_pending(_signum: int, _frame: object) -> None:
+            self.resize_pending = True
+
         try:
+            signal.signal(signal.SIGWINCH, mark_resize_pending)
             tty.setcbreak(self.fd)
             self.app._write(f"\x1b[?2004h{KEYBOARD_ENHANCEMENT_ENABLE}\x1b[6 q")
             yield
         finally:
+            signal.signal(signal.SIGWINCH, old_winch_handler)
             self.app._write(
                 f"\x1b[?2004l{KEYBOARD_ENHANCEMENT_DISABLE}\x1b[0 q\x1b[0m\x1b[?25h"
             )
             termios.tcsetattr(self.fd, termios.TCSADRAIN, old)
+
+    def _prompt_needs_resize_repaint(self) -> bool:
+        if self.prompt_lines == 0:
+            return False
+        return self.resize_pending or _terminal_line_width(
+            self.app._terminal_width()
+        ) != self.prompt_width
 
     def _read_available_input(self) -> None:
         readable, _, _ = select.select([self.fd], [], [], 0.03)
@@ -3364,9 +3403,9 @@ class _LiveTerminal:
         self.stream_text = []
         self.stream_tool_names = []
 
-    def _draw_prompt(self) -> None:
+    def _draw_prompt(self, *, force_reflow_clear: bool = False) -> None:
         frame = self._build_prompt_frame()
-        self._write_prompt_frame(frame)
+        self._write_prompt_frame(frame, force_reflow_clear=force_reflow_clear)
 
     def _build_prompt_frame(self) -> _PromptFrame:
         rows: list[str] = []
@@ -3395,8 +3434,13 @@ class _LiveTerminal:
             hint = " (press esc to interrupt and send immediately)"
             rows.append(_styled_terminal_line(title, STATUS_STYLE, width))
             rows.append(_styled_terminal_line(hint, STATUS_STYLE, width))
+            image_index = 1
             for text in self.pending_user_inputs:
-                line = f"  ↳ {_strip_control(text)}"
+                preview, image_index = _image_placeholder_text(
+                    text,
+                    image_index_start=image_index,
+                )
+                line = f"  ↳ {_strip_control(preview)}"
                 rows.append(_styled_terminal_line(line, STATUS_STYLE, width))
         prefix = " > "
         continuation_prefix = " " * len(prefix)
@@ -3431,14 +3475,14 @@ class _LiveTerminal:
                 width=line_width,
                 styles_enabled=self.app._styles_enabled(),
             )
-            rows.extend(_filled_terminal_line(row, STATUS_STYLE) for row in picker_rows)
+            rows.extend(_filled_terminal_line(row, STATUS_STYLE, width) for row in picker_rows)
         elif self._login_picker_active():
             login_rows = _render_login_picker_rows(
                 selected_index=self.login_picker_selected,
                 width=line_width,
                 styles_enabled=self.app._styles_enabled(),
             )
-            rows.extend(_filled_terminal_line(row, STATUS_STYLE) for row in login_rows)
+            rows.extend(_filled_terminal_line(row, STATUS_STYLE, width) for row in login_rows)
         else:
             input_hints = self._ensure_input_hints()
             if input_hints:
@@ -3448,11 +3492,11 @@ class _LiveTerminal:
                     width=line_width,
                     styles_enabled=self.app._styles_enabled(),
                 )
-                rows.extend(_filled_terminal_line(row, STATUS_STYLE) for row in hint_rows)
+                rows.extend(_filled_terminal_line(row, STATUS_STYLE, width) for row in hint_rows)
             elif self.app._statusline_enabled:
                 line = f" {status}"[:line_width].ljust(line_width)
                 statusline = f"{STATUS_STYLE}{_style_statusline_text(line)}{RESET}"
-                rows.append(_filled_terminal_line(statusline, STATUS_STYLE))
+                rows.append(_filled_terminal_line(statusline, STATUS_STYLE, width))
         return _PromptFrame(
             rows=rows,
             width=line_width,
@@ -3460,9 +3504,15 @@ class _LiveTerminal:
             cursor_column=cursor_column,
         )
 
-    def _write_prompt_frame(self, frame: _PromptFrame) -> None:
+    def _write_prompt_frame(
+        self,
+        frame: _PromptFrame,
+        *,
+        force_reflow_clear: bool = False,
+    ) -> None:
         can_overwrite_in_place = (
-            self.prompt_lines > 0
+            not force_reflow_clear
+            and self.prompt_lines > 0
             and self.prompt_width == frame.width
             and len(frame.rows) >= self.prompt_lines
         )
@@ -3473,7 +3523,7 @@ class _LiveTerminal:
                 parts.append(f"\x1b[{self.prompt_cursor_line_index}A")
             parts.append("\r")
         else:
-            parts.append(self._clear_prompt_sequence())
+            parts.append(self._clear_prompt_sequence(force_reflow_clear=force_reflow_clear))
             parts.append("\x1b[?25l")
         parts.append("\n".join(frame.rows))
         self.prompt_lines = len(frame.rows)
@@ -3537,23 +3587,14 @@ class _LiveTerminal:
         if sequence:
             self.app._write(sequence)
 
-    def _clear_prompt_sequence(self) -> str:
+    def _clear_prompt_sequence(self, *, force_reflow_clear: bool = False) -> str:
         if self.prompt_lines == 0:
             return ""
         current_width = _terminal_line_width(self.app._terminal_width())
         previous_width = self.prompt_width or current_width
-        wrap_factor = max(1, (previous_width + current_width - 1) // current_width)
-        cursor_visual_row = min(
-            wrap_factor - 1,
-            max(0, self.prompt_cursor_column) // current_width,
-        )
-        if current_width != previous_width:
-            rows_below_cursor_line = wrap_factor - cursor_visual_row - 1
-            rows_down_to_prompt_bottom = (
-                self.prompt_cursor_offset_from_bottom * wrap_factor
-                + rows_below_cursor_line
-            )
-            rows_to_prompt_top_from_bottom = max(0, self.prompt_lines * wrap_factor - 1)
+        if current_width != previous_width or force_reflow_clear:
+            rows_down_to_prompt_bottom = self.prompt_cursor_offset_from_bottom
+            rows_to_prompt_top_from_bottom = max(0, self.prompt_lines - 1)
             parts: list[str] = ["\x1b[?25l"]
             if rows_down_to_prompt_bottom:
                 parts.append(f"\x1b[{rows_down_to_prompt_bottom}B")
@@ -3563,12 +3604,8 @@ class _LiveTerminal:
             self._reset_prompt_state()
             return "".join(parts)
 
-        rows_to_clear = self.prompt_lines * wrap_factor
-        rows_below_cursor_line = wrap_factor - cursor_visual_row - 1
-        rows_down_to_prompt_bottom = (
-            self.prompt_cursor_offset_from_bottom * wrap_factor
-            + rows_below_cursor_line
-        )
+        rows_to_clear = self.prompt_lines
+        rows_down_to_prompt_bottom = self.prompt_cursor_offset_from_bottom
         parts: list[str] = []
         if rows_down_to_prompt_bottom:
             parts.append(f"\x1b[{rows_down_to_prompt_bottom}B")
@@ -3671,8 +3708,7 @@ def _run_resume_picker(entries: list[SessionEntry]) -> SessionEntry | None:
                 text = text[: width - 7] + "..."
             if idx == selected:
                 sys.stdout.write(
-                    f"\x1b[48;5;23;38;5;231m "
-                    f"{marker} {text.ljust(width - 4)} \x1b[0m\n"
+                    f"{USER_STYLE} {marker} {text.ljust(width - 4)} {RESET}\n"
                 )
             else:
                 sys.stdout.write(f" {marker} {text}\n")

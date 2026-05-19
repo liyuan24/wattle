@@ -682,6 +682,7 @@ def test_render_statusline_includes_context_usage_and_total_tokens() -> None:
         == "gpt-5.5 | Context 1.0% used (10.5k tok) | window: 1.1M tok | "
         "input: 40.0k tok | cached total: 12.0k tok | output: 2.0k tok | cwd: ~/repos/willow"
     )
+    assert " · " not in rendered
 
 
 def test_render_statusline_shows_zero_before_provider_usage() -> None:
@@ -708,6 +709,8 @@ def test_styled_statusline_colors_model_and_context_usage() -> None:
     )
 
     assert f"{tui.STATUS_MODEL_STYLE}gpt-5.5{tui.STATUS_STYLE}" in rendered
+    assert ";1m" not in tui.STATUS_MODEL_STYLE
+    assert ";1m" not in tui.STATUS_TOKEN_STYLE
     assert (
         f"{tui.STATUS_TOKEN_STYLE}Context 0.0% used (3 tok) | window: 1.1M tok | "
         f"input: 1 tok | cached total: 0 tok | output: 2 tok"
@@ -772,6 +775,20 @@ def test_basic_tui_writes_worked_duration_when_turn_finishes(
 
     assert "Worked for 1m 5s" in out
     assert "[status] Worked" not in out
+
+
+def test_tty_worked_duration_uses_muted_foreground(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(tui.time, "monotonic", lambda: 75.0)
+    out = _TTYBuffer()
+    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+
+    app._write_worked_duration(10.0)
+
+    rendered = out.getvalue()
+    assert rendered == f"{tui.WORKED_DURATION_STYLE}Worked for 1m 5s{tui.RESET}\n"
 
 
 def test_tui_attaches_local_image_from_user_text(tmp_path: Path) -> None:
@@ -907,14 +924,14 @@ def test_assistant_text_uses_terminal_background() -> None:
     assert "48;5" not in tui.ASSISTANT_STYLE
     assert "48;5" not in tui.THINKING_STYLE
     assert "48;5" in tui.PROMPT_STYLE
-    assert "48;5;30" in tui.USER_STYLE
+    assert "48;5;235" in tui.USER_STYLE
     assert tui.USER_STYLE == tui.PROMPT_STYLE
     assert "you" not in rendered
     assert "assistant" not in rendered
     assert rendered.count(tui.RESET) >= 3
 
 
-def test_chat_text_blocks_have_vertical_padding() -> None:
+def test_chat_text_blocks_keep_single_row_vertical_padding() -> None:
     out = _TTYBuffer()
     app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
@@ -925,12 +942,12 @@ def test_chat_text_blocks_have_vertical_padding() -> None:
 
     rendered_lines = _strip_ansi(out.getvalue()).splitlines()
     assert rendered_lines == [
-        " " * 10,
-        " hello    ",
-        " " * 10,
-        " " * 10,
-        " hi       ",
-        " " * 10,
+        "",
+        " hello",
+        "",
+        "",
+        " hi",
+        "",
     ]
 
 
@@ -959,16 +976,16 @@ def test_styled_transcript_block_returns_to_column_zero_before_painting() -> Non
 
     rendered = out.getvalue()
     assert "stale cursor column\r" in rendered
-    assert f"\r\r\x1b[?7l{tui.RESET}\x1b[2K{tui.ASSISTANT_STYLE}" in rendered
+    assert f"\r\r\x1b[?7l{tui.ASSISTANT_STYLE}\x1b[2K" in rendered
 
 
 def test_styled_terminal_line_clears_before_applying_background() -> None:
     rendered = tui._styled_terminal_line("hi", tui.PROMPT_STYLE, 8)
 
     assert rendered.startswith("\r")
-    assert f"{tui.RESET}\x1b[2K{tui.PROMPT_STYLE}" in rendered
-    assert f"{tui.PROMPT_STYLE}\x1b[2K" not in rendered
-    assert _strip_ansi(rendered) == "hi".ljust(8)
+    assert f"{tui.PROMPT_STYLE}\x1b[2K" in rendered
+    assert f"\x1b[2K{tui.PROMPT_STYLE}" not in rendered
+    assert _strip_ansi(rendered) == "hi"
 
 
 def test_terminal_width_allows_zoomed_terminals_below_forty_columns(
@@ -1033,9 +1050,9 @@ def test_running_terminal_line_animates_without_changing_text() -> None:
     assert "\x1b[40;" in first
     assert "\x1b[40;38;5;51;1m" in bright
     assert "\x1b[40;38;5;255m" in first
-    assert "\x1b[48;5;238" not in first
-    assert _strip_ansi(first) == " running bash - pytest".ljust(28)
-    assert _strip_ansi(second) == " running bash - pytest".ljust(28)
+    assert tui.STATUS_STYLE not in first
+    assert _strip_ansi(first) == " running bash - pytest"
+    assert _strip_ansi(second) == " running bash - pytest"
 
 
 @pytest.mark.parametrize(
@@ -1091,7 +1108,7 @@ def test_live_prompt_box_shows_working_when_streaming_without_input() -> None:
     rendered = out.getvalue()
     assert tui.PROMPT_STYLE in rendered
     assert "\x1b[40;" in rendered
-    assert "\x1b[48;5;238" not in rendered[: rendered.index(tui.PROMPT_STYLE)]
+    assert tui.STATUS_STYLE not in rendered[: rendered.index(tui.PROMPT_STYLE)]
     assert "working... (12s, press esc to interrupt)" in _strip_ansi(rendered)
     assert " > " in rendered
     assert live.prompt_lines == 7
@@ -1916,6 +1933,24 @@ def test_live_prompt_shows_queued_messages_with_interrupt_hint() -> None:
     assert "↳ second" in rendered
 
 
+def test_live_prompt_shows_queued_image_messages_as_anchors(tmp_path: Path) -> None:
+    image = tmp_path / "dragged image.png"
+    image.write_bytes(b"fake-png")
+    out = _TTYBuffer()
+    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+    live = tui._LiveTerminal(app)
+    live.streaming = True
+    escaped_path = str(image).replace(" ", "\\ ")
+    live.pending_user_inputs = [f"check {escaped_path}"]
+
+    live._draw_prompt()
+
+    rendered = out.getvalue()
+    assert "↳ check [Image #1]" in rendered
+    assert str(image) not in rendered
+
+
 def test_live_prompt_hides_pending_monitor_events() -> None:
     out = _TTYBuffer()
     app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
@@ -2499,8 +2534,8 @@ def test_terminal_streams_text_thinking_and_tool_markers_in_order(
     assert tool.calls == [{"message": "hi"}]
     assert out.index("thinking") < out.index("reasoning")
     assert out.index("reasoning") < out.index("answer")
-    assert out.index("answer") < out.index("● echo ok")
-    assert out.index("● echo ok") < out.index("echoed: hi")
+    assert out.index("answer") < out.index("| echo ok")
+    assert out.index("| echo ok") < out.index("echoed: hi")
     assert out.index("echoed: hi") < out.index("done")
     assert "---" in out
 
@@ -2533,7 +2568,7 @@ def test_terminal_read_only_blocks_non_read_tool(monkeypatch: pytest.MonkeyPatch
     )
 
     assert tool.calls == []
-    assert "● echo error" in out
+    assert "| echo error" in out
     assert "read-only mode" in out
 
 
@@ -2592,7 +2627,7 @@ def test_terminal_ask_permission_allows_tool(monkeypatch: pytest.MonkeyPatch) ->
 
     assert tool.calls == [{"message": "hi"}]
     assert "[permission] Allow echo" in out
-    assert "● echo ok" in out
+    assert "| echo ok" in out
 
 
 def test_terminal_bash_tool_renders_command_and_concise_output() -> None:
@@ -2622,7 +2657,7 @@ def test_terminal_bash_tool_renders_command_and_concise_output() -> None:
 
     out, _app = _drive(provider, ["run command", "/exit"])
 
-    assert "● bash ok - ran seq 1 5" in out
+    assert "| bash ok - ran seq 1 5" in out
     assert "  1" in out
     assert "  4" in out
     assert "... +1 lines" in out
@@ -2735,7 +2770,7 @@ def test_terminal_tool_error_renders_tool_name_state_and_clean_error(
 
     out, _app = _drive(provider, ["run tool", "/exit"])
 
-    assert "● explode error" in out
+    assert "| explode error" in out
     assert "ValueError: bad input" in out
     assert "ValueError('bad input')" not in out
 
@@ -2903,8 +2938,8 @@ def test_terminal_deduplicates_separators_between_consecutive_tool_turns(
 
     assert out.count("---") == 3
     assert "---\n---" not in out
-    assert out.index("● echo ok") < out.index("echoed: 1")
-    assert out.rindex("● echo ok") < out.index("echoed: 2")
+    assert out.index("| echo ok") < out.index("echoed: 1")
+    assert out.rindex("| echo ok") < out.index("echoed: 2")
 
 
 def test_tui_persists_session_file(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
