@@ -9,12 +9,13 @@ projection.
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from dataclasses import dataclass
 from typing import Literal
 
 from willow.compaction import (
     RuntimeCompaction,
+    amaybe_compact_messages,
     estimate_request_context_tokens,
     maybe_compact_messages,
 )
@@ -90,6 +91,7 @@ class RequestPreparer:
         messages: list[Message],
         *,
         force_compaction: bool = False,
+        reset_provider: bool = True,
     ) -> PreparedRequest:
         previous_state = self.state
         raw_context_tokens = estimate_request_context_tokens(
@@ -112,8 +114,72 @@ class RequestPreparer:
         )
         self.state = state
         compacted = state is not None
-        if compacted:
+        if compacted and reset_provider:
             self.provider.reset_conversation()
+        context_tokens = estimate_request_context_tokens(
+            system=self.system,
+            messages=request_messages,
+            tools=self.tools,
+        )
+        if (
+            self.on_compaction_record is not None
+            and state is not None
+            and state != previous_state
+        ):
+            reason = "overflow" if force_compaction else "threshold"
+            self.on_compaction_record(state, reason, raw_context_tokens, context_tokens)
+        return PreparedRequest(
+            request=CompletionRequest(
+                model=self.model,
+                messages=request_messages,
+                max_tokens=self.max_tokens,
+                system=self.system,
+                tools=self.tools,
+                thinking=self.thinking,
+                effort=self.effort,
+            ),
+            context_tokens=context_tokens,
+            request_bytes=estimate_serialized_request_bytes(
+                model=self.model,
+                messages=request_messages,
+                max_tokens=self.max_tokens,
+                system=self.system,
+                tools=self.tools,
+                thinking=self.thinking,
+                effort=self.effort,
+            ),
+            compacted=compacted,
+        )
+
+    async def aprepare(
+        self,
+        messages: list[Message],
+        *,
+        force_compaction: bool = False,
+    ) -> PreparedRequest:
+        previous_state = self.state
+        raw_context_tokens = estimate_request_context_tokens(
+            system=self.system,
+            messages=messages,
+            tools=self.tools,
+        )
+        request_messages, state = await amaybe_compact_messages(
+            provider=self.provider,
+            model=self.model,
+            system=self.system,
+            messages=messages,
+            tools=self.tools,
+            max_tokens=self.max_tokens,
+            context_window=self.context_window,
+            state=self.state,
+            on_start=self.on_compaction_start,
+            on_end=self.on_compaction_end,
+            force=force_compaction,
+        )
+        self.state = state
+        compacted = state is not None
+        if compacted:
+            await self.provider.areset_conversation()
         context_tokens = estimate_request_context_tokens(
             system=self.system,
             messages=request_messages,
@@ -164,6 +230,20 @@ def complete_with_recovery(
     return preparer.provider.complete(prepared.request)
 
 
+async def acomplete_with_recovery(
+    preparer: RequestPreparer,
+    messages: list[Message],
+) -> CompletionResponse:
+    prepared = await preparer.aprepare(messages)
+    try:
+        return await preparer.provider.acomplete(prepared.request)
+    except Exception as exc:
+        if not is_context_length_error(exc):
+            raise
+    prepared = await preparer.aprepare(messages, force_compaction=True)
+    return await preparer.provider.acomplete(prepared.request)
+
+
 def stream_with_recovery(
     preparer: RequestPreparer,
     messages: list[Message],
@@ -177,6 +257,23 @@ def stream_with_recovery(
             raise
     prepared = preparer.prepare(messages, force_compaction=True)
     yield from preparer.provider.stream(prepared.request)
+
+
+async def astream_with_recovery(
+    preparer: RequestPreparer,
+    messages: list[Message],
+) -> AsyncIterator[StreamEvent]:
+    prepared = await preparer.aprepare(messages)
+    try:
+        async for event in preparer.provider.astream(prepared.request):
+            yield event
+        return
+    except Exception as exc:
+        if not is_context_length_error(exc):
+            raise
+    prepared = await preparer.aprepare(messages, force_compaction=True)
+    async for event in preparer.provider.astream(prepared.request):
+        yield event
 
 
 def context_window_for_model(model: str) -> int | None:

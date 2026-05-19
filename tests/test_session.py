@@ -34,7 +34,6 @@ def _sample_record() -> session.SessionRecord:
             model="gpt-5.5",
             system="Be concise.",
             max_tokens=2048,
-            max_iterations=7,
         ),
         messages=[
             Message(
@@ -117,7 +116,6 @@ def test_session_record_round_trips_through_jsonl_file(tmp_path: Path) -> None:
         "model": "gpt-5.5",
         "system": "Be concise.",
         "max_tokens": 2048,
-        "max_iterations": 7,
         "thinking": False,
         "effort": None,
     }
@@ -247,7 +245,7 @@ def test_new_session_captures_settings_and_empty_history(tmp_path: Path) -> None
         model="claude-sonnet-4-6",
         system=None,
         max_tokens=512,
-        max_iterations=3,
+
         title="investigation",
         cwd=str(tmp_path),
     )
@@ -259,7 +257,7 @@ def test_new_session_captures_settings_and_empty_history(tmp_path: Path) -> None
         model="claude-sonnet-4-6",
         system=None,
         max_tokens=512,
-        max_iterations=3,
+
     )
     assert record.messages == []
 

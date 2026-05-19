@@ -55,7 +55,6 @@ class SessionSettings:
     model: str
     system: str | None = None
     max_tokens: int = 4096
-    max_iterations: int = 20
     thinking: bool = False
     effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None
 
@@ -99,7 +98,6 @@ def new_session(
     model: str,
     system: str | None = None,
     max_tokens: int = 4096,
-    max_iterations: int = 20,
     thinking: bool = False,
     effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None,
     title: str | None = None,
@@ -118,7 +116,6 @@ def new_session(
             model=model,
             system=system,
             max_tokens=max_tokens,
-            max_iterations=max_iterations,
             thinking=thinking,
             effort=effort,
         ),
@@ -340,7 +337,6 @@ def settings_to_dict(settings: SessionSettings) -> dict[str, Any]:
         "model": settings.model,
         "system": settings.system,
         "max_tokens": settings.max_tokens,
-        "max_iterations": settings.max_iterations,
         "thinking": settings.thinking,
         "effort": settings.effort,
     }
@@ -352,7 +348,6 @@ def settings_from_dict(data: dict[str, Any]) -> SessionSettings:
         model=_require_str(data, "model"),
         system=_optional_str(data, "system"),
         max_tokens=_require_int(data, "max_tokens"),
-        max_iterations=_require_int(data, "max_iterations"),
         thinking=_optional_bool(data, "thinking", default=False),
         effort=_optional_effort(data, "effort"),
     )
@@ -419,9 +414,10 @@ def message_from_dict(data: Any) -> Message:
 
 def content_block_to_dict(block: ContentBlock) -> dict[str, Any]:
     """Serialize the current Willow content block union."""
-    if isinstance(block, TextBlock):
+    block_type = getattr(block, "type", None)
+    if isinstance(block, TextBlock) or block_type == "text":
         return {"type": "text", "text": block.text}
-    if isinstance(block, ImageBlock):
+    if isinstance(block, ImageBlock) or block_type == "image":
         return {
             "type": "image",
             "path": block.path,
@@ -429,28 +425,28 @@ def content_block_to_dict(block: ContentBlock) -> dict[str, Any]:
             "filename": block.filename,
             "size_bytes": block.size_bytes,
         }
-    if isinstance(block, ToolUseBlock):
+    if isinstance(block, ToolUseBlock) or block_type == "tool_use":
         return {
             "type": "tool_use",
             "id": block.id,
             "name": block.name,
             "input": block.input,
         }
-    if isinstance(block, ToolResultBlock):
+    if isinstance(block, ToolResultBlock) or block_type == "tool_result":
         return {
             "type": "tool_result",
             "tool_use_id": block.tool_use_id,
             "content": block.content,
             "is_error": block.is_error,
         }
-    if isinstance(block, ThinkingBlock):
+    if isinstance(block, ThinkingBlock) or block_type == "thinking":
         return {
             "type": "thinking",
             "thinking": block.thinking,
             "signature": block.signature,
             "encrypted_content": block.encrypted_content,
         }
-    if isinstance(block, RedactedThinkingBlock):
+    if isinstance(block, RedactedThinkingBlock) or block_type == "redacted_thinking":
         return {"type": "redacted_thinking", "data": block.data}
     raise TypeError(f"unsupported content block: {type(block).__name__}")
 

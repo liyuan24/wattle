@@ -67,7 +67,7 @@ def test_request_translation_full_shape() -> None:
     """A request with system, user text, assistant text+tool_use, tool result,
     and one tool spec produces the expected wire kwargs."""
     client = _make_client(_fake_response(content="ok", finish_reason="stop"))
-    provider = OpenAICompletionsProvider(client=client)
+    provider = OpenAICompletionsProvider(async_client=client)
 
     request = CompletionRequest(
         model="gpt-4o-mini",
@@ -158,7 +158,7 @@ def test_user_image_block_translates_to_chat_image_part(tmp_path) -> None:
     image = tmp_path / "shot.png"
     image.write_bytes(b"image-bytes")
     client = _make_client(_fake_response(content="ok"))
-    provider = OpenAICompletionsProvider(client=client)
+    provider = OpenAICompletionsProvider(async_client=client)
 
     provider.complete(
         CompletionRequest(
@@ -199,7 +199,7 @@ def test_user_text_blocks_are_separated_when_flattened() -> None:
     """Chat Completions has one content string per user message, so multiple
     Willow text blocks need an explicit separator when flattened."""
     client = _make_client(_fake_response(content="ok"))
-    provider = OpenAICompletionsProvider(client=client)
+    provider = OpenAICompletionsProvider(async_client=client)
 
     provider.complete(
         CompletionRequest(
@@ -231,7 +231,7 @@ def test_user_text_blocks_are_separated_when_flattened() -> None:
 
 def test_request_no_system_omits_system_message() -> None:
     client = _make_client(_fake_response(content="ok"))
-    provider = OpenAICompletionsProvider(client=client)
+    provider = OpenAICompletionsProvider(async_client=client)
 
     request = CompletionRequest(
         model="gpt-4o-mini",
@@ -248,7 +248,7 @@ def test_request_no_system_omits_system_message() -> None:
 
 def test_request_no_tools_omits_tools_kwarg() -> None:
     client = _make_client(_fake_response(content="ok"))
-    provider = OpenAICompletionsProvider(client=client)
+    provider = OpenAICompletionsProvider(async_client=client)
 
     provider.complete(
         CompletionRequest(
@@ -265,7 +265,7 @@ def test_assistant_tool_only_message_has_null_content() -> None:
     """An assistant turn with only tool_use blocks (no text) must set
     `content=None` per the OpenAI convention."""
     client = _make_client(_fake_response(content="ok"))
-    provider = OpenAICompletionsProvider(client=client)
+    provider = OpenAICompletionsProvider(async_client=client)
 
     provider.complete(
         CompletionRequest(
@@ -293,7 +293,7 @@ def test_assistant_tool_only_message_has_null_content() -> None:
 
 def test_multiple_tool_results_lift_to_separate_wire_messages() -> None:
     client = _make_client(_fake_response(content="ok"))
-    provider = OpenAICompletionsProvider(client=client)
+    provider = OpenAICompletionsProvider(async_client=client)
 
     provider.complete(
         CompletionRequest(
@@ -329,7 +329,7 @@ def test_multiple_tool_results_lift_to_separate_wire_messages() -> None:
 
 def test_user_text_can_follow_tool_results_in_same_willow_message() -> None:
     client = _make_client(_fake_response(content="ok"))
-    provider = OpenAICompletionsProvider(client=client)
+    provider = OpenAICompletionsProvider(async_client=client)
 
     provider.complete(
         CompletionRequest(
@@ -362,7 +362,7 @@ def test_user_text_can_follow_tool_results_in_same_willow_message() -> None:
 def test_is_error_prepends_error_marker() -> None:
     """`is_error=True` is conveyed via a `[error] ` prefix on the wire content."""
     client = _make_client(_fake_response(content="ok"))
-    provider = OpenAICompletionsProvider(client=client)
+    provider = OpenAICompletionsProvider(async_client=client)
 
     provider.complete(
         CompletionRequest(
@@ -420,7 +420,7 @@ def test_response_translation_text_and_tool_calls() -> None:
         prompt_tokens=12,
         completion_tokens=4,
     )
-    provider = OpenAICompletionsProvider(client=_make_client(response))
+    provider = OpenAICompletionsProvider(async_client=_make_client(response))
 
     result = provider.complete(
         CompletionRequest(
@@ -456,7 +456,7 @@ def test_usage_includes_cached_tokens_when_reported() -> None:
         completion_tokens=5,
         cached_tokens=64,
     )
-    provider = OpenAICompletionsProvider(client=_make_client(response))
+    provider = OpenAICompletionsProvider(async_client=_make_client(response))
 
     result = provider.complete(
         CompletionRequest(
@@ -475,7 +475,7 @@ def test_usage_includes_cached_tokens_when_reported() -> None:
 
 def test_response_with_only_text_no_tool_calls() -> None:
     response = _fake_response(content="all done", tool_calls=None, finish_reason="stop")
-    provider = OpenAICompletionsProvider(client=_make_client(response))
+    provider = OpenAICompletionsProvider(async_client=_make_client(response))
 
     result = provider.complete(
         CompletionRequest(
@@ -497,7 +497,7 @@ def test_response_with_only_tool_calls_no_text() -> None:
     response = _fake_response(
         content=None, tool_calls=[tool_call], finish_reason="tool_calls"
     )
-    provider = OpenAICompletionsProvider(client=_make_client(response))
+    provider = OpenAICompletionsProvider(async_client=_make_client(response))
 
     result = provider.complete(
         CompletionRequest(
@@ -526,7 +526,7 @@ def test_response_with_only_tool_calls_no_text() -> None:
 )
 def test_finish_reason_mapping(finish_reason: str, expected: str) -> None:
     response = _fake_response(content="x", finish_reason=finish_reason)
-    provider = OpenAICompletionsProvider(client=_make_client(response))
+    provider = OpenAICompletionsProvider(async_client=_make_client(response))
 
     result = provider.complete(
         CompletionRequest(
@@ -547,7 +547,7 @@ def test_thinking_blocks_in_input_are_dropped_from_wire_messages() -> None:
     """Chat Completions has no shape for reasoning content; ThinkingBlocks
     must not appear anywhere in the outgoing wire messages."""
     client = _make_client(_fake_response(content="ok"))
-    provider = OpenAICompletionsProvider(client=client)
+    provider = OpenAICompletionsProvider(async_client=client)
 
     provider.complete(
         CompletionRequest(
@@ -588,7 +588,7 @@ def test_assistant_message_with_only_thinking_blocks_is_skipped() -> None:
     after stripping; it must not appear on the wire as a malformed
     `{"role": "assistant", "content": None}` message."""
     client = _make_client(_fake_response(content="ok"))
-    provider = OpenAICompletionsProvider(client=client)
+    provider = OpenAICompletionsProvider(async_client=client)
 
     provider.complete(
         CompletionRequest(
@@ -619,7 +619,7 @@ def test_response_never_contains_thinking_block() -> None:
     """The Chat Completions response shape has no reasoning channel, so
     the deserialized content cannot contain a ThinkingBlock."""
     response = _fake_response(content="all done", finish_reason="stop")
-    provider = OpenAICompletionsProvider(client=_make_client(response))
+    provider = OpenAICompletionsProvider(async_client=_make_client(response))
 
     result = provider.complete(
         CompletionRequest(
@@ -635,7 +635,7 @@ def test_thinking_false_omits_reasoning_effort() -> None:
     """With the default `thinking=False`, no `reasoning_effort` kwarg is
     emitted regardless of any other field state."""
     client = _make_client(_fake_response(content="ok"))
-    provider = OpenAICompletionsProvider(client=client)
+    provider = OpenAICompletionsProvider(async_client=client)
 
     provider.complete(
         CompletionRequest(
@@ -653,7 +653,7 @@ def test_thinking_false_omits_reasoning_effort() -> None:
 def test_effort_passes_through(effort: str) -> None:
     """Each non-`"max"` effort value is forwarded as-is on the wire."""
     client = _make_client(_fake_response(content="ok"))
-    provider = OpenAICompletionsProvider(client=client)
+    provider = OpenAICompletionsProvider(async_client=client)
 
     provider.complete(
         CompletionRequest(
@@ -672,7 +672,7 @@ def test_effort_passes_through(effort: str) -> None:
 def test_effort_max_clamps_to_xhigh() -> None:
     """`"max"` is Anthropic-only; OpenAI providers clamp it to `"xhigh"`."""
     client = _make_client(_fake_response(content="ok"))
-    provider = OpenAICompletionsProvider(client=client)
+    provider = OpenAICompletionsProvider(async_client=client)
 
     provider.complete(
         CompletionRequest(
@@ -700,7 +700,7 @@ def test_effort_max_clamps_to_xhigh() -> None:
 def test_budget_buckets_to_effort(budget: int, expected: str) -> None:
     """A bare `budget` (no `effort`) is bucketed into an effort level."""
     client = _make_client(_fake_response(content="ok"))
-    provider = OpenAICompletionsProvider(client=client)
+    provider = OpenAICompletionsProvider(async_client=client)
 
     provider.complete(
         CompletionRequest(
@@ -719,7 +719,7 @@ def test_budget_buckets_to_effort(budget: int, expected: str) -> None:
 def test_effort_takes_precedence_over_budget() -> None:
     """When both are set, `effort` wins; `budget` is not consulted."""
     client = _make_client(_fake_response(content="ok"))
-    provider = OpenAICompletionsProvider(client=client)
+    provider = OpenAICompletionsProvider(async_client=client)
 
     provider.complete(
         CompletionRequest(
@@ -740,7 +740,7 @@ def test_thinking_true_no_effort_no_budget_omits_reasoning_effort() -> None:
     """`thinking=True` with neither `effort` nor `budget` lets the API
     default apply — no `reasoning_effort` kwarg is emitted."""
     client = _make_client(_fake_response(content="ok"))
-    provider = OpenAICompletionsProvider(client=client)
+    provider = OpenAICompletionsProvider(async_client=client)
 
     provider.complete(
         CompletionRequest(
@@ -806,7 +806,7 @@ def test_stream_text_emits_deltas_then_complete_with_usage() -> None:
         _final_usage_chunk(prompt_tokens=10, completion_tokens=4, cached_tokens=6),
     ]
     client = _stream_client(chunks)
-    provider = OpenAICompletionsProvider(client=client)
+    provider = OpenAICompletionsProvider(async_client=client)
 
     emitted = list(
         provider.stream(
@@ -844,7 +844,7 @@ def test_stream_tool_calls_emit_start_then_argument_fragments() -> None:
         _final_usage_chunk(prompt_tokens=5, completion_tokens=8),
     ]
     client = _stream_client(chunks)
-    provider = OpenAICompletionsProvider(client=client)
+    provider = OpenAICompletionsProvider(async_client=client)
 
     emitted = list(
         provider.stream(
@@ -886,7 +886,7 @@ def test_stream_parallel_tool_calls_track_per_index_independently() -> None:
         _final_usage_chunk(prompt_tokens=3, completion_tokens=12),
     ]
     client = _stream_client(chunks)
-    provider = OpenAICompletionsProvider(client=client)
+    provider = OpenAICompletionsProvider(async_client=client)
 
     emitted = list(
         provider.stream(
@@ -920,7 +920,7 @@ def test_stream_finish_reason_length_maps_to_max_tokens() -> None:
         _final_usage_chunk(prompt_tokens=2, completion_tokens=2),
     ]
     client = _stream_client(chunks)
-    provider = OpenAICompletionsProvider(client=client)
+    provider = OpenAICompletionsProvider(async_client=client)
 
     emitted = list(
         provider.stream(

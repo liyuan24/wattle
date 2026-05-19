@@ -65,7 +65,9 @@ class _ProviderSpec[ClientT]:
 
 
 type _DispatchSpec = (
-    _ProviderSpec[anthropic.Anthropic] | _ProviderSpec[openai.OpenAI] | _ProviderSpec[str]
+    _ProviderSpec[anthropic.AsyncAnthropic]
+    | _ProviderSpec[openai.AsyncOpenAI]
+    | _ProviderSpec[str]
 )
 
 
@@ -73,49 +75,49 @@ type _DispatchSpec = (
 # value type erases `ClientT` (each entry's SDK client may differ); the
 # `build()` method preserves the per-entry consistency internally.
 _PROVIDER_DISPATCH: dict[str, _DispatchSpec] = {
-    "anthropic": _ProviderSpec[anthropic.Anthropic](
+    "anthropic": _ProviderSpec[anthropic.AsyncAnthropic](
         vendor="anthropic",
-        client_factory=lambda key: anthropic.Anthropic(api_key=key),
-        provider_factory=lambda client: AnthropicProvider(client=client),
+        client_factory=lambda key: anthropic.AsyncAnthropic(api_key=key),
+        provider_factory=lambda client: AnthropicProvider(async_client=client),
     ),
-    "deepseek": _ProviderSpec[openai.OpenAI](
+    "deepseek": _ProviderSpec[openai.AsyncOpenAI](
         vendor="deepseek",
-        client_factory=lambda key: openai.OpenAI(
+        client_factory=lambda key: openai.AsyncOpenAI(
             api_key=key,
             base_url="https://api.deepseek.com",
         ),
-        provider_factory=lambda client: OpenAICompletionsProvider(client=client),
+        provider_factory=lambda client: OpenAICompletionsProvider(async_client=client),
     ),
-    "kimi": _ProviderSpec[openai.OpenAI](
+    "kimi": _ProviderSpec[openai.AsyncOpenAI](
         vendor="kimi",
-        client_factory=lambda key: openai.OpenAI(
+        client_factory=lambda key: openai.AsyncOpenAI(
             api_key=key,
             base_url="https://api.moonshot.ai/v1",
         ),
-        provider_factory=lambda client: OpenAICompletionsProvider(client=client),
+        provider_factory=lambda client: OpenAICompletionsProvider(async_client=client),
     ),
-    "minimax": _ProviderSpec[openai.OpenAI](
+    "minimax": _ProviderSpec[openai.AsyncOpenAI](
         vendor="minimax",
-        client_factory=lambda key: openai.OpenAI(
+        client_factory=lambda key: openai.AsyncOpenAI(
             api_key=key,
             base_url="https://api.minimax.io/v1",
         ),
-        provider_factory=lambda client: OpenAICompletionsProvider(client=client),
+        provider_factory=lambda client: OpenAICompletionsProvider(async_client=client),
     ),
     "openai_codex": _ProviderSpec[str](
         vendor="openai",
         client_factory=lambda key: key,
         provider_factory=lambda token: OpenAICodexResponsesProvider(bearer_token=token),
     ),
-    "openai_completions": _ProviderSpec[openai.OpenAI](
+    "openai_completions": _ProviderSpec[openai.AsyncOpenAI](
         vendor="openai",
-        client_factory=lambda key: openai.OpenAI(api_key=key),
-        provider_factory=lambda client: OpenAICompletionsProvider(client=client),
+        client_factory=lambda key: openai.AsyncOpenAI(api_key=key),
+        provider_factory=lambda client: OpenAICompletionsProvider(async_client=client),
     ),
-    "openai_responses": _ProviderSpec[openai.OpenAI](
+    "openai_responses": _ProviderSpec[openai.AsyncOpenAI](
         vendor="openai",
-        client_factory=lambda key: openai.OpenAI(api_key=key),
-        provider_factory=lambda client: OpenAIResponsesProvider(client=client),
+        client_factory=lambda key: openai.AsyncOpenAI(api_key=key),
+        provider_factory=lambda client: OpenAIResponsesProvider(async_client=client),
     ),
 }
 
@@ -129,7 +131,6 @@ def run_agent(
     user_input: str,
     *,
     max_tokens: int = 4096,
-    max_iterations: int = 20,
     permission_mode: PermissionMode = PermissionMode.YOLO,
     thinking: bool = False,
     effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None,
@@ -142,7 +143,6 @@ def run_agent(
         model: Model id passed through to the provider unchanged.
         user_input: First user turn.
         max_tokens: Forwarded to the provider per turn.
-        max_iterations: Hard cap on assistant turns before the loop exits.
         thinking: Enable provider reasoning controls.
         effort: Requested reasoning effort when ``thinking`` is enabled.
 
@@ -175,7 +175,6 @@ def run_agent(
             user_input,
             model,
             max_tokens,
-            max_iterations,
             thinking=thinking,
             effort=effort,
         )
@@ -187,7 +186,6 @@ def run_agent(
         user_input,
         model,
         max_tokens,
-        max_iterations,
         permission_gate=PermissionGate(permission_mode),
         thinking=thinking,
         effort=effort,

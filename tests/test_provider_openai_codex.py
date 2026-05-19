@@ -9,6 +9,7 @@ from typing import Any
 
 from willow.providers import (
     CompletionRequest,
+    CompletionResponse,
     Message,
     OpenAICodexResponsesProvider,
     StreamComplete,
@@ -59,6 +60,21 @@ class _FakeSSE:
         chunk = self._payload[self._offset : self._offset + size]
         self._offset += len(chunk)
         return chunk
+
+    def readline(self) -> bytes:
+        if self._offset >= len(self._payload):
+            return b""
+        end = self._payload.find(b"\n", self._offset)
+        if end == -1:
+            end = len(self._payload) - 1
+        chunk = self._payload[self._offset : end + 1]
+        self._offset += len(chunk)
+        return chunk
+
+
+class _LineOnlySSE(_FakeSSE):
+    def read(self, size: int = -1) -> bytes:
+        raise AssertionError("SSE parser should not wait for fixed-size reads")
 
 
 def test_codex_provider_builds_chatgpt_backend_request() -> None:
@@ -284,6 +300,47 @@ def test_codex_provider_streams_text_and_tool_calls() -> None:
     assert response.content == [
         TextBlock(text="hi"),
         ToolUseBlock(id="call_1", name="read", input={"path": "x"}),
+    ]
+
+
+def test_codex_provider_reads_sse_incrementally_by_line() -> None:
+    provider = OpenAICodexResponsesProvider(
+        bearer_token=_token(),
+        urlopen=lambda _req: _LineOnlySSE(
+            [
+                {"type": "response.output_text.delta", "delta": "hi"},
+                {
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp_1",
+                        "status": "completed",
+                        "output": [],
+                        "usage": {"input_tokens": 3, "output_tokens": 4},
+                    },
+                },
+            ]
+        ),
+    )
+
+    emitted = list(
+        provider.stream(
+            CompletionRequest(
+                model="gpt-5.5",
+                max_tokens=512,
+                messages=[Message(role="user", content=[TextBlock(text="hello")])],
+            )
+        )
+    )
+
+    assert emitted == [
+        TextDelta(text="hi"),
+        StreamComplete(
+            response=CompletionResponse(
+                content=[TextBlock(text="hi")],
+                stop_reason="end_turn",
+                usage={"input_tokens": 3, "output_tokens": 4},
+            )
+        ),
     ]
 
 

@@ -9,6 +9,7 @@ native terminal scrollback remains the source of truth.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import contextlib
 import hashlib
 import mimetypes
@@ -23,18 +24,19 @@ import sys
 import termios
 import textwrap
 import threading
-import time
+import time as _time
 import tty
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, TextIO, cast
 from urllib.parse import unquote, urlparse
 
 from willow.auth import login_openai_codex
 from willow.compaction import RuntimeCompaction
-from willow.loop import dispatch_tool
+from willow.loop import dispatch_tool_blocks_async
 from willow.message_history import (
     interrupted_user_text_blocks,
     monitor_event_text_blocks,
@@ -70,8 +72,8 @@ from willow.providers import (
 )
 from willow.request_preparation import (
     RequestPreparer,
+    astream_with_recovery,
     context_window_for_model,
-    stream_with_recovery,
 )
 from willow.session import (
     SessionCompaction,
@@ -95,6 +97,12 @@ from willow.system_prompt import build_system_prompt
 from willow.tools import DEFAULT_RUNTIME, TOOLS_BY_NAME
 from willow.tools.base import Tool
 from willow.turns import append_turn_step, build_turn_step
+
+time = SimpleNamespace(
+    monotonic=_time.monotonic,
+    strftime=_time.strftime,
+    gmtime=_time.gmtime,
+)
 
 with contextlib.suppress(ImportError):
     import readline  # noqa: F401
@@ -166,6 +174,7 @@ TOOL_MARKER_STYLE = "\x1b[38;5;82m"
 TOOL_MARKER = "|"
 TOOL_TITLE_STYLE = "\x1b[38;5;255;1m"
 TOOL_PREVIEW_STYLE = "\x1b[38;5;245m"
+QUIET_SUCCESS_TOOL_NAMES = frozenset({"wait_agent", "send_input", "close_agent"})
 DIFF_ADD_STYLE = "\x1b[48;5;22;38;5;231m"
 DIFF_DELETE_STYLE = "\x1b[48;5;52;38;5;231m"
 DIFF_META_STYLE = "\x1b[38;5;245m"
@@ -222,6 +231,8 @@ def _compact_lines(content: str, *, max_lines: int = 4, max_width: int = 110) ->
 
 def _tool_action_title(block: ToolUseBlock, *, is_error: bool = False) -> str:
     if is_error:
+        if block.name in {"read", "write", "edit"}:
+            return f"{block.name} error - {_tool_arg(block, 'path', '<missing path>')}"
         return f"{block.name} error"
     if block.name == "bash":
         return f"bash ok - ran {_tool_arg(block, 'command', '<missing command>')}"
@@ -262,6 +273,27 @@ def _tool_edit_title(block: ToolUseBlock, *, path: str, added: int, deleted: int
 def _tool_arg(block: ToolUseBlock, name: str, default: str) -> str:
     value = block.input.get(name, default)
     return _one_line(value)
+
+
+def _suppress_successful_tool_result(
+    block: ToolUseBlock,
+    result: ToolResultBlock,
+) -> bool:
+    return block.name in QUIET_SUCCESS_TOOL_NAMES and not result.is_error
+
+
+def _first_tool_result(
+    block: ToolUseBlock,
+    blocks: list[ContentBlock],
+) -> ToolResultBlock:
+    for result in blocks:
+        if isinstance(result, ToolResultBlock):
+            return result
+    return ToolResultBlock(
+        tool_use_id=block.id,
+        content=f"Tool returned no textual result: {block.name!r}",
+        is_error=True,
+    )
 
 
 def _diff_counts(diff_lines: list[str]) -> tuple[int, int]:
@@ -1257,7 +1289,6 @@ class WillowApp:
         self.current_provider_name: str = args.provider
         self.current_model: str = args.model
         self.max_tokens: int = args.max_tokens
-        self.max_iterations: int = args.max_iterations
         self.thinking: bool = bool(getattr(args, "thinking", False))
         self.effort: str | None = cast(str | None, getattr(args, "effort", None))
         self.messages: list[Message] = []
@@ -1310,7 +1341,6 @@ class WillowApp:
                     model=self.current_model,
                     system=self.system,
                     max_tokens=self.max_tokens,
-                    max_iterations=self.max_iterations,
                     thinking=self.thinking,
                     effort=cast(Any, self.effort),
                 )
@@ -1483,7 +1513,6 @@ class WillowApp:
             "current_model": self.current_model,
             "system": self.system,
             "max_tokens": self.max_tokens,
-            "max_iterations": self.max_iterations,
             "thinking": self.thinking,
             "effort": self.effort,
             "permission_mode": self.permission_mode,
@@ -1503,9 +1532,6 @@ class WillowApp:
         self.current_model = str(state.get("current_model", self.current_model))
         self.system = cast(str | None, state.get("system", self.system))
         self.max_tokens = int(cast(Any, state.get("max_tokens", self.max_tokens)))
-        self.max_iterations = int(
-            cast(Any, state.get("max_iterations", self.max_iterations))
-        )
         self.thinking = bool(state.get("thinking", self.thinking))
         self.effort = cast(str | None, state.get("effort", self.effort))
         self.permission_mode = cast(
@@ -1541,8 +1567,9 @@ class WillowApp:
     def _run_turn(self, *, started_at: float | None = None) -> None:
         if started_at is None:
             started_at = time.monotonic()
+        self._configure_subagents()
         preparer = self._request_preparer()
-        for _ in range(self.max_iterations):
+        while True:
             response = self._drive_stream_with_recovery(preparer)
             self._record_usage(response)
 
@@ -1577,10 +1604,6 @@ class WillowApp:
                 self._write_status_snapshot()
                 self._write_worked_duration(started_at)
                 return
-
-        self._write_line(f"[hit max_iterations={self.max_iterations}; returning control]")
-        self._write_status_snapshot()
-        self._write_worked_duration(started_at)
 
     def _run_turn_recovering(self) -> None:
         started_at = time.monotonic()
@@ -1629,6 +1652,19 @@ class WillowApp:
             on_compaction_record=self._record_compaction_checkpoint,
         )
 
+    def _configure_subagents(self, *, provider: Provider | None = None) -> None:
+        self.runtime.subagents.configure(
+            provider=provider or self.provider,
+            tools_by_name=TOOLS_BY_NAME,
+            system=self.system,
+            model=self.current_model,
+            max_tokens=self.max_tokens,
+            permission_gate=self.permission_gate,
+            context_window=_context_window_for_model(self.current_model),
+            thinking=self.thinking,
+            effort=cast(Any, self.effort),
+        )
+
     def _messages_for_request(
         self,
         *,
@@ -1647,6 +1683,12 @@ class WillowApp:
         self._write_panel("status", "Auto-compacting...", STATUS_STYLE)
 
     def _drive_stream_with_recovery(self, preparer: RequestPreparer) -> CompletionResponse:
+        return asyncio.run(self._adrive_stream_with_recovery(preparer))
+
+    async def _adrive_stream_with_recovery(
+        self,
+        preparer: RequestPreparer,
+    ) -> CompletionResponse:
         final_response: CompletionResponse | None = None
         seen_tools: set[str] = set()
         in_thinking = False
@@ -1663,8 +1705,7 @@ class WillowApp:
             in_text = False
 
         try:
-            events = stream_with_recovery(preparer, self.messages)
-            for event in events:
+            async for event in astream_with_recovery(preparer, self.messages):
                 if isinstance(event, TextDelta):
                     if in_thinking:
                         self._write(f"{RESET}\n" if self._styles_enabled() else "\n")
@@ -1702,14 +1743,21 @@ class WillowApp:
             raise RuntimeError("provider.stream() ended without StreamComplete")
         return final_response
 
-    def _dispatch_tools(self, response: CompletionResponse) -> list[ToolResultBlock]:
-        results: list[ToolResultBlock] = []
+    def _dispatch_tools(self, response: CompletionResponse) -> list[ContentBlock]:
+        return asyncio.run(self._adispatch_tools(response))
+
+    async def _adispatch_tools(self, response: CompletionResponse) -> list[ContentBlock]:
+        results: list[ContentBlock] = []
         for block in response.content:
             if not isinstance(block, ToolUseBlock):
                 continue
-            result = dispatch_tool(block, TOOLS_BY_NAME, self.permission_gate)
-            self._write_tool_result(block, result)
-            results.append(result)
+            blocks = await dispatch_tool_blocks_async(
+                block,
+                TOOLS_BY_NAME,
+                self.permission_gate,
+            )
+            self._write_tool_result(block, _first_tool_result(block, blocks))
+            results.extend(blocks)
         return results
 
     def _ask_tool_permission(self, block: ToolUseBlock) -> PermissionAnswer:
@@ -1740,6 +1788,8 @@ class WillowApp:
         result: ToolResultBlock,
     ) -> None:
         self._last_transcript_was_separator = False
+        if _suppress_successful_tool_result(block, result):
+            return
         if block.name in {"write", "edit"} and not result.is_error:
             self._write_edit_result(block, result)
             return
@@ -1873,7 +1923,6 @@ class WillowApp:
                 model=self.current_model,
                 system=self.system,
                 max_tokens=self.max_tokens,
-                max_iterations=self.max_iterations,
                 thinking=self.thinking,
                 effort=cast(Any, self.effort),
             )
@@ -1888,7 +1937,6 @@ class WillowApp:
             model=self.current_model,
             system=self.system,
             max_tokens=self.max_tokens,
-            max_iterations=self.max_iterations,
             thinking=self.thinking,
             effort=cast(Any, self.effort),
             title=parent_record.metadata.title,
@@ -1945,7 +1993,6 @@ class WillowApp:
         self.current_model = record.settings.model
         self.system = record.settings.system
         self.max_tokens = record.settings.max_tokens
-        self.max_iterations = record.settings.max_iterations
         self.thinking = record.settings.thinking
         self.effort = cast(str | None, record.settings.effort)
         self.messages = list(record.messages)
@@ -2264,7 +2311,6 @@ class WillowApp:
                 model=self.current_model,
                 system=self.system,
                 max_tokens=self.max_tokens,
-                max_iterations=self.max_iterations,
                 thinking=self.thinking,
                 effort=cast(Any, self.effort),
             ),
@@ -2872,17 +2918,6 @@ class _LiveTerminal:
         self._record_input_history(text)
         if self.streaming:
             self.pending_user_inputs.append(text)
-            if text.startswith("/"):
-                message = (
-                    "Queued command text while a turn is streaming; "
-                    "press Esc to interrupt and send now."
-                )
-            else:
-                message = (
-                    "Queued input while a turn is streaming; "
-                    "press Esc to interrupt and send now."
-                )
-            self.app._write_panel("status", message, STATUS_STYLE)
             self._draw_prompt()
             return
         expanded_text = self.app._expand_skill_text(text)
@@ -3158,6 +3193,7 @@ class _LiveTerminal:
         self._clear_stream_buffers()
         turn_id = self.active_turn_id
         provider = self.app.provider
+        self.app._configure_subagents(provider=provider)
         self.worker = threading.Thread(
             target=self._worker_main,
             args=(turn_id, provider),
@@ -3166,14 +3202,18 @@ class _LiveTerminal:
         self.worker.start()
 
     def _worker_main(self, turn_id: int, provider: Provider) -> None:
+        asyncio.run(self._worker_main_async(turn_id, provider))
+
+    async def _worker_main_async(self, turn_id: int, provider: Provider) -> None:
         preparer = self.app._request_preparer(
             provider=provider,
             on_compaction_start=lambda: self.events.put((turn_id, "compact_start", None)),
             on_compaction_end=lambda: self.events.put((turn_id, "compact_end", None)),
         )
+        messages = list(self.app.messages)
         try:
             final: CompletionResponse | None = None
-            for event in stream_with_recovery(preparer, self.app.messages):
+            async for event in astream_with_recovery(preparer, messages):
                 self.events.put((turn_id, "stream", event))
                 if isinstance(event, StreamComplete):
                     final = event.response
@@ -3312,33 +3352,38 @@ class _LiveTerminal:
     def _dispatch_tools_with_prompt(
         self,
         response: CompletionResponse,
-    ) -> list[ToolResultBlock]:
-        results: list[ToolResultBlock] = []
+    ) -> list[ContentBlock]:
+        results: list[ContentBlock] = []
         for block in response.content:
             if not isinstance(block, ToolUseBlock):
                 continue
-            result = self._dispatch_tool_with_animated_prompt(block)
+            blocks = self._dispatch_tool_with_animated_prompt(block)
+            result = _first_tool_result(block, blocks)
             self.app._write_tool_result(block, result)
-            results.append(result)
+            results.extend(blocks)
         return results
 
-    def _dispatch_tool_with_animated_prompt(self, block: ToolUseBlock) -> ToolResultBlock:
+    def _dispatch_tool_with_animated_prompt(self, block: ToolUseBlock) -> list[ContentBlock]:
         tool = TOOLS_BY_NAME.get(block.name)
         if tool is None:
-            return ToolResultBlock(
-                tool_use_id=block.id,
-                content=f"Unknown tool: {block.name!r}",
-                is_error=True,
-            )
+            return [
+                ToolResultBlock(
+                    tool_use_id=block.id,
+                    content=f"Unknown tool: {block.name!r}",
+                    is_error=True,
+                )
+            ]
         permission = self.app.permission_gate.check(block)
         if not permission.allowed:
-            return ToolResultBlock(
-                tool_use_id=block.id,
-                content=permission.denial or "Tool execution denied.",
-                is_error=True,
-            )
+            return [
+                ToolResultBlock(
+                    tool_use_id=block.id,
+                    content=permission.denial or "Tool execution denied.",
+                    is_error=True,
+                )
+            ]
 
-        result_box: list[ToolResultBlock] = []
+        result_box: list[list[ContentBlock]] = []
 
         def run_tool() -> None:
             result_box.append(self._run_tool_without_permission(block, tool))
@@ -3354,13 +3399,16 @@ class _LiveTerminal:
         worker.start()
         try:
             while worker.is_alive():
-                self._read_available_input()
+                if self.fd >= 0:
+                    self._read_available_input()
                 if not self.streaming:
-                    return ToolResultBlock(
-                        tool_use_id=block.id,
-                        content="Interrupted by user.",
-                        is_error=True,
-                    )
+                    return [
+                        ToolResultBlock(
+                            tool_use_id=block.id,
+                            content="Interrupted by user.",
+                            is_error=True,
+                        )
+                    ]
                 self._last_running_frame_at = time.monotonic()
                 self._redraw_running_status_line()
                 worker.join(timeout=0.04)
@@ -3371,23 +3419,17 @@ class _LiveTerminal:
             self.active_tool_status = None
         if result_box:
             return result_box[0]
-        return ToolResultBlock(
-            tool_use_id=block.id,
-            content=f"Tool ended without a result: {block.name!r}",
-            is_error=True,
-        )
-
-    @staticmethod
-    def _run_tool_without_permission(block: ToolUseBlock, tool: Tool) -> ToolResultBlock:
-        try:
-            output = tool.run(**block.input)
-        except Exception as exc:  # noqa: BLE001
-            return ToolResultBlock(
+        return [
+            ToolResultBlock(
                 tool_use_id=block.id,
-                content=f"{type(exc).__name__}: {exc}",
+                content=f"Tool ended without a result: {block.name!r}",
                 is_error=True,
             )
-        return ToolResultBlock(tool_use_id=block.id, content=output)
+        ]
+
+    @staticmethod
+    def _run_tool_without_permission(block: ToolUseBlock, tool: Tool) -> list[ContentBlock]:
+        return asyncio.run(dispatch_tool_blocks_async(block, {tool.name: tool}))
 
     def _flush_stream_buffer(self) -> None:
         thinking = "".join(self.stream_thinking)
@@ -3436,11 +3478,11 @@ class _LiveTerminal:
             rows.append(_styled_terminal_line(hint, STATUS_STYLE, width))
             image_index = 1
             for text in self.pending_user_inputs:
-                preview, image_index = _image_placeholder_text(
+                pending_preview, image_index = _image_placeholder_text(
                     text,
                     image_index_start=image_index,
                 )
-                line = f"  ↳ {_strip_control(preview)}"
+                line = f"  ↳ {_strip_control(pending_preview)}"
                 rows.append(_styled_terminal_line(line, STATUS_STYLE, width))
         prefix = " > "
         continuation_prefix = " " * len(prefix)
@@ -3632,7 +3674,6 @@ def _state_from_session(record: SessionRecord) -> dict[str, object]:
         "current_model": record.settings.model,
         "system": record.settings.system,
         "max_tokens": record.settings.max_tokens,
-        "max_iterations": record.settings.max_iterations,
         "thinking": record.settings.thinking,
         "effort": record.settings.effort,
         "messages": list(record.messages),
@@ -3664,7 +3705,6 @@ def _apply_resumed_session(
     args.provider = record.settings.provider
     args.model = record.settings.model
     args.max_tokens = record.settings.max_tokens
-    args.max_iterations = record.settings.max_iterations
     args.thinking = record.settings.thinking
     args.effort = record.settings.effort
     args._resume_session_record = record

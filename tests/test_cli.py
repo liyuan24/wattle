@@ -12,7 +12,7 @@ import pytest
 
 from willow import cli
 from willow.auth import AuthCredential
-from willow.providers import CompletionResponse, TextBlock, ToolUseBlock
+from willow.providers import CompletionResponse, TextBlock
 
 
 def test_build_parser_defaults_to_tui_settings() -> None:
@@ -23,7 +23,6 @@ def test_build_parser_defaults_to_tui_settings() -> None:
     assert args.provider == "openai_codex"
     assert args.model == "gpt-5.5"
     assert args.max_tokens == 4096
-    assert args.max_iterations == 20
     assert args.thinking is False
     assert args.effort is None
     assert args.print_prompt is None
@@ -41,8 +40,6 @@ def test_build_parser_print_mode_accepts_prompt_and_shared_flags() -> None:
             "claude-sonnet-4-6",
             "--max-tokens",
             "512",
-            "--max-iterations",
-            "3",
             "--thinking",
             "--effort",
             "high",
@@ -57,7 +54,6 @@ def test_build_parser_print_mode_accepts_prompt_and_shared_flags() -> None:
     assert args.provider == "anthropic"
     assert args.model == "claude-sonnet-4-6"
     assert args.max_tokens == 512
-    assert args.max_iterations == 3
     assert args.thinking is True
     assert args.effort == "high"
     assert args.permission_mode == cli.PermissionMode.READ_ONLY
@@ -179,7 +175,7 @@ def test_build_provider_wires_openai_compatible_base_url(
                 source="test",
             ),
         ) as gc,
-        patch.object(cli.openai, "OpenAI", return_value=fake_client) as openai_client,
+        patch.object(cli.openai, "AsyncOpenAI", return_value=fake_client) as openai_client,
         patch.object(
             cli, "OpenAICompletionsProvider", return_value=fake_provider
         ) as provider_factory,
@@ -191,7 +187,7 @@ def test_build_provider_wires_openai_compatible_base_url(
         api_key=f"fake-{vendor}-key",
         base_url=base_url,
     )
-    provider_factory.assert_called_once_with(client=fake_client)
+    provider_factory.assert_called_once_with(async_client=fake_client)
     assert provider is fake_provider
 
 
@@ -217,7 +213,6 @@ def test_headless_calls_run_agent_and_prints_final_text(
             provider="anthropic",
             model="claude-sonnet-4-6",
             max_tokens=512,
-            max_iterations=3,
             permission_mode=cli.PermissionMode.READ_ONLY,
             print_prompt="follow the prompt",
             prompt=None,
@@ -231,44 +226,12 @@ def test_headless_calls_run_agent_and_prints_final_text(
             ("anthropic", "claude-sonnet-4-6", "follow the prompt"),
             {
                 "max_tokens": 512,
-                "max_iterations": 3,
                 "permission_mode": cli.PermissionMode.READ_ONLY,
                 "thinking": False,
                 "effort": None,
             },
         )
     ]
-
-
-def test_headless_returns_nonzero_if_tools_remain_pending(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    response = CompletionResponse(
-        content=[ToolUseBlock(id="call_1", name="echo", input={"message": "hi"})],
-        stop_reason="tool_use",
-    )
-    stdout = io.StringIO()
-    stderr = io.StringIO()
-
-    monkeypatch.setattr(cli, "run_agent", lambda *args, **kwargs: response)
-    monkeypatch.setattr(sys, "stdout", stdout)
-    monkeypatch.setattr(sys, "stderr", stderr)
-
-    rc = cli._run_headless(
-        argparse.Namespace(
-            provider="openai_responses",
-            model="gpt-5.5",
-            max_tokens=4096,
-            max_iterations=1,
-            permission_mode=cli.PermissionMode.YOLO,
-            print_prompt="use a tool",
-            prompt=None,
-        )
-    )
-
-    assert rc == 1
-    assert stdout.getvalue() == ""
-    assert "tools were still pending" in stderr.getvalue()
 
 
 def test_headless_rejects_ask_for_permission(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -280,7 +243,6 @@ def test_headless_rejects_ask_for_permission(monkeypatch: pytest.MonkeyPatch) ->
             provider="openai_responses",
             model="gpt-5.5",
             max_tokens=4096,
-            max_iterations=1,
             permission_mode=cli.PermissionMode.ASK,
             print_prompt="use a tool",
             prompt=None,

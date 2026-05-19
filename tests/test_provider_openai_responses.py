@@ -58,7 +58,7 @@ def _make_provider(
 ) -> tuple[OpenAIResponsesProvider, MagicMock]:
     client = MagicMock()
     client.responses.create.return_value = response
-    return OpenAIResponsesProvider(client=client), client
+    return OpenAIResponsesProvider(async_client=client), client
 
 
 # ---------------------------------------------------------------------------
@@ -280,7 +280,7 @@ def test_stateful_chain_only_sends_delta_after_first_call() -> None:
       - call 3: messages = [..., assistant_with_tool_use, user_tool_result]
     """
     client = MagicMock()
-    provider = OpenAIResponsesProvider(client=client)
+    provider = OpenAIResponsesProvider(async_client=client)
 
     # --- Call 1 -----------------------------------------------------------
     user_msg = Message(role="user", content=[TextBlock(text="run a tool")])
@@ -389,7 +389,7 @@ def test_state_is_per_instance() -> None:
     """A fresh provider has no leaked state from a prior provider's chain."""
     client_a = MagicMock()
     client_a.responses.create.return_value = _canned_response(response_id="resp_A")
-    provider_a = OpenAIResponsesProvider(client=client_a)
+    provider_a = OpenAIResponsesProvider(async_client=client_a)
     provider_a.complete(
         CompletionRequest(
             model="gpt-5",
@@ -403,7 +403,7 @@ def test_state_is_per_instance() -> None:
     # New provider: no chain state inherited.
     client_b = MagicMock()
     client_b.responses.create.return_value = _canned_response(response_id="resp_B")
-    provider_b = OpenAIResponsesProvider(client=client_b)
+    provider_b = OpenAIResponsesProvider(async_client=client_b)
     assert provider_b._previous_response_id is None
     assert provider_b._seen_messages_count == 0
 
@@ -907,7 +907,7 @@ def test_reasoning_items_not_replayed_in_chained_delta() -> None:
         response_id="resp_chain_1",
         output=[reasoning_item, function_call_item],
     )
-    provider = OpenAIResponsesProvider(client=client)
+    provider = OpenAIResponsesProvider(async_client=client)
 
     user_msg = Message(role="user", content=[TextBlock(text="go")])
     first = provider.complete(
@@ -992,7 +992,7 @@ def _stream_responses_provider(
 ) -> tuple[OpenAIResponsesProvider, MagicMock]:
     client = MagicMock()
     client.responses.create.return_value = iter(events)
-    return OpenAIResponsesProvider(client=client), client
+    return OpenAIResponsesProvider(async_client=client), client
 
 
 def test_stream_text_only_emits_deltas_then_complete() -> None:
@@ -1162,7 +1162,7 @@ def test_stream_stateful_chain_advances_across_two_streams() -> None:
     consecutive streams the second call must carry the first's
     `previous_response_id` and send only the loop-appended delta."""
     client = MagicMock()
-    provider = OpenAIResponsesProvider(client=client)
+    provider = OpenAIResponsesProvider(async_client=client)
 
     # --- Stream 1 ---------------------------------------------------------
     final_resp_1 = _canned_response(

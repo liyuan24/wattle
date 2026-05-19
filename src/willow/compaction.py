@@ -122,6 +122,86 @@ def maybe_compact_messages(
     return _build_compacted_messages(messages, last_start, summary), next_state
 
 
+async def amaybe_compact_messages(
+    *,
+    provider: Provider,
+    model: str,
+    system: str | None,
+    messages: list[Message],
+    tools: list[dict[str, object]],
+    max_tokens: int,
+    context_window: int | None,
+    state: RuntimeCompaction | None,
+    on_start: Callable[[], None] | None = None,
+    on_end: Callable[[], None] | None = None,
+    force: bool = False,
+) -> tuple[list[Message], RuntimeCompaction | None]:
+    """Async counterpart to :func:`maybe_compact_messages`."""
+
+    should_start = state is None and _should_start_compaction(
+        system=system,
+        messages=messages,
+        tools=tools,
+        max_tokens=max_tokens,
+        context_window=context_window,
+    )
+    should_start = should_start or (force and state is None)
+    if not force and not should_start and state is None:
+        return list(messages), None
+
+    if state is not None:
+        first_end, last_start = _compaction_bounds(messages, force=force)
+        should_update = force or state.summarized_until < last_start
+        if not should_update:
+            return _build_compacted_messages(
+                messages,
+                state.first_kept_index,
+                state.summary,
+            ), state
+
+    first_end, last_start = _compaction_bounds(messages, force=force)
+    if last_start <= first_end and should_start:
+        first_end, last_start = _compaction_bounds(messages, force=True)
+    if last_start <= first_end:
+        if state is None:
+            return list(messages), None
+        return _build_compacted_messages(
+            messages,
+            state.first_kept_index,
+            state.summary,
+        ), state
+
+    if on_start is not None:
+        on_start()
+    try:
+        await provider.areset_conversation()
+        if state is None or force:
+            summary = await _asummarize_messages(
+                provider=provider,
+                model=model,
+                messages=messages[first_end:last_start],
+                previous_summary=None,
+            )
+        else:
+            summary = await _asummarize_messages(
+                provider=provider,
+                model=model,
+                messages=messages[state.summarized_until:last_start],
+                previous_summary=state.summary,
+            )
+        await provider.areset_conversation()
+    finally:
+        if on_end is not None:
+            on_end()
+
+    next_state = RuntimeCompaction(
+        summary=summary,
+        summarized_until=last_start,
+        first_kept_index=last_start,
+    )
+    return _build_compacted_messages(messages, last_start, summary), next_state
+
+
 def compacted_message_count() -> int:
     return 1 + LAST_MESSAGES_TO_KEEP
 
@@ -197,6 +277,37 @@ def _summarize_messages(
 
     final_text: list[str] = []
     for event in provider.stream(request):
+        if isinstance(event, StreamComplete):
+            final_text = [
+                block.text for block in event.response.content if isinstance(block, TextBlock)
+            ]
+    summary = "\n".join(final_text).strip()
+    if not summary:
+        raise RuntimeError("compaction summarization returned no text")
+    return summary
+
+
+async def _asummarize_messages(
+    *,
+    provider: Provider,
+    model: str,
+    messages: list[Message],
+    previous_summary: str | None,
+) -> str:
+    if not messages and previous_summary:
+        return previous_summary
+
+    prompt = _summary_prompt(messages, previous_summary=previous_summary)
+    request = CompletionRequest(
+        model=model,
+        messages=[Message(role="user", content=[TextBlock(text=prompt)])],
+        max_tokens=SUMMARY_MAX_TOKENS,
+        system=SUMMARY_SYSTEM_PROMPT,
+        tools=[],
+    )
+
+    final_text: list[str] = []
+    async for event in provider.astream(request):
         if isinstance(event, StreamComplete):
             final_text = [
                 block.text for block in event.response.content if isinstance(block, TextBlock)

@@ -1,3 +1,4 @@
+import asyncio
 from abc import ABC, abstractmethod
 from typing import Any, ClassVar, TypedDict
 
@@ -28,6 +29,16 @@ class Tool(ABC):
     # (`json.loads(...)`). The shape is dictated by `input_schema`, which the
     # tool author writes in JSON Schema; there is no static type for it.
     def run(self, **kwargs: Any) -> str: ...
+
+    # Any: kwargs are deserialized from model tool-call arguments, same as run().
+    async def arun(self, **kwargs: Any) -> str:
+        """Async tool hook.
+
+        Tools with async-native implementations should override this. Sync
+        tools remain valid and are executed in a worker thread by default.
+        """
+
+        return await asyncio.to_thread(self.run, **kwargs)
 
     @classmethod
     def spec(cls) -> ToolSpec:

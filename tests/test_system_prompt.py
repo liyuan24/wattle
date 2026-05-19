@@ -35,9 +35,13 @@ def test_build_system_prompt_uses_willow_default_without_pi_docs(tmp_path: Path)
     assert "validate heuristic constants or stopping conditions with repeatable evidence" in prompt
     assert "prefer using `rg` or `rg --files`" in prompt
     assert "Use tty=true only for commands that require an interactive terminal" in prompt
+    assert "try `uv run pytest` before using `python -m compileall`" in prompt
     assert "prefer conventional entrypoint names and process shapes" in prompt
     assert "Before starting a long-running, expensive, or quiet operation" in prompt
     assert "Willow does not automatically start monitors after background commands" in prompt
+    assert "Use spawn_agent for independent, bounded side tasks" in prompt
+    assert "For 'latest debug image', call view_image with latest_debug=true" in prompt
+    assert "send them together in one edit call with the edits array" in prompt
     assert "Current date: 2026-05-10" in prompt
     assert f"Current working directory: {tmp_path.resolve()}" in prompt
 

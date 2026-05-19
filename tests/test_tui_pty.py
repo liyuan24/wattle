@@ -59,7 +59,6 @@ def _slow_willow_child_code(
             provider="openai_responses",
             model="gpt-5.5",
             max_tokens=4096,
-            max_iterations=20,
             thinking=False,
             effort=None,
             prompt={prompt!r},

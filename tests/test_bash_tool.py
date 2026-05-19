@@ -52,6 +52,16 @@ def test_foreground_large_output_is_externalized(tmp_path: Path) -> None:
     assert len(output) < 14000
 
 
+def test_foreground_accepts_model_output_budget_alias(tmp_path: Path) -> None:
+    tool = BashTool(cwd=tmp_path)
+    command = _python_command("import sys; sys.stdout.write('x' * 1000)")
+
+    output = tool.run(command, max_event_chars=100)
+
+    assert output.startswith("[output truncated: 1000 chars]")
+    assert "full_output_path:" in output
+
+
 def test_foreground_timeout_clamps_and_kills_process_group(monkeypatch, tmp_path: Path) -> None:
     communicate_timeouts: list[float | None] = []
     killed_pgids: list[int] = []

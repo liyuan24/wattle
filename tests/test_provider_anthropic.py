@@ -56,7 +56,7 @@ def _canned_response(
 def _make_provider(response: SimpleNamespace) -> tuple[AnthropicProvider, MagicMock]:
     client = MagicMock()
     client.messages.create.return_value = response
-    return AnthropicProvider(client=client), client
+    return AnthropicProvider(async_client=client), client
 
 
 def test_request_translation_full_round_trip() -> None:
@@ -566,6 +566,16 @@ class _FakeAnthropicStream:
     def __iter__(self):
         return iter(self._events)
 
+    async def __aenter__(self) -> _FakeAnthropicStream:
+        return self
+
+    async def __aexit__(self, *_exc: object) -> None:
+        return None
+
+    async def __aiter__(self):
+        for event in self._events:
+            yield event
+
     def get_final_message(self) -> SimpleNamespace:
         return self._final_message
 
@@ -585,7 +595,7 @@ def _stream_provider(
     client = MagicMock()
     fake_stream = _FakeAnthropicStream(events, final_message)
     client.messages.stream.return_value = fake_stream
-    return AnthropicProvider(client=client), client
+    return AnthropicProvider(async_client=client), client
 
 
 def test_stream_text_only_emits_text_deltas_then_complete() -> None:

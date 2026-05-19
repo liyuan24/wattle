@@ -63,6 +63,13 @@ class OpenAICodexResponsesProvider(Provider):
         self.base_url = base_url
         self.urlopen = urlopen or urllib.request.urlopen
 
+    def fork(self) -> OpenAICodexResponsesProvider:
+        return OpenAICodexResponsesProvider(
+            bearer_token=self.bearer_token,
+            base_url=self.base_url,
+            urlopen=self.urlopen,
+        )
+
     def complete(self, request: CompletionRequest) -> CompletionResponse:
         response: CompletionResponse | None = None
         for event in self.stream(request):
@@ -170,7 +177,6 @@ def _events_from_sse(
     *,
     on_final_response: Callable[[dict[str, Any]], None] | None = None,
 ) -> Iterator[StreamEvent]:
-    buffer = ""
     current_call_id: str | None = None
     final_response: dict[str, Any] | None = None
     fallback_blocks: list[ContentBlock] = []
@@ -178,48 +184,8 @@ def _events_from_sse(
     tool_arg_buffers: dict[str, list[str]] = {}
     tool_block_indices: dict[str, int] = {}
 
-    while True:
-        chunk = response.read(8192)
-        if not chunk:
-            break
-        buffer += chunk.decode("utf-8")
-        while "\n\n" in buffer:
-            raw_event, buffer = buffer.split("\n\n", 1)
-            event = _parse_sse_event(raw_event)
-            if event is None:
-                continue
-            mapped, current_call_id, final_response = _map_event(
-                event,
-                current_call_id,
-                final_response,
-            )
-            if mapped is not None:
-                _capture_streamed_block(
-                    mapped,
-                    fallback_blocks,
-                    text_buffer,
-                    tool_arg_buffers,
-                    tool_block_indices,
-                )
-                yield mapped
-            if final_response is not None:
-                if on_final_response is not None:
-                    on_final_response(final_response)
-                yield StreamComplete(
-                    response=_completion_from_response(
-                        final_response,
-                        fallback_blocks=_finalize_fallback_blocks(
-                            fallback_blocks,
-                            text_buffer,
-                            tool_arg_buffers,
-                            tool_block_indices,
-                        ),
-                    )
-                )
-                return
-
-    if buffer.strip():
-        event = _parse_sse_event(buffer)
+    for raw_event in _iter_sse_events(response):
+        event = _parse_sse_event(raw_event)
         if event is not None:
             mapped, current_call_id, final_response = _map_event(
                 event,
@@ -252,6 +218,41 @@ def _events_from_sse(
                 return
 
     raise RuntimeError("Codex stream ended without a completion event.")
+
+
+def _iter_sse_events(response: Any) -> Iterator[str]:
+    raw_lines: list[str] = []
+    for line in _iter_response_lines(response):
+        if not line.strip():
+            if raw_lines:
+                yield "".join(raw_lines)
+                raw_lines = []
+            continue
+        raw_lines.append(line)
+    if raw_lines:
+        yield "".join(raw_lines)
+
+
+def _iter_response_lines(response: Any) -> Iterator[str]:
+    readline = getattr(response, "readline", None)
+    if callable(readline):
+        while True:
+            line = readline()
+            if not line:
+                return
+            yield line.decode("utf-8") if isinstance(line, bytes) else str(line)
+    else:
+        buffer = ""
+        while True:
+            chunk = response.read(8192)
+            if not chunk:
+                break
+            buffer += chunk.decode("utf-8") if isinstance(chunk, bytes) else str(chunk)
+            while "\n" in buffer:
+                line, buffer = buffer.split("\n", 1)
+                yield f"{line}\n"
+        if buffer:
+            yield buffer
 
 
 def _parse_sse_event(raw_event: str) -> dict[str, Any] | None:

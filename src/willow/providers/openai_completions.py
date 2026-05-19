@@ -52,9 +52,11 @@ Responses provider for reasoning-heavy tasks.
 
 from __future__ import annotations
 
+import asyncio
 import base64
+import inspect
 import json
-from collections.abc import Iterable, Iterator
+from collections.abc import AsyncIterator, Iterable, Iterator
 from pathlib import Path
 from typing import Any, Literal, TypedDict
 
@@ -120,18 +122,30 @@ class _ToolCallAcc(TypedDict):
 
 
 class OpenAICompletionsProvider(Provider):
-    """Provider plugin backed by `openai.OpenAI` Chat Completions.
+    """Provider plugin backed by `openai.AsyncOpenAI` Chat Completions.
 
-    The client is constructed lazily so tests can inject a mock without
+    The async client is constructed lazily so tests can inject a mock without
     touching the network or requiring an API key in the environment.
     """
 
-    def __init__(self, client: openai.OpenAI | None = None) -> None:
-        self.client = client if client is not None else openai.OpenAI()
+    def __init__(self, async_client: openai.AsyncOpenAI | None = None) -> None:
+        self._async_client = async_client
+
+    @property
+    def async_client(self) -> openai.AsyncOpenAI:
+        if self._async_client is None:
+            self._async_client = openai.AsyncOpenAI()
+        return self._async_client
+
+    def fork(self) -> OpenAICompletionsProvider:
+        return OpenAICompletionsProvider(async_client=self._async_client)
 
     def complete(self, request: CompletionRequest) -> CompletionResponse:
+        return _run_async(self.acomplete(request))
+
+    async def acomplete(self, request: CompletionRequest) -> CompletionResponse:
         kwargs = self._build_kwargs(request)
-        response = self.client.chat.completions.create(**kwargs)
+        response = await _maybe_await(self.async_client.chat.completions.create(**kwargs))
 
         choice = response.choices[0]
         content: list[ContentBlock] = []
@@ -184,6 +198,10 @@ class OpenAICompletionsProvider(Provider):
             assemble the accumulated text + tool calls into a
             ``CompletionResponse`` and yield ``StreamComplete``.
         """
+        yield from _run_async_iter(self.astream(request))
+
+    async def astream(self, request: CompletionRequest) -> AsyncIterator[StreamEvent]:
+        """Async-native streaming path backed by ``openai.AsyncOpenAI``."""
         kwargs = self._build_kwargs(request)
         kwargs["stream"] = True
         kwargs["stream_options"] = {"include_usage": True}
@@ -198,7 +216,8 @@ class OpenAICompletionsProvider(Provider):
         completion_tokens: int = 0
         cached_tokens: int = 0
 
-        for chunk in self.client.chat.completions.create(**kwargs):
+        stream = await _maybe_await(self.async_client.chat.completions.create(**kwargs))
+        async for chunk in _aiter(stream):
             # Usage-only chunks have an empty `choices` list when
             # `include_usage=True`; harvest usage and continue.
             if chunk.usage is not None:
@@ -329,6 +348,38 @@ class OpenAICompletionsProvider(Provider):
             elif request.budget is not None:
                 kwargs["reasoning_effort"] = _budget_to_effort(request.budget)
         return kwargs
+
+
+async def _maybe_await(value: Any) -> Any:
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
+async def _aiter(iterable: Any) -> AsyncIterator[Any]:
+    if hasattr(iterable, "__aiter__"):
+        async for item in iterable:
+            yield item
+        return
+    for item in iterable:
+        yield item
+
+
+def _run_async(awaitable: Any) -> Any:
+    return asyncio.run(awaitable)
+
+
+def _run_async_iter(async_iter: AsyncIterator[Any]) -> Iterator[Any]:
+    loop = asyncio.new_event_loop()
+    try:
+        while True:
+            try:
+                yield loop.run_until_complete(anext(async_iter))
+            except StopAsyncIteration:
+                return
+    finally:
+        loop.run_until_complete(async_iter.aclose())
+        loop.close()
 
 
 def _cached_tokens_from_usage(usage: Any) -> int:

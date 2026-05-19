@@ -126,11 +126,35 @@ def _guidelines(
             "and service launches. Use tty=true only for commands that require an "
             "interactive terminal, such as shells, REPLs, prompts, or full-screen tools."
         )
+        guidelines.append(
+            "When validating Python projects, prefer the repository's configured runner "
+            "before falling back to weaker checks. For example, if bare `pytest` is not "
+            "available but the repo has `uv.lock` or a `pyproject.toml` with dev "
+            "dependencies, try `uv run pytest` before using `python -m compileall`."
+        )
+    if "view_image" in names:
+        guidelines.append(
+            "When the user asks to inspect an image, screenshot, visual UI issue, "
+            "or the latest debug image, use view_image first so the image is "
+            "attached to the model context. Do not start with bash, PIL, OCR, "
+            "tesseract, or metadata-only file commands for visual inspection. "
+            "For 'latest debug image', call view_image with latest_debug=true."
+        )
 
     if "read" in names and "edit" in names:
         guidelines.append("Use read to examine files before editing.")
+    if {"spawn_agent", "wait_agent"}.issubset(names):
+        guidelines.append(
+            "Use spawn_agent for independent, bounded side tasks that can run "
+            "without blocking your immediate next step. Wait with wait_agent "
+            "only when you need the result to continue, and close subagents "
+            "when they are no longer needed."
+        )
     if "edit" in names:
-        guidelines.append("Use edit for precise changes (old text must match exactly)")
+        guidelines.append(
+            "Use edit for precise changes. When making multiple replacements in the "
+            "same file, send them together in one edit call with the edits array."
+        )
     if "write" in names:
         guidelines.append("Use write only for new files or complete rewrites")
     if "edit" in names or "write" in names:

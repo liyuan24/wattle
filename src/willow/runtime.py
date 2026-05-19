@@ -11,7 +11,10 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
+
+if TYPE_CHECKING:
+    from willow.subagents import SubagentManager
 
 
 class TaskStatus(StrEnum):
@@ -278,3 +281,17 @@ class WillowRuntime:
         self.tasks = TaskRegistry(root=root)
         self.monitors = MonitorRegistry()
         self.events = MonitorEventQueue()
+        self._subagents: SubagentManager | None = None
+
+    @property
+    def subagents(self) -> SubagentManager:
+        if self._subagents is None:
+            from willow.subagents import SubagentManager
+
+            self._subagents = SubagentManager()
+        return self._subagents
+
+    def cleanup(self) -> None:
+        if self._subagents is not None:
+            self._subagents.cleanup()
+        self.tasks.cleanup()

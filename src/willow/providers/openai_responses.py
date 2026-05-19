@@ -79,9 +79,11 @@ When `True`, the effort is resolved in this order:
 
 from __future__ import annotations
 
+import asyncio
 import base64
+import inspect
 import json
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 from typing import Any, Literal
 
@@ -134,9 +136,9 @@ def _map_effort(
 
 
 class OpenAIResponsesProvider(Provider):
-    """Provider plugin backed by `openai.OpenAI` using the Responses API.
+    """Provider plugin backed by `openai.AsyncOpenAI` using the Responses API.
 
-    The client is constructed lazily so tests can inject a mock without
+    The async client is constructed lazily so tests can inject a mock without
     touching the network or requiring an API key in the environment.
 
     Stateful chaining is per-instance: ``_previous_response_id`` and
@@ -145,8 +147,8 @@ class OpenAIResponsesProvider(Provider):
     a new chain.
     """
 
-    def __init__(self, client: openai.OpenAI | None = None) -> None:
-        self.client = client if client is not None else openai.OpenAI()
+    def __init__(self, async_client: openai.AsyncOpenAI | None = None) -> None:
+        self._async_client = async_client
         # The id of the most recent successful response. While `None`, the
         # next call is the chain's first turn and must send the full
         # conversation; once set, subsequent calls send only the delta and
@@ -159,9 +161,21 @@ class OpenAIResponsesProvider(Provider):
         # `complete()` for the `+1` reasoning).
         self._seen_messages_count: int = 0
 
+    @property
+    def async_client(self) -> openai.AsyncOpenAI:
+        if self._async_client is None:
+            self._async_client = openai.AsyncOpenAI()
+        return self._async_client
+
+    def fork(self) -> OpenAIResponsesProvider:
+        return OpenAIResponsesProvider(async_client=self._async_client)
+
     def complete(self, request: CompletionRequest) -> CompletionResponse:
+        return _run_async(self.acomplete(request))
+
+    async def acomplete(self, request: CompletionRequest) -> CompletionResponse:
         kwargs = self._build_kwargs(request)
-        response = self.client.responses.create(**kwargs)
+        response = await _maybe_await(self.async_client.responses.create(**kwargs))
         completion = _completion_from_response(response)
         self._advance_state(response, request)
         return completion
@@ -188,6 +202,10 @@ class OpenAIResponsesProvider(Provider):
             (``_previous_response_id`` / ``_seen_messages_count``) advances
             here, identically to ``complete()``.
         """
+        yield from _run_async_iter(self.astream(request))
+
+    async def astream(self, request: CompletionRequest) -> AsyncIterator[StreamEvent]:
+        """Async-native streaming path backed by ``openai.AsyncOpenAI``."""
         kwargs = self._build_kwargs(request)
         kwargs["stream"] = True
 
@@ -204,7 +222,8 @@ class OpenAIResponsesProvider(Provider):
         # narrow via attribute access. Stubs for these types are gappy.
         final_response: Any = None
 
-        for event in self.client.responses.create(**kwargs):
+        stream = await _maybe_await(self.async_client.responses.create(**kwargs))
+        async for event in _aiter(stream):
             etype = event.type
             if etype == "response.output_text.delta":
                 yield TextDelta(text=event.delta)
@@ -298,6 +317,38 @@ class OpenAIResponsesProvider(Provider):
     def reset_conversation(self) -> None:
         self._previous_response_id = None
         self._seen_messages_count = 0
+
+
+async def _maybe_await(value: Any) -> Any:
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
+async def _aiter(iterable: Any) -> AsyncIterator[Any]:
+    if hasattr(iterable, "__aiter__"):
+        async for item in iterable:
+            yield item
+        return
+    for item in iterable:
+        yield item
+
+
+def _run_async(awaitable: Any) -> Any:
+    return asyncio.run(awaitable)
+
+
+def _run_async_iter(async_iter: AsyncIterator[Any]) -> Iterator[Any]:
+    loop = asyncio.new_event_loop()
+    try:
+        while True:
+            try:
+                yield loop.run_until_complete(anext(async_iter))
+            except StopAsyncIteration:
+                return
+    finally:
+        loop.run_until_complete(async_iter.aclose())
+        loop.close()
 
 
 # Any: SDK Response object — we read `.usage.input_tokens`, `.output`,

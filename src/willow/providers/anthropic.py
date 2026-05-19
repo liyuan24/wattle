@@ -47,8 +47,10 @@ Anthropic prompt caching is enabled for every request:
 
 from __future__ import annotations
 
+import asyncio
 import base64
-from collections.abc import Iterator
+import inspect
+from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -78,17 +80,34 @@ CACHE_CONTROL_EPHEMERAL: dict[str, str] = {"type": "ephemeral"}
 
 
 class AnthropicProvider(Provider):
-    """Provider plugin backed by `anthropic.Anthropic`.
+    """Provider plugin backed by `anthropic.AsyncAnthropic`.
 
-    The client is constructed lazily so tests can inject a mock without
+    The async client is constructed lazily so tests can inject a mock without
     touching the network or requiring an API key in the environment.
     """
 
-    def __init__(self, client: anthropic.Anthropic | None = None) -> None:
-        self.client = client if client is not None else anthropic.Anthropic()
+    def __init__(
+        self,
+        async_client: anthropic.AsyncAnthropic | None = None,
+    ) -> None:
+        self._async_client = async_client
+
+    @property
+    def async_client(self) -> anthropic.AsyncAnthropic:
+        if self._async_client is None:
+            self._async_client = anthropic.AsyncAnthropic()
+        return self._async_client
+
+    def fork(self) -> AnthropicProvider:
+        return AnthropicProvider(async_client=self._async_client)
 
     def complete(self, request: CompletionRequest) -> CompletionResponse:
-        response = self.client.messages.create(**self._build_kwargs(request))
+        return _run_async(self.acomplete(request))
+
+    async def acomplete(self, request: CompletionRequest) -> CompletionResponse:
+        response = await _maybe_await(
+            self.async_client.messages.create(**self._build_kwargs(request))
+        )
         return _response_from_api(response)
 
     def stream(self, request: CompletionRequest) -> Iterator[StreamEvent]:
@@ -112,11 +131,15 @@ class AnthropicProvider(Provider):
         ``complete()`` would have returned (assembled via
         ``stream.get_final_message()``).
         """
+        yield from _run_async_iter(self.astream(request))
+
+    async def astream(self, request: CompletionRequest) -> AsyncIterator[StreamEvent]:
+        """Async-native streaming path backed by ``anthropic.AsyncAnthropic``."""
         kwargs = self._build_kwargs(request)
 
-        with self.client.messages.stream(**kwargs) as stream:
+        async with self.async_client.messages.stream(**kwargs) as stream:
             current_tool_use_id: str | None = None
-            for event in stream:
+            async for event in stream:
                 etype = event.type
                 if etype == "content_block_start":
                     block = event.content_block
@@ -127,7 +150,6 @@ class AnthropicProvider(Provider):
                             name=block.name,
                             partial_json=None,
                         )
-                    # text / thinking / redacted_thinking: no event yet.
                 elif etype == "content_block_delta":
                     delta = event.delta
                     dtype = delta.type
@@ -136,19 +158,14 @@ class AnthropicProvider(Provider):
                     elif dtype == "thinking_delta":
                         yield ThinkingDelta(thinking=delta.thinking)
                     elif dtype == "input_json_delta":
-                        # input_json fragments only ever follow a tool_use start.
                         assert current_tool_use_id is not None
                         yield ToolUseDelta(
                             id=current_tool_use_id,
                             name=None,
                             partial_json=delta.partial_json,
                         )
-                    # signature_delta, citations_delta: no Willow event.
-                # message_start / message_delta / message_stop /
-                # content_block_stop: assembly is handled by the SDK
-                # snapshot; we only need them to keep iteration alive.
 
-            final_message = stream.get_final_message()
+            final_message = await _maybe_await(stream.get_final_message())
 
         yield StreamComplete(response=_response_from_api(final_message))
 
@@ -176,6 +193,29 @@ class AnthropicProvider(Provider):
                 if request.effort is not None:
                     kwargs["output_config"] = {"effort": request.effort}
         return kwargs
+
+
+async def _maybe_await(value: Any) -> Any:
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
+def _run_async(awaitable: Any) -> Any:
+    return asyncio.run(awaitable)
+
+
+def _run_async_iter(async_iter: AsyncIterator[Any]) -> Iterator[Any]:
+    loop = asyncio.new_event_loop()
+    try:
+        while True:
+            try:
+                yield loop.run_until_complete(anext(async_iter))
+            except StopAsyncIteration:
+                return
+    finally:
+        loop.run_until_complete(async_iter.aclose())
+        loop.close()
 
 
 # Any: SDK Message/RawMessage object. We read `.content`, `.stop_reason`,

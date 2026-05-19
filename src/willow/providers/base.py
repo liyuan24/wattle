@@ -28,10 +28,12 @@ Design notes:
 
 from __future__ import annotations
 
+import asyncio
+import threading
 from abc import ABC, abstractmethod
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, Self
 
 from willow.tools.base import ToolSpec
 
@@ -334,10 +336,30 @@ class Provider(ABC):
     is provider-agnostic and lives in `willow.loop`.
     """
 
+    def fork(self) -> Self:
+        """Return an independent wrapper for a separate conversation.
+
+        Stateless providers may return ``self``. Stateful providers should
+        override this to share underlying API clients while keeping conversation
+        cursors isolated.
+        """
+
+        return self
+
     @abstractmethod
     def complete(self, request: CompletionRequest) -> CompletionResponse:
         """Run one round-trip against the underlying LLM API."""
         ...
+
+    async def acomplete(self, request: CompletionRequest) -> CompletionResponse:
+        """Async completion hook.
+
+        Provider plugins with async-native SDK clients should override this.
+        The default keeps sync-only providers usable while the rest of Willow
+        runs on the async orchestration path.
+        """
+
+        return await asyncio.to_thread(self.complete, request)
 
     @abstractmethod
     def stream(self, request: CompletionRequest) -> Iterator[StreamEvent]:
@@ -349,6 +371,37 @@ class Provider(ABC):
         """
         ...
 
+    async def astream(self, request: CompletionRequest) -> AsyncIterator[StreamEvent]:
+        """Async streaming hook.
+
+        Provider plugins with async-native streaming should override this.
+        Sync-only providers are drained in a worker thread and bridged through
+        an async queue so streaming remains incremental.
+        """
+
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue[StreamEvent | BaseException | None] = asyncio.Queue()
+
+        def drain() -> None:
+            try:
+                for event in self.stream(request):
+                    loop.call_soon_threadsafe(queue.put_nowait, event)
+            except BaseException as exc:  # noqa: BLE001
+                loop.call_soon_threadsafe(queue.put_nowait, exc)
+            finally:
+                loop.call_soon_threadsafe(queue.put_nowait, None)
+
+        threading.Thread(target=drain, name="willow-provider-stream", daemon=True).start()
+
+        while True:
+            item = await queue.get()
+            if item is None:
+                return
+            if isinstance(item, BaseException):
+                raise item
+            event = item
+            yield event
+
     def reset_conversation(self) -> None:
         """Forget provider-side continuation state, if any.
 
@@ -356,3 +409,8 @@ class Provider(ABC):
         Willow replaces the raw transcript with a compacted request projection.
         """
         return
+
+    async def areset_conversation(self) -> None:
+        """Async counterpart to ``reset_conversation``."""
+
+        await asyncio.to_thread(self.reset_conversation)

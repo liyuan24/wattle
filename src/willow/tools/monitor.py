@@ -9,6 +9,7 @@ import time
 import uuid
 from contextlib import suppress
 from pathlib import Path
+from typing import Any
 
 from willow.runtime import MonitorRecord, TaskStatus, WillowRuntime
 
@@ -122,7 +123,10 @@ class MonitorTool(Tool):
             max_event_chars=max(200, int(max_event_chars)),
             max_events=max(1, int(max_events)),
         )
-        log_path = self.runtime.tasks.jobs_dir / f"{monitor.monitor_id}-{uuid.uuid4().hex[:8]}.stderr.log"
+        log_path = (
+            self.runtime.tasks.jobs_dir
+            / f"{monitor.monitor_id}-{uuid.uuid4().hex[:8]}.stderr.log"
+        )
         thread = threading.Thread(
             target=self._watch_command,
             kwargs={

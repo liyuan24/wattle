@@ -80,8 +80,8 @@ def test_anthropic_provider_wires_anthropic_vendor_key(
                 source="test",
             ),
         ) as gc,
-        patch.object(agent.anthropic, "Anthropic", return_value=fake_client) as anth,
-        patch.object(agent.openai, "OpenAI") as oa,
+        patch.object(agent.anthropic, "AsyncAnthropic", return_value=fake_client) as anth,
+        patch.object(agent.openai, "AsyncOpenAI") as oa,
         patch.object(agent, "AnthropicProvider", return_value=fake_provider) as ap,
         patch.object(agent, "OpenAICodexResponsesProvider") as xp,
         patch.object(agent, "OpenAICompletionsProvider") as cp,
@@ -92,13 +92,12 @@ def test_anthropic_provider_wires_anthropic_vendor_key(
             model="claude-x",
             user_input="hi",
             max_tokens=512,
-            max_iterations=3,
         )
 
     gc.assert_called_once_with("anthropic")
     anth.assert_called_once_with(api_key="fake-anthropic-key")
     oa.assert_not_called()
-    ap.assert_called_once_with(client=fake_client)
+    ap.assert_called_once_with(async_client=fake_client)
     xp.assert_not_called()
     cp.assert_not_called()
     rp.assert_not_called()
@@ -110,7 +109,6 @@ def test_anthropic_provider_wires_anthropic_vendor_key(
         "hi",
         "claude-x",
         512,
-        3,
         thinking=False,
         effort=None,
     )
@@ -132,8 +130,8 @@ def test_openai_codex_provider_wires_openai_oauth_bearer(
                 source="test",
             ),
         ) as gc,
-        patch.object(agent.anthropic, "Anthropic") as anth,
-        patch.object(agent.openai, "OpenAI") as oa,
+        patch.object(agent.anthropic, "AsyncAnthropic") as anth,
+        patch.object(agent.openai, "AsyncOpenAI") as oa,
         patch.object(agent, "AnthropicProvider") as ap,
         patch.object(
             agent, "OpenAICodexResponsesProvider", return_value=fake_provider
@@ -170,8 +168,8 @@ def test_openai_completions_provider_wires_openai_vendor_key(
                 source="test",
             ),
         ) as gc,
-        patch.object(agent.anthropic, "Anthropic") as anth,
-        patch.object(agent.openai, "OpenAI", return_value=fake_client) as oa,
+        patch.object(agent.anthropic, "AsyncAnthropic") as anth,
+        patch.object(agent.openai, "AsyncOpenAI", return_value=fake_client) as oa,
         patch.object(agent, "AnthropicProvider") as ap,
         patch.object(agent, "OpenAICodexResponsesProvider") as xp,
         patch.object(agent, "OpenAICompletionsProvider", return_value=fake_provider) as cp,
@@ -183,11 +181,11 @@ def test_openai_completions_provider_wires_openai_vendor_key(
     oa.assert_called_once_with(api_key="fake-openai-bearer")
     anth.assert_not_called()
     xp.assert_not_called()
-    cp.assert_called_once_with(client=fake_client)
+    cp.assert_called_once_with(async_client=fake_client)
     ap.assert_not_called()
     rp.assert_not_called()
 
-    # Defaults: system=None, max_tokens=4096, max_iterations=20.
+    # Defaults: system=None, max_tokens=4096.
     loop_run_sentinel.assert_called_once_with(
         fake_provider,
         agent.TOOLS_BY_NAME,
@@ -195,7 +193,6 @@ def test_openai_completions_provider_wires_openai_vendor_key(
         "hello",
         "gpt-x",
         4096,
-        20,
         thinking=False,
         effort=None,
     )
@@ -230,8 +227,8 @@ def test_openai_compatible_providers_wire_custom_vendor_and_base_url(
                 source="test",
             ),
         ) as gc,
-        patch.object(agent.anthropic, "Anthropic") as anth,
-        patch.object(agent.openai, "OpenAI", return_value=fake_client) as oa,
+        patch.object(agent.anthropic, "AsyncAnthropic") as anth,
+        patch.object(agent.openai, "AsyncOpenAI", return_value=fake_client) as oa,
         patch.object(agent, "AnthropicProvider") as ap,
         patch.object(agent, "OpenAICodexResponsesProvider") as xp,
         patch.object(
@@ -243,7 +240,7 @@ def test_openai_compatible_providers_wire_custom_vendor_and_base_url(
 
     gc.assert_called_once_with(vendor)
     oa.assert_called_once_with(api_key=f"fake-{vendor}-key", base_url=base_url)
-    cp.assert_called_once_with(client=fake_client)
+    cp.assert_called_once_with(async_client=fake_client)
     anth.assert_not_called()
     ap.assert_not_called()
     xp.assert_not_called()
@@ -267,8 +264,8 @@ def test_openai_responses_provider_wires_openai_vendor_key(
                 source="test",
             ),
         ) as gc,
-        patch.object(agent.anthropic, "Anthropic") as anth,
-        patch.object(agent.openai, "OpenAI", return_value=fake_client) as oa,
+        patch.object(agent.anthropic, "AsyncAnthropic") as anth,
+        patch.object(agent.openai, "AsyncOpenAI", return_value=fake_client) as oa,
         patch.object(agent, "AnthropicProvider") as ap,
         patch.object(agent, "OpenAICodexResponsesProvider") as xp,
         patch.object(agent, "OpenAICompletionsProvider") as cp,
@@ -280,7 +277,7 @@ def test_openai_responses_provider_wires_openai_vendor_key(
     oa.assert_called_once_with(api_key="fake-openai-bearer")
     anth.assert_not_called()
     xp.assert_not_called()
-    rp.assert_called_once_with(client=fake_client)
+    rp.assert_called_once_with(async_client=fake_client)
     ap.assert_not_called()
     cp.assert_not_called()
 
@@ -311,7 +308,7 @@ def test_auth_keyerror_propagates(loop_run_sentinel: MagicMock) -> None:
         patch.object(
             agent, "get_credential", side_effect=KeyError("no anthropic entry")
         ),
-        patch.object(agent.anthropic, "Anthropic") as anth,
+        patch.object(agent.anthropic, "AsyncAnthropic") as anth,
         patch.object(agent, "AnthropicProvider") as ap,
         pytest.raises(KeyError, match="no anthropic entry"),
     ):
@@ -329,7 +326,7 @@ def test_auth_filenotfounderror_propagates(loop_run_sentinel: MagicMock) -> None
             "get_credential",
             side_effect=FileNotFoundError("missing auth.json"),
         ),
-        patch.object(agent.openai, "OpenAI") as oa,
+        patch.object(agent.openai, "AsyncOpenAI") as oa,
         patch.object(agent, "OpenAICompletionsProvider") as cp,
         pytest.raises(FileNotFoundError, match="missing auth.json"),
     ):

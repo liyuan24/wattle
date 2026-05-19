@@ -376,34 +376,6 @@ def test_loop_preserves_thinking_blocks_in_history() -> None:
     assert result.content[0].signature == "sig_loop_2"
 
 
-def test_loop_respects_max_iterations() -> None:
-    """If the model never stops calling tools, we cap and return."""
-
-    def never_ending() -> list[CompletionResponse]:
-        return [
-            CompletionResponse(
-                content=[ToolUseBlock(id=f"t{i}", name="bash", input={"command": "true"})],
-                stop_reason="tool_use",
-            )
-            for i in range(5)
-        ]
-
-    bash = BashTool()
-    provider = StubProvider(never_ending())
-
-    result = run(
-        provider=provider,
-        tools_by_name={bash.name: bash},
-        system=None,
-        user_input="loop forever",
-        model="stub-model",
-        max_iterations=3,
-    )
-
-    assert len(provider.requests) == 3
-    assert result.stop_reason == "tool_use"
-
-
 # ---------------------------------------------------------------------------
 # Streaming loop
 # ---------------------------------------------------------------------------
@@ -500,38 +472,6 @@ def test_run_streaming_drives_tools_and_forwards_events() -> None:
     assert tool_result.tool_use_id == "call_1"
     assert tool_result.is_error is False
     assert "hello" in tool_result.content
-
-
-def test_run_streaming_respects_max_iterations() -> None:
-    """Cap on streamed turns mirrors `run()`'s behavior: loop returns the
-    most recent response when iterations are exhausted."""
-    bash = BashTool()
-
-    def make_turn(i: int) -> list[StreamEvent]:
-        response = CompletionResponse(
-            content=[
-                ToolUseBlock(id=f"t{i}", name="bash", input={"command": "true"}),
-            ],
-            stop_reason="tool_use",
-        )
-        return [
-            ToolUseDelta(id=f"t{i}", name="bash", partial_json=None),
-            ToolUseDelta(id=f"t{i}", name=None, partial_json='{"command": "true"}'),
-            StreamComplete(response=response),
-        ]
-
-    provider = StubStreamProvider([make_turn(i) for i in range(5)])
-    result = run_streaming(
-        provider=provider,
-        tools_by_name={bash.name: bash},
-        system=None,
-        user_input="loop forever",
-        model="stub-model",
-        max_iterations=3,
-    )
-
-    assert len(provider.requests) == 3
-    assert result.stop_reason == "tool_use"
 
 
 def cast_request_text(request: CompletionRequest) -> str:

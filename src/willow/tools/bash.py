@@ -52,6 +52,20 @@ class BashTool(Tool):
                 ),
                 "default": False,
             },
+            "max_output_chars": {
+                "type": "integer",
+                "description": (
+                    "Optional inline output character budget before Willow writes "
+                    "the full output to an artifact."
+                ),
+            },
+            "max_event_chars": {
+                "type": "integer",
+                "description": (
+                    "Alias for max_output_chars, accepted for compatibility with "
+                    "models that use event-budget terminology."
+                ),
+            },
         },
         "required": ["command"],
     }
@@ -70,14 +84,23 @@ class BashTool(Tool):
         timeout: float = 120.0,
         background: bool = False,
         tty: bool = False,
+        max_output_chars: int | None = None,
+        max_event_chars: int | None = None,
     ) -> str:
         if background:
             return self._run_background(command, tty=tty)
+        output_limit = _output_limit(max_output_chars, max_event_chars)
         if tty:
-            return self._run_foreground_tty(command, timeout)
-        return self._run_foreground_piped(command, timeout)
+            return self._run_foreground_tty(command, timeout, max_output_chars=output_limit)
+        return self._run_foreground_piped(command, timeout, max_output_chars=output_limit)
 
-    def _run_foreground_piped(self, command: str, timeout: float) -> str:
+    def _run_foreground_piped(
+        self,
+        command: str,
+        timeout: float,
+        *,
+        max_output_chars: int | None = None,
+    ) -> str:
         clamped_timeout = min(float(timeout), self.MAX_TIMEOUT_SECONDS)
         started_at = time.monotonic()
         process = subprocess.Popen(
@@ -127,6 +150,7 @@ class BashTool(Tool):
                 "\n".join(parts),
                 root=self.cwd,
                 tool_name=self.name,
+                **_externalize_limits(max_output_chars),
             )
 
         parts = []
@@ -143,12 +167,19 @@ class BashTool(Tool):
             output,
             root=self.cwd,
             tool_name=self.name,
+            **_externalize_limits(max_output_chars),
         )
         if externalized != output:
             return externalized
         return "\n".join([output, f"[elapsed {time.monotonic() - started_at:.2f}s]"])
 
-    def _run_foreground_tty(self, command: str, timeout: float) -> str:
+    def _run_foreground_tty(
+        self,
+        command: str,
+        timeout: float,
+        *,
+        max_output_chars: int | None = None,
+    ) -> str:
         clamped_timeout = min(float(timeout), self.MAX_TIMEOUT_SECONDS)
         started_at = time.monotonic()
         master_fd, slave_fd = pty.openpty()
@@ -212,6 +243,7 @@ class BashTool(Tool):
             output,
             root=self.cwd,
             tool_name=self.name,
+            **_externalize_limits(max_output_chars),
         )
         if externalized != output:
             return externalized
@@ -304,6 +336,26 @@ def _timeout_output(value: str | bytes | None) -> str:
     if isinstance(value, bytes):
         return value.decode(errors="replace")
     return value
+
+
+def _output_limit(
+    max_output_chars: int | None,
+    max_event_chars: int | None,
+) -> int | None:
+    raw_limit = max_output_chars if max_output_chars is not None else max_event_chars
+    if raw_limit is None:
+        return None
+    return max(1, int(raw_limit))
+
+
+def _externalize_limits(max_output_chars: int | None) -> dict[str, int]:
+    if max_output_chars is None:
+        return {}
+    excerpt_chars = min(max_output_chars, max(1, max_output_chars // 2))
+    return {
+        "max_inline_chars": max_output_chars,
+        "max_excerpt_chars": excerpt_chars,
+    }
 
 
 def _copy_pty_to_log(master_fd: int, process: subprocess.Popen[bytes], log_file) -> None:

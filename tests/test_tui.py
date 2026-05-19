@@ -79,6 +79,56 @@ class _RaisingStreamProvider(Provider):
         yield  # pragma: no cover
 
 
+class _ParentChildProvider(Provider):
+    def __init__(self) -> None:
+        self.requests: list[CompletionRequest] = []
+        self.child_requests: list[CompletionRequest] = []
+        self._stream_turns: deque[list[Any]] = deque(
+            [
+                [
+                    ToolUseDelta(id="spawn_1", name="spawn_agent", partial_json=None),
+                    StreamComplete(
+                        response=CompletionResponse(
+                            content=[
+                                ToolUseBlock(
+                                    id="spawn_1",
+                                    name="spawn_agent",
+                                    input={"task": "child task"},
+                                )
+                            ],
+                            stop_reason="tool_use",
+                        )
+                    ),
+                ],
+                [
+                    TextDelta(text="parent done"),
+                    StreamComplete(
+                        response=CompletionResponse(
+                            content=[TextBlock(text="parent done")],
+                            stop_reason="end_turn",
+                        )
+                    ),
+                ],
+            ]
+        )
+
+    def fork(self) -> _ParentChildProvider:
+        return self
+
+    def complete(self, request: CompletionRequest) -> CompletionResponse:
+        self.child_requests.append(request)
+        return CompletionResponse(
+            content=[TextBlock(text="child done")],
+            stop_reason="end_turn",
+        )
+
+    def stream(self, request: CompletionRequest) -> Iterator[Any]:
+        self.requests.append(request)
+        if not self._stream_turns:
+            raise RuntimeError("provider exhausted")
+        yield from self._stream_turns.popleft()
+
+
 class _RecordingTool(Tool):
     name = "echo"
     description = "Return back the given message."
@@ -131,7 +181,7 @@ def _make_args(**overrides: Any) -> argparse.Namespace:
         model="gpt-5.5",
         system=None,
         max_tokens=4096,
-        max_iterations=20,
+
         thinking=False,
         effort=None,
         prompt=None,
@@ -228,7 +278,6 @@ def _session_record(
             model=model,
             system="Be direct.",
             max_tokens=1234,
-            max_iterations=6,
         ),
         messages=[Message(role="user", content=[TextBlock(text=text)])],
     )
@@ -328,7 +377,6 @@ def test_run_tui_resumes_session_id_and_restores_saved_settings(
     assert args.provider == "anthropic"
     assert args.model == "claude-sonnet-4-6"
     assert args.max_tokens == 1234
-    assert args.max_iterations == 6
     assert args._resume_session_path == path
     assert instances[0].state is not None
     assert instances[0].state["messages"] == record.messages
@@ -348,7 +396,6 @@ def test_resumed_session_renders_saved_history_before_prompt() -> None:
     args.provider = record.settings.provider
     args.model = record.settings.model
     args.max_tokens = record.settings.max_tokens
-    args.max_iterations = record.settings.max_iterations
     args._resume_session_record = record
     args._resume_session_path = Path("/tmp/sess_resume.jsonl")
 
@@ -391,7 +438,6 @@ def test_resumed_session_sends_saved_history_on_next_request() -> None:
     args.provider = record.settings.provider
     args.model = record.settings.model
     args.max_tokens = record.settings.max_tokens
-    args.max_iterations = record.settings.max_iterations
     args._resume_session_record = record
     args._resume_session_path = Path("/tmp/sess_resume.jsonl")
     response = CompletionResponse(content=[TextBlock(text="new answer")], stop_reason="end_turn")
@@ -454,7 +500,6 @@ def test_resumed_session_ending_with_tool_result_continues_turn(tmp_path: Path) 
     args.provider = record.settings.provider
     args.model = record.settings.model
     args.max_tokens = record.settings.max_tokens
-    args.max_iterations = record.settings.max_iterations
     args._resume_session_record = record
     args._resume_session_path = tmp_path / "sess_tool_result.jsonl"
     response = CompletionResponse(content=[TextBlock(text="continued")], stop_reason="end_turn")
@@ -2016,7 +2061,7 @@ def test_live_finish_response_sends_monitor_events_without_rendering_them() -> N
     assert live.pending_monitor_inputs == []
 
 
-def test_live_submit_while_streaming_writes_queued_status_panel() -> None:
+def test_live_submit_while_streaming_shows_queue_only_in_prompt() -> None:
     out = _TTYBuffer()
     app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
@@ -2029,8 +2074,10 @@ def test_live_submit_while_streaming_writes_queued_status_panel() -> None:
 
     rendered = out.getvalue()
     assert live.pending_user_inputs == ["queued followup"]
-    assert "Queued input while a turn is streaming" in rendered
-    assert "press Esc to interrupt and send now" in rendered
+    assert "Queued input while a turn is streaming" not in rendered
+    assert "press Esc to interrupt and send now" not in rendered
+    assert "Messages to be submitted after next tool call" in rendered
+    assert "\n > queued followup" not in _strip_ansi(rendered)
 
 
 def test_live_queued_image_inputs_keep_placeholder_order(tmp_path: Path) -> None:
@@ -2540,6 +2587,75 @@ def test_terminal_streams_text_thinking_and_tool_markers_in_order(
     assert "---" in out
 
 
+def test_live_terminal_configures_subagents_before_tool_dispatch() -> None:
+    out = _TTYBuffer()
+    provider = _ParentChildProvider()
+    app = tui.WillowApp(_make_args(), provider, out=out)
+    app._force_plain = False
+    app.messages.append(Message(role="user", content=[TextBlock(text="delegate")]))
+    live = tui._LiveTerminal(app)
+    read_fd, write_fd = os.pipe()
+    try:
+        live.fd = read_fd
+        live._start_worker()
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline and (live.worker is not None or live.streaming):
+            live._drain_events()
+            time.sleep(0.01)
+        live._drain_events()
+    finally:
+        os.close(read_fd)
+        os.close(write_fd)
+
+    rendered = _strip_ansi(out.getvalue())
+    assert provider.child_requests
+    assert "| spawn_agent ok" in rendered
+    assert "subagent runtime is not configured" not in rendered
+    assert "spawn_agent error" not in rendered
+
+
+@pytest.mark.parametrize("tool_name", ["wait_agent", "send_input", "close_agent"])
+def test_subagent_housekeeping_successes_are_hidden_in_transcript(tool_name: str) -> None:
+    out = _TTYBuffer()
+    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+    block = ToolUseBlock(
+        id="call_1",
+        name=tool_name,
+        input={"subagent_id": "subagent-123"},
+    )
+    result = ToolResultBlock(
+        tool_use_id="call_1",
+        content="subagent_id: subagent-123\nstatus: completed",
+    )
+
+    app._write_tool_result(block, result)
+
+    assert out.getvalue() == ""
+
+
+def test_subagent_housekeeping_errors_are_visible_in_transcript() -> None:
+    out = _TTYBuffer()
+    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+    block = ToolUseBlock(
+        id="call_1",
+        name="wait_agent",
+        input={"subagent_id": "subagent-123"},
+    )
+    result = ToolResultBlock(
+        tool_use_id="call_1",
+        content="RuntimeError: failed",
+        is_error=True,
+    )
+
+    app._write_tool_result(block, result)
+
+    rendered = _strip_ansi(out.getvalue())
+    assert "wait_agent error" in rendered
+    assert "RuntimeError: failed" in rendered
+
+
 def test_terminal_read_only_blocks_non_read_tool(monkeypatch: pytest.MonkeyPatch) -> None:
     tool = _RecordingTool()
     monkeypatch.setitem(TOOLS_BY_NAME, tool.name, tool)
@@ -2773,6 +2889,27 @@ def test_terminal_tool_error_renders_tool_name_state_and_clean_error(
     assert "| explode error" in out
     assert "ValueError: bad input" in out
     assert "ValueError('bad input')" not in out
+
+
+def test_terminal_edit_error_title_includes_path() -> None:
+    out = _TTYBuffer()
+    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    block = ToolUseBlock(
+        id="call_1",
+        name="edit",
+        input={"path": "src/willow/loop.py"},
+    )
+    result = ToolResultBlock(
+        tool_use_id="call_1",
+        content="ValueError: old_text not found in src/willow/loop.py",
+        is_error=True,
+    )
+
+    app._write_tool_result(block, result)
+
+    rendered = out.getvalue()
+    assert "edit error - src/willow/loop.py" in rendered
+    assert "old_text not found" in rendered
 
 
 def test_tui_persists_tool_use_before_tool_execution(
@@ -3102,7 +3239,6 @@ def test_resumed_compaction_rebuilds_projected_context() -> None:
     args.provider = record.settings.provider
     args.model = record.settings.model
     args.max_tokens = record.settings.max_tokens
-    args.max_iterations = record.settings.max_iterations
     args._resume_session_record = record
     args._resume_session_path = Path("/tmp/sess_compacted.jsonl")
     response = CompletionResponse(content=[TextBlock(text="new answer")], stop_reason="end_turn")
@@ -3159,7 +3295,6 @@ def test_branch_copies_history_and_compaction_into_new_session(
     args.provider = parent.settings.provider
     args.model = parent.settings.model
     args.max_tokens = parent.settings.max_tokens
-    args.max_iterations = parent.settings.max_iterations
     args._resume_session_record = parent
     args._resume_session_path = parent_path
     inputs_iter = iter(["/branch", "branch question", "/exit"])
@@ -3240,7 +3375,6 @@ def test_tui_resume_command_switches_sessions_and_projection(
     args.provider = branch.settings.provider
     args.model = branch.settings.model
     args.max_tokens = branch.settings.max_tokens
-    args.max_iterations = branch.settings.max_iterations
     args._resume_session_record = branch
     args._resume_session_path = branch_path
     inputs_iter = iter([f"/resume {parent.metadata.id}", "parent followup", "/exit"])
@@ -3373,29 +3507,3 @@ def test_terminal_statusline_can_be_disabled() -> None:
     assert "Status snapshots disabled." in out
     assert "[status]" not in out
     assert app._statusline_enabled is False
-
-
-def test_max_iterations_caps_inner_loop(monkeypatch: pytest.MonkeyPatch) -> None:
-    tool = _RecordingTool()
-    monkeypatch.setitem(TOOLS_BY_NAME, tool.name, tool)
-
-    def make_tool_use_turn(idx: int) -> list[Any]:
-        response = CompletionResponse(
-            content=[ToolUseBlock(id=f"t{idx}", name="echo", input={"message": str(idx)})],
-            stop_reason="tool_use",
-        )
-        return [
-            ToolUseDelta(id=f"t{idx}", name="echo", partial_json=None),
-            StreamComplete(response=response),
-        ]
-
-    provider = _ScriptedStreamProvider([make_tool_use_turn(i) for i in range(5)])
-
-    out, _app = _drive(
-        provider,
-        ["loop forever", "/exit"],
-        args=_make_args(max_iterations=3),
-    )
-
-    assert len(provider.requests) == 3
-    assert "max_iterations=3" in out

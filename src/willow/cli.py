@@ -40,53 +40,55 @@ from willow.providers import (
 # `_ProviderSpec` is reused from `willow.agent` so the dispatch tables share
 # the same typed surface while letting the TUI own a longer-lived provider.
 type _DispatchSpec = (
-    _ProviderSpec[anthropic.Anthropic] | _ProviderSpec[openai.OpenAI] | _ProviderSpec[str]
+    _ProviderSpec[anthropic.AsyncAnthropic]
+    | _ProviderSpec[openai.AsyncOpenAI]
+    | _ProviderSpec[str]
 )
 
 _PROVIDER_DISPATCH: dict[str, _DispatchSpec] = {
-    "anthropic": _ProviderSpec[anthropic.Anthropic](
+    "anthropic": _ProviderSpec[anthropic.AsyncAnthropic](
         vendor="anthropic",
-        client_factory=lambda key: anthropic.Anthropic(api_key=key),
-        provider_factory=lambda client: AnthropicProvider(client=client),
+        client_factory=lambda key: anthropic.AsyncAnthropic(api_key=key),
+        provider_factory=lambda client: AnthropicProvider(async_client=client),
     ),
-    "deepseek": _ProviderSpec[openai.OpenAI](
+    "deepseek": _ProviderSpec[openai.AsyncOpenAI](
         vendor="deepseek",
-        client_factory=lambda key: openai.OpenAI(
+        client_factory=lambda key: openai.AsyncOpenAI(
             api_key=key,
             base_url="https://api.deepseek.com",
         ),
-        provider_factory=lambda client: OpenAICompletionsProvider(client=client),
+        provider_factory=lambda client: OpenAICompletionsProvider(async_client=client),
     ),
-    "kimi": _ProviderSpec[openai.OpenAI](
+    "kimi": _ProviderSpec[openai.AsyncOpenAI](
         vendor="kimi",
-        client_factory=lambda key: openai.OpenAI(
+        client_factory=lambda key: openai.AsyncOpenAI(
             api_key=key,
             base_url="https://api.moonshot.ai/v1",
         ),
-        provider_factory=lambda client: OpenAICompletionsProvider(client=client),
+        provider_factory=lambda client: OpenAICompletionsProvider(async_client=client),
     ),
-    "minimax": _ProviderSpec[openai.OpenAI](
+    "minimax": _ProviderSpec[openai.AsyncOpenAI](
         vendor="minimax",
-        client_factory=lambda key: openai.OpenAI(
+        client_factory=lambda key: openai.AsyncOpenAI(
             api_key=key,
             base_url="https://api.minimax.io/v1",
         ),
-        provider_factory=lambda client: OpenAICompletionsProvider(client=client),
+        provider_factory=lambda client: OpenAICompletionsProvider(async_client=client),
     ),
     "openai_codex": _ProviderSpec[str](
         vendor="openai",
         client_factory=lambda key: key,
         provider_factory=lambda token: OpenAICodexResponsesProvider(bearer_token=token),
     ),
-    "openai_completions": _ProviderSpec[openai.OpenAI](
+    "openai_completions": _ProviderSpec[openai.AsyncOpenAI](
         vendor="openai",
-        client_factory=lambda key: openai.OpenAI(api_key=key),
-        provider_factory=lambda client: OpenAICompletionsProvider(client=client),
+        client_factory=lambda key: openai.AsyncOpenAI(api_key=key),
+        provider_factory=lambda client: OpenAICompletionsProvider(async_client=client),
     ),
-    "openai_responses": _ProviderSpec[openai.OpenAI](
+    "openai_responses": _ProviderSpec[openai.AsyncOpenAI](
         vendor="openai",
-        client_factory=lambda key: openai.OpenAI(api_key=key),
-        provider_factory=lambda client: OpenAIResponsesProvider(client=client),
+        client_factory=lambda key: openai.AsyncOpenAI(api_key=key),
+        provider_factory=lambda client: OpenAIResponsesProvider(async_client=client),
     ),
 }
 
@@ -124,19 +126,10 @@ def _run_headless(args: argparse.Namespace) -> int:
         args.model,
         args.print_prompt,
         max_tokens=args.max_tokens,
-        max_iterations=args.max_iterations,
         permission_mode=permission_mode,
         thinking=bool(getattr(args, "thinking", False)),
         effort=getattr(args, "effort", None),
     )
-
-    if response.stop_reason == "tool_use":
-        sys.stderr.write(
-            f"willow -p stopped while tools were still pending; "
-            f"increase --max-iterations above {args.max_iterations}.\n"
-        )
-        sys.stderr.flush()
-        return 1
 
     text = "".join(
         block.text for block in response.content if isinstance(block, TextBlock)
@@ -222,12 +215,6 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=4096,
         help="Per-turn output token cap (default: 4096).",
-    )
-    parser.add_argument(
-        "--max-iterations",
-        type=int,
-        default=20,
-        help="Hard cap on assistant turns for the prompt (default: 20).",
     )
     parser.add_argument(
         "--thinking",
