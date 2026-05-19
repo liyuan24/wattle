@@ -21,6 +21,14 @@ class SpawnAgentTool(Tool):
                 "type": "string",
                 "description": "The delegated task for the subagent.",
             },
+            "agent_type": {
+                "type": "string",
+                "description": (
+                    "Optional type name for the new agent. If omitted, "
+                    "`default` is used. Common values are `explorer` for "
+                    "read-only investigation and `worker` for implementation."
+                ),
+            },
             "instructions": {
                 "type": "string",
                 "description": "Optional additional system instructions for this subagent.",
@@ -55,6 +63,7 @@ class SpawnAgentTool(Tool):
     def run(
         self,
         task: str,
+        agent_type: str | None = None,
         instructions: str | None = None,
         context: str | None = None,
         model: str | None = None,
@@ -65,6 +74,7 @@ class SpawnAgentTool(Tool):
 
         record = self.runtime.subagents.spawn(
             task=task,
+            agent_type=agent_type,
             instructions=instructions,
             context=context,
             model=model,

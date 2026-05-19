@@ -26,7 +26,7 @@ import textwrap
 import threading
 import time as _time
 import tty
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -229,6 +229,54 @@ def _compact_lines(content: str, *, max_lines: int = 4, max_width: int = 110) ->
     return rendered
 
 
+def _key_value_lines(content: str) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    for line in content.splitlines():
+        key, separator, value = line.partition(": ")
+        if separator:
+            fields[key] = value
+    return fields
+
+
+def _spawn_agent_title(block: ToolUseBlock, result: ToolResultBlock) -> str:
+    fields = _key_value_lines(result.content)
+    name = fields.get("name") or fields.get("subagent_id") or "subagent"
+    role = fields.get("role") or "subagent"
+    model = fields.get("model") or _one_line(block.input.get("model", "default"))
+    effort = fields.get("effort") or ""
+    model_detail = model if effort in {"", "default", "None"} else f"{model} {effort}"
+    return f"Spawned {name} [{role}] ({model_detail})"
+
+
+def _spawn_agent_detail(block: ToolUseBlock, result: ToolResultBlock) -> str:
+    fields = _key_value_lines(result.content)
+    workspace = fields.get("workspace") or str(Path.cwd())
+    task = fields.get("task") or _one_line(block.input.get("task", ""))
+    if task:
+        return _one_line(f"└ Workspace: {workspace}. {task}", limit=180)
+    return _one_line(f"└ Workspace: {workspace}", limit=180)
+
+
+def _subagent_event_title(event: Mapping[str, object]) -> str:
+    name = str(event.get("name") or event.get("subagent_id") or "subagent")
+    role = str(event.get("role") or "subagent")
+    status = str(event.get("status") or "updated")
+    return f"{name} [{role}] {status}"
+
+
+def _subagent_event_detail(event: Mapping[str, object]) -> str:
+    task = str(event.get("task") or event.get("summary") or "").strip()
+    return _one_line(f"└ {task}", limit=180) if task else ""
+
+
+def _active_subagent_snapshots(snapshots: list[dict[str, object]]) -> list[dict[str, object]]:
+    return [
+        snapshot
+        for snapshot in snapshots
+        if snapshot.get("status") in {"pending", "running", "closing"}
+    ]
+
+
 def _tool_action_title(block: ToolUseBlock, *, is_error: bool = False) -> str:
     if is_error:
         if block.name in {"read", "write", "edit"}:
@@ -257,6 +305,8 @@ def _tool_running_title(block: ToolUseBlock) -> str:
         return f"running bash - {_tool_arg(block, 'command', '<missing command>')}"
     if block.name in {"read", "write", "edit"}:
         return f"running {block.name} - {_tool_arg(block, 'path', '<missing path>')}"
+    if block.name == "wait_agent":
+        return "Waiting for subagent(s)"
     return f"running {block.name}"
 
 
@@ -1830,6 +1880,9 @@ class WillowApp:
         if block.name in {"write", "edit"} and not result.is_error:
             self._write_edit_result(block, result)
             return
+        if block.name == "spawn_agent" and not result.is_error:
+            self._write_spawn_agent_result(block, result)
+            return
         title = _tool_action_title(block, is_error=result.is_error)
         preview_content = result.content
         if block.name == "bash":
@@ -1852,6 +1905,21 @@ class WillowApp:
         self._write(f"{marker_style}{TOOL_MARKER}{RESET} {title_style}{title}{RESET}\n")
         for line in preview:
             self._write(f"{TOOL_PREVIEW_STYLE}  {line}{RESET}\n")
+
+    def _write_spawn_agent_result(
+        self,
+        block: ToolUseBlock,
+        result: ToolResultBlock,
+    ) -> None:
+        title = _spawn_agent_title(block, result)
+        detail = _spawn_agent_detail(block, result)
+        if not self._styles_enabled():
+            self._write_line(f"{TOOL_MARKER} {title}")
+            self._write_line(f"  {detail}")
+            return
+
+        self._write(f"{TOOL_MARKER_STYLE}{TOOL_MARKER}{RESET} {TOOL_TITLE_STYLE}{title}{RESET}\n")
+        self._write(f"{TOOL_PREVIEW_STYLE}  {detail}{RESET}\n")
 
     def _write_edit_result(
         self,
@@ -3306,6 +3374,11 @@ class _LiveTerminal:
                 self._draw_prompt()
 
     def _queue_monitor_event(self, event: dict[str, object]) -> None:
+        if event.get("event_type") == "subagent":
+            self._write_subagent_event(event)
+            if self.running:
+                self._draw_prompt()
+            return
         texts = monitor_event_texts([event])
         if not texts:
             return
@@ -3313,6 +3386,22 @@ class _LiveTerminal:
         if self.streaming or self.worker is not None:
             return
         self._start_queued_turn()
+
+    def _write_subagent_event(self, event: Mapping[str, object]) -> None:
+        self._clear_prompt()
+        title = _subagent_event_title(event)
+        detail = _subagent_event_detail(event)
+        if not self.app._styles_enabled():
+            self.app._write_line(f"{TOOL_MARKER} {title}")
+            if detail:
+                self.app._write_line(f"  {detail}")
+            return
+        self.app._write(
+            f"{TOOL_MARKER_STYLE}{TOOL_MARKER}{RESET} "
+            f"{TOOL_TITLE_STYLE}{title}{RESET}\n"
+        )
+        if detail:
+            self.app._write(f"{TOOL_PREVIEW_STYLE}  {detail}{RESET}\n")
 
     def _render_stream_event(self, event: Any) -> None:
         if isinstance(event, TextDelta):
@@ -3508,6 +3597,20 @@ class _LiveTerminal:
             rows.append(_black_terminal_line("", width))
             rows.append(self._running_status_line(width))
             rows.append(_black_terminal_line("", width))
+        active_subagents = self._active_subagent_snapshots()
+        if active_subagents:
+            count = len(active_subagents)
+            noun = "subagent" if count == 1 else "subagents"
+            rows.append(_styled_terminal_line(f" Waiting for {count} {noun}", STATUS_STYLE, width))
+            for snapshot in active_subagents[:3]:
+                name = str(snapshot.get("display_name") or snapshot.get("subagent_id"))
+                role = str(snapshot.get("role") or "subagent")
+                task = _one_line(str(snapshot.get("task") or ""), limit=max(20, line_width - 8))
+                line = f"  ↳ {name} [{role}] {task}"
+                rows.append(_styled_terminal_line(line, STATUS_STYLE, width))
+            omitted = count - 3
+            if omitted > 0:
+                rows.append(_styled_terminal_line(f"  ... +{omitted} more", STATUS_STYLE, width))
         if self.interrupted_user_inputs:
             title = " Interrupted messages to be sent with your next message"
             rows.append(_styled_terminal_line(title, STATUS_STYLE, width))
@@ -3588,6 +3691,12 @@ class _LiveTerminal:
             cursor_line_index=prompt_line_index,
             cursor_column=cursor_column,
         )
+
+    def _active_subagent_snapshots(self) -> list[dict[str, object]]:
+        subagents = getattr(self.app.runtime, "_subagents", None)
+        if subagents is None:
+            return []
+        return _active_subagent_snapshots(subagents.snapshots())
 
     def _write_prompt_frame(
         self,

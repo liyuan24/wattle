@@ -70,6 +70,149 @@ def _slow_willow_child_code(
     )
 
 
+def _subagent_wait_child_code() -> str:
+    return textwrap.dedent(
+        """
+        import argparse
+        import time
+
+        from willow.permissions import PermissionMode
+        from willow.providers import (
+            CompletionResponse,
+            Provider,
+            StreamComplete,
+            TextBlock,
+            TextDelta,
+            ToolUseBlock,
+            ToolUseDelta,
+        )
+        from willow.tui import WillowApp
+
+
+        def find_subagent_id(messages):
+            for message in messages:
+                for block in message.content:
+                    content = getattr(block, "content", "")
+                    if not isinstance(content, str):
+                        continue
+                    for line in content.splitlines():
+                        if line.startswith("subagent_id: "):
+                            return line.removeprefix("subagent_id: ")
+            return "missing-subagent"
+
+
+        class ChildProvider(Provider):
+            def complete(self, request):
+                time.sleep(0.8)
+                return CompletionResponse(
+                    content=[TextBlock(text="child result")],
+                    stop_reason="end_turn",
+                    usage={},
+                )
+
+            def stream(self, request):
+                response = self.complete(request)
+                yield TextDelta(text="child result")
+                yield StreamComplete(response)
+
+
+        class ParentProvider(Provider):
+            def __init__(self):
+                self.calls = 0
+
+            def fork(self):
+                return ChildProvider()
+
+            def complete(self, request):
+                return CompletionResponse(
+                    content=[TextBlock(text="done")],
+                    stop_reason="end_turn",
+                    usage={},
+                )
+
+            def stream(self, request):
+                self.calls += 1
+                if self.calls == 1:
+                    yield ToolUseDelta(id="spawn_1", name="spawn_agent", partial_json=None)
+                    yield StreamComplete(
+                        CompletionResponse(
+                            content=[
+                                ToolUseBlock(
+                                    id="spawn_1",
+                                    name="spawn_agent",
+                                    input={
+                                        "task": "inspect prompt waiting state",
+                                        "agent_type": "explorer",
+                                    },
+                                )
+                            ],
+                            stop_reason="tool_use",
+                            usage={},
+                        )
+                    )
+                    return
+                if self.calls == 2:
+                    subagent_id = find_subagent_id(request.messages)
+                    yield ToolUseDelta(id="wait_1", name="wait_agent", partial_json=None)
+                    yield StreamComplete(
+                        CompletionResponse(
+                            content=[
+                                ToolUseBlock(
+                                    id="wait_1",
+                                    name="wait_agent",
+                                    input={
+                                        "subagent_id": subagent_id,
+                                        "timeout_seconds": 3,
+                                    },
+                                )
+                            ],
+                            stop_reason="tool_use",
+                            usage={},
+                        )
+                    )
+                    return
+                yield TextDelta(text="done")
+                yield StreamComplete(
+                    CompletionResponse(
+                        content=[TextBlock(text="done")],
+                        stop_reason="end_turn",
+                        usage={},
+                    )
+                )
+
+
+        args = argparse.Namespace(
+            provider="openai_responses",
+            model="gpt-5.5",
+            max_tokens=4096,
+            thinking=False,
+            effort="xhigh",
+            prompt="delegate",
+            persist_session=False,
+            permission_mode=PermissionMode.YOLO,
+        )
+        raise SystemExit(WillowApp(args, ParentProvider()).run())
+        """
+    )
+
+
+def test_pty_subagent_waiting_and_completion_notifications(tmp_path: Path) -> None:
+    with PtySession.spawn_python(
+        _subagent_wait_child_code(),
+        cwd=tmp_path,
+        cols=120,
+        rows=36,
+    ) as session:
+        session.read_until("Spawned Euclid [explorer] (gpt-5.5 xhigh)", timeout=4)
+        session.read_until("Waiting for subagent(s)", timeout=4)
+        session.read_until("Euclid [explorer] completed", timeout=6)
+
+        screen_text = session.screen.text()
+        assert "Workspace:" in screen_text
+        assert "inspect prompt waiting state" in screen_text
+        assert "subagent_id:" not in screen_text
+
+
 def test_pty_dragged_image_uses_anchor_while_queued_and_after_finish(tmp_path: Path) -> None:
     image = tmp_path / "dragged image.png"
     image.write_bytes(b"fake-png")

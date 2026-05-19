@@ -93,7 +93,10 @@ class _ParentChildProvider(Provider):
                                 ToolUseBlock(
                                     id="spawn_1",
                                     name="spawn_agent",
-                                    input={"task": "child task"},
+                                    input={
+                                        "task": "inspect child task",
+                                        "agent_type": "explorer",
+                                    },
                                 )
                             ],
                             stop_reason="tool_use",
@@ -1140,6 +1143,16 @@ def test_tool_running_title_collapses_multiline_bash_command() -> None:
     assert "\r" not in title
 
 
+def test_tool_running_title_describes_wait_agent() -> None:
+    block = ToolUseBlock(
+        id="call_1",
+        name="wait_agent",
+        input={"subagent_id": "subagent-123"},
+    )
+
+    assert tui._tool_running_title(block) == "Waiting for subagent(s)"
+
+
 def test_live_prompt_box_shows_working_when_streaming_without_input() -> None:
     out = _TTYBuffer()
     app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
@@ -1978,6 +1991,36 @@ def test_live_prompt_shows_queued_messages_with_interrupt_hint() -> None:
     assert "↳ second" in rendered
 
 
+def test_live_prompt_shows_active_subagent_waiting_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    out = _TTYBuffer()
+    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+    live = tui._LiveTerminal(app)
+    live.streaming = True
+
+    class FakeSubagents:
+        def snapshots(self) -> list[dict[str, object]]:
+            return [
+                {
+                    "subagent_id": "subagent-123",
+                    "display_name": "Euclid",
+                    "role": "explorer",
+                    "status": "running",
+                    "task": "Inspect the prompt state",
+                }
+            ]
+
+    monkeypatch.setattr(app.runtime, "_subagents", FakeSubagents())
+
+    live._draw_prompt()
+
+    rendered = out.getvalue()
+    assert "Waiting for 1 subagent" in rendered
+    assert "Euclid [explorer] Inspect the prompt state" in rendered
+
+
 def test_live_prompt_shows_queued_image_messages_as_anchors(tmp_path: Path) -> None:
     image = tmp_path / "dragged image.png"
     image.write_bytes(b"fake-png")
@@ -2032,6 +2075,32 @@ def test_live_queue_monitor_event_uses_hidden_queue() -> None:
         "Monitor event: service ready"
     ]
     assert "Monitor event:" not in out.getvalue()
+
+
+def test_live_subagent_event_renders_notification_without_queueing() -> None:
+    out = _TTYBuffer()
+    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+    live = tui._LiveTerminal(app)
+    started: list[bool] = []
+    live._start_queued_turn = lambda: started.append(True)  # type: ignore[method-assign]
+
+    live._queue_monitor_event(
+        {
+            "event_type": "subagent",
+            "subagent_id": "subagent-123",
+            "name": "Euclid",
+            "role": "explorer",
+            "status": "completed",
+            "task": "Inspect the prompt state",
+        }
+    )
+
+    rendered = _strip_ansi(out.getvalue())
+    assert "Euclid [explorer] completed" in rendered
+    assert "Inspect the prompt state" in rendered
+    assert live.pending_monitor_inputs == []
+    assert started == []
 
 
 def test_live_finish_response_sends_monitor_events_without_rendering_them() -> None:
@@ -2609,9 +2678,46 @@ def test_live_terminal_configures_subagents_before_tool_dispatch() -> None:
 
     rendered = _strip_ansi(out.getvalue())
     assert provider.child_requests
-    assert "| spawn_agent ok" in rendered
+    assert "Spawned Euclid [explorer] (gpt-5.5)" in rendered
+    assert "Workspace:" in rendered
+    assert "inspect child task" in rendered
     assert "subagent runtime is not configured" not in rendered
     assert "spawn_agent error" not in rendered
+
+
+def test_spawn_agent_success_renders_friendly_summary() -> None:
+    out = _TTYBuffer()
+    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+    block = ToolUseBlock(
+        id="call_1",
+        name="spawn_agent",
+        input={"task": "Investigate reproduction surfaces for issue 3 only"},
+    )
+    result = ToolResultBlock(
+        tool_use_id="call_1",
+        content=(
+            "subagent_id: subagent-123\n"
+            "name: Euclid\n"
+            "role: explorer\n"
+            "status: running\n"
+            "model: gpt-5.5\n"
+            "effort: xhigh\n"
+            "workspace: /Users/LiyuanLiu/repos/enterprise-rag\n"
+            "task: Investigate reproduction surfaces for issue 3 only\n"
+            "turns: 0"
+        ),
+    )
+
+    app._write_tool_result(block, result)
+
+    rendered = _strip_ansi(out.getvalue())
+    assert "Spawned Euclid [explorer] (gpt-5.5 xhigh)" in rendered
+    assert (
+        "Workspace: /Users/LiyuanLiu/repos/enterprise-rag. "
+        "Investigate reproduction surfaces for issue 3 only"
+    ) in rendered
+    assert "subagent_id:" not in rendered
 
 
 @pytest.mark.parametrize("tool_name", ["wait_agent", "send_input", "close_agent"])

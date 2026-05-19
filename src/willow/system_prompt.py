@@ -150,6 +150,19 @@ def _guidelines(
             "only when you need the result to continue, and close subagents "
             "when they are no longer needed."
         )
+        guidelines.append(
+            "When spawning a subagent, set agent_type explicitly when the role "
+            "matters. Use `explorer` for read-only investigation, `worker` for "
+            "implementation work, and omit agent_type only when the default role "
+            "is intended."
+        )
+        guidelines.append(
+            "After delegating work to subagents, do not duplicate their assigned "
+            "work locally while they are still running. Check status periodically "
+            "with wait_agent and keep waiting when those results are needed; "
+            "synthesize only after the relevant subagents complete, fail, or are "
+            "explicitly closed."
+        )
     if "edit" in names:
         guidelines.append(
             "Use edit for precise changes. When making multiple replacements in the "

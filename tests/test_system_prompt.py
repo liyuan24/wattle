@@ -40,6 +40,8 @@ def test_build_system_prompt_uses_willow_default_without_pi_docs(tmp_path: Path)
     assert "Before starting a long-running, expensive, or quiet operation" in prompt
     assert "Willow does not automatically start monitors after background commands" in prompt
     assert "Use spawn_agent for independent, bounded side tasks" in prompt
+    assert "set agent_type explicitly when the role matters" in prompt
+    assert "do not duplicate their assigned work locally while they are still running" in prompt
     assert "For 'latest debug image', call view_image with latest_debug=true" in prompt
     assert "send them together in one edit call with the edits array" in prompt
     assert "Current date: 2026-05-10" in prompt

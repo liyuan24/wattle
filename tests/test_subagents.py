@@ -37,9 +37,14 @@ def test_spawn_agent_runs_managed_child_session(tmp_path: Path) -> None:
 
     spawn_output = tools["spawn_agent"].run(
         task="inspect the parser",
+        agent_type="explorer",
         instructions="Report only facts.",
     )
     subagent_id = _field(spawn_output, "subagent_id")
+    assert _field(spawn_output, "name") == "Euclid"
+    assert _field(spawn_output, "role") == "explorer"
+    assert _field(spawn_output, "workspace") == str(tmp_path)
+    assert _field(spawn_output, "task") == "inspect the parser"
     wait_output = tools["wait_agent"].run(subagent_id, timeout_seconds=2)
 
     assert "status: completed" in wait_output
@@ -55,6 +60,33 @@ def test_spawn_agent_runs_managed_child_session(tmp_path: Path) -> None:
     tool_names = {spec["name"] for spec in request.tools}
     assert "bash" in tool_names
     assert "spawn_agent" not in tool_names
+
+
+def test_spawn_agent_defaults_to_default_role_without_prompt_inference(
+    tmp_path: Path,
+) -> None:
+    runtime = WillowRuntime(root=tmp_path)
+    tools = build_tools(runtime)
+    provider = StubProvider(
+        [
+            CompletionResponse(
+                content=[TextBlock(text="child result")],
+                stop_reason="end_turn",
+            )
+        ]
+    )
+    runtime.subagents.configure(
+        provider=provider,
+        tools_by_name=tools,
+        system=None,
+        model="stub-model",
+        max_tokens=512,
+    )
+
+    spawn_output = tools["spawn_agent"].run(task="inspect the parser")
+
+    assert _field(spawn_output, "name") == "Euclid"
+    assert _field(spawn_output, "role") == "default"
 
 
 def test_send_input_continues_existing_subagent_history(tmp_path: Path) -> None:

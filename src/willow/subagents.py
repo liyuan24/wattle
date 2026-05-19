@@ -38,14 +38,39 @@ COLLABORATION_TOOL_NAMES = frozenset(
     {"spawn_agent", "send_input", "wait_agent", "close_agent"}
 )
 
+DEFAULT_AGENT_TYPE = "default"
+
+SUBAGENT_DISPLAY_NAMES = (
+    "Euclid",
+    "Archimedes",
+    "Ptolemy",
+    "Hypatia",
+    "Avicenna",
+    "Averroes",
+    "Aquinas",
+    "Copernicus",
+    "Kepler",
+    "Galileo",
+    "Bacon",
+    "Descartes",
+    "Pascal",
+    "Fermat",
+    "Huygens",
+    "Leibniz",
+)
+
 
 @dataclass
 class SubagentRecord:
     subagent_id: str
+    display_name: str
+    role: str
     task: str
     instructions: str | None
     context: str | None
     model: str
+    effort: Literal["low", "medium", "high", "xhigh", "max"] | None
+    workspace: str | None
     tool_names: list[str]
     status: SubagentStatus
     started_at: float
@@ -133,6 +158,7 @@ class SubagentManager:
         self,
         *,
         task: str,
+        agent_type: str | None = None,
         instructions: str | None = None,
         context: str | None = None,
         model: str | None = None,
@@ -146,14 +172,23 @@ class SubagentManager:
 
         selected_tools = self._select_tools(config.tools_by_name, tool_names)
         resolved_model = model or config.model
+        resolved_agent_type = _normalize_agent_type(agent_type)
         subagent_id = f"subagent-{uuid.uuid4().hex[:12]}"
         now = time.time()
+        with self._lock:
+            display_name = SUBAGENT_DISPLAY_NAMES[
+                len(self._sessions) % len(SUBAGENT_DISPLAY_NAMES)
+            ]
         record = SubagentRecord(
             subagent_id=subagent_id,
+            display_name=display_name,
+            role=resolved_agent_type,
             task=clean_task,
             instructions=instructions.strip() if instructions else None,
             context=context.strip() if context else None,
             model=resolved_model,
+            effort=config.effort,
+            workspace=_workspace_from_tools(config.tools_by_name),
             tool_names=sorted(selected_tools),
             status="pending",
             started_at=now,
@@ -428,9 +463,15 @@ class SubagentManager:
             {
                 "event_type": "subagent",
                 "subagent_id": session.record.subagent_id,
+                "name": session.record.display_name,
+                "role": session.record.role,
                 "status": session.record.status,
+                "model": session.record.model,
+                "effort": session.record.effort or "default",
+                "workspace": session.record.workspace or "",
+                "task": session.record.task,
                 "summary": (
-                    f"Subagent {session.record.subagent_id} {event}: "
+                    f"{session.record.display_name} [{session.record.role}] {event}: "
                     f"{session.record.result or session.record.error or session.record.status}"
                 ),
             }
@@ -539,8 +580,13 @@ class SubagentManager:
 def subagent_summary(record: SubagentRecord) -> str:
     lines = [
         f"subagent_id: {record.subagent_id}",
+        f"name: {record.display_name}",
+        f"role: {record.role}",
         f"status: {record.status}",
         f"model: {record.model}",
+        f"effort: {record.effort or 'default'}",
+        f"workspace: {record.workspace or ''}",
+        f"task: {record.task}",
         f"turns: {record.turns}",
     ]
     if record.tool_names:
@@ -556,10 +602,17 @@ def subagent_snapshot_summary(snapshot: Mapping[str, object]) -> str:
     return subagent_summary(
         SubagentRecord(
             subagent_id=cast(str, snapshot["subagent_id"]),
+            display_name=cast(str, snapshot["display_name"]),
+            role=cast(str, snapshot["role"]),
             task=cast(str, snapshot["task"]),
             instructions=cast(str | None, snapshot["instructions"]),
             context=cast(str | None, snapshot["context"]),
             model=cast(str, snapshot["model"]),
+            effort=cast(
+                Literal["low", "medium", "high", "xhigh", "max"] | None,
+                snapshot["effort"],
+            ),
+            workspace=cast(str | None, snapshot["workspace"]),
             tool_names=list(cast(list[str], snapshot["tool_names"])),
             status=cast(SubagentStatus, snapshot["status"]),
             started_at=cast(float, snapshot["started_at"]),
@@ -581,6 +634,18 @@ def _response_text(response: CompletionResponse) -> str:
         if text:
             parts.append(text)
     return "\n".join(parts)
+
+
+def _normalize_agent_type(agent_type: str | None) -> str:
+    clean_agent_type = (agent_type or "").strip()
+    return clean_agent_type or DEFAULT_AGENT_TYPE
+
+
+def _workspace_from_tools(tools_by_name: Mapping[str, Tool]) -> str | None:
+    runtime = _runtime_from_tools(tools_by_name)
+    tasks = getattr(runtime, "tasks", None) if runtime is not None else None
+    root = getattr(tasks, "root", None)
+    return str(root) if root is not None else None
 
 
 def _runtime_from_tools(tools_by_name: Mapping[str, Tool]) -> object | None:
