@@ -86,13 +86,34 @@ def test_pty_dragged_image_uses_anchor_while_queued_and_after_finish(tmp_path: P
         session.read_until("Messages to be submitted after next tool call", timeout=3)
 
         screen_text = session.screen.text()
-        assert "check [Image #1]" in screen_text
+        assert "check [image#1]" in screen_text
         assert "dragged\\ image.png" not in screen_text
         assert str(image) not in screen_text
 
         session.read_until("Worked for", timeout=5)
         screen_text = session.screen.text()
-        assert "check [Image #1]" in screen_text
+        assert "check [image#1]" in screen_text
+        assert str(image) not in screen_text
+
+
+def test_pty_dragged_image_uses_anchor_in_active_input(tmp_path: Path) -> None:
+    image = tmp_path / "dragged image.png"
+    image.write_bytes(b"fake-png")
+    escaped_path = str(image).replace(" ", "\\ ")
+
+    with PtySession.spawn_python(
+        _slow_willow_child_code(first_delay=2.0, later_delay=0.1),
+        cwd=tmp_path,
+        cols=60,
+        rows=30,
+    ) as session:
+        session.read_until("working...", timeout=3)
+        session.write(f"check {escaped_path}")
+        session.read_until("check [image#1]", timeout=3)
+
+        screen_text = session.screen.text()
+        assert "check [image#1]" in screen_text
+        assert "dragged\\ image.png" not in screen_text
         assert str(image) not in screen_text
 
 

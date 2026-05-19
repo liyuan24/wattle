@@ -919,7 +919,7 @@ def _terminal_line_width(width: int) -> int:
 
 def _styled_terminal_line(text: str, style: str, width: int) -> str:
     visible_width = _terminal_line_width(width)
-    line = text[:visible_width]
+    line = text[:visible_width].ljust(visible_width)
     return f"\r\x1b[?7l{style}\x1b[2K{line}{RESET}\x1b[?7h"
 
 
@@ -929,7 +929,7 @@ def _filled_terminal_line(rendered: str, fill_style: str, _width: int) -> str:
 
 def _running_terminal_line(text: str, width: int, *, frame: int) -> str:
     visible_width = _terminal_line_width(width)
-    line = text[:visible_width]
+    line = text[:visible_width].ljust(visible_width)
     highlight = frame % (visible_width + 8) - 4
     parts = ["\r\x1b[?7l\x1b[40;38;5;255m\x1b[2K"]
     for index, char in enumerate(line):
@@ -951,7 +951,7 @@ def _running_terminal_line(text: str, width: int, *, frame: int) -> str:
 
 def _black_terminal_line(text: str, width: int) -> str:
     visible_width = _terminal_line_width(width)
-    line = text[:visible_width]
+    line = text[:visible_width].ljust(visible_width)
     return f"\r\x1b[?7l\x1b[40;38;5;255m\x1b[2K{line}{RESET}\x1b[?7h"
 
 
@@ -1162,9 +1162,46 @@ def _image_placeholder_text(
         media_type, _encoding = mimetypes.guess_type(reference.path.name)
         if media_type not in SUPPORTED_IMAGE_MEDIA_TYPES:
             continue
-        replacements.append((reference.start, reference.end, f"[Image #{image_index}]"))
+        replacements.append((reference.start, reference.end, f"[image#{image_index}]"))
         image_index += 1
     return _replace_text_ranges(text, replacements), image_index
+
+
+def _image_placeholder_prompt_render(
+    render: _PromptInputRender,
+    *,
+    image_index_start: int = 1,
+) -> _PromptInputRender:
+    text = render.text
+    cursor = max(0, min(render.cursor, len(text)))
+    replacements: list[tuple[int, int, str]] = []
+    image_index = image_index_start
+    for reference in _path_references_from_text(text):
+        media_type, _encoding = mimetypes.guess_type(reference.path.name)
+        if media_type not in SUPPORTED_IMAGE_MEDIA_TYPES:
+            continue
+        replacements.append((reference.start, reference.end, f"[image#{image_index}]"))
+        image_index += 1
+    if not replacements:
+        return render
+
+    chunks: list[str] = []
+    display_cursor: int | None = None
+    source_cursor = 0
+    for start, end, replacement in sorted(replacements):
+        if start < source_cursor:
+            continue
+        if display_cursor is None and cursor <= start:
+            display_cursor = len("".join(chunks)) + (cursor - source_cursor)
+        chunks.append(text[source_cursor:start])
+        if display_cursor is None and start < cursor <= end:
+            display_cursor = len("".join(chunks)) + len(replacement)
+        chunks.append(replacement)
+        source_cursor = end
+    if display_cursor is None:
+        display_cursor = len("".join(chunks)) + (cursor - source_cursor)
+    chunks.append(text[source_cursor:])
+    return _PromptInputRender(text="".join(chunks), cursor=display_cursor)
 
 
 def _first_text_block_text(
@@ -2684,7 +2721,11 @@ class _LiveTerminal:
                     if index < len(data):
                         index += 1
             elif ch.isprintable():
-                self._insert_text(ch)
+                end = index
+                while end < len(data) and data[end].isprintable():
+                    end += 1
+                self._insert_text(ch + data[index:end])
+                index = end
                 self._draw_prompt()
 
     def _flush_pending_escape_if_expired(self) -> None:
@@ -3454,7 +3495,9 @@ class _LiveTerminal:
         width = self.app._terminal_width()
         line_width = _terminal_line_width(width)
         status = self.app._status_text()
-        rendered_input = _render_prompt_input(self.buffer, self.pasted_ranges, self.cursor)
+        rendered_input = _image_placeholder_prompt_render(
+            _render_prompt_input(self.buffer, self.pasted_ranges, self.cursor)
+        )
         preview = rendered_input.text
         cursor = min(len(preview), rendered_input.cursor)
         if self.compacting:

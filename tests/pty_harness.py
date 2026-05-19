@@ -42,6 +42,7 @@ class TerminalScreen:
         self.cursor_col = 0
         self.saved_cursor = (0, 0)
         self.bg: str | None = None
+        self.pending_escape = ""
         self.cells: list[list[Cell]] = [
             [Cell() for _ in range(cols)] for _ in range(rows)
         ]
@@ -58,11 +59,18 @@ class TerminalScreen:
         self.cursor_col = min(self.cursor_col, cols - 1)
 
     def feed(self, text: str) -> None:
+        if self.pending_escape:
+            text = self.pending_escape + text
+            self.pending_escape = ""
         index = 0
         while index < len(text):
             char = text[index]
             if char == "\x1b":
-                index = self._handle_escape(text, index)
+                next_index = self._handle_escape(text, index)
+                if next_index == len(text) + 1:
+                    self.pending_escape = text[index:]
+                    return
+                index = next_index
                 continue
             if char == "\r":
                 self.cursor_col = 0
@@ -99,9 +107,13 @@ class TerminalScreen:
             self.cursor_row, self.cursor_col = self.saved_cursor
             return index + 2
         if not text.startswith("\x1b[", index):
+            if index + 1 >= len(text):
+                return len(text) + 1
             return index + 1
         match = re.match(r"\x1b\[([0-?]*)([ -/]*)([@-~])", text[index:])
         if match is None:
+            if text[index:].startswith("\x1b["):
+                return len(text) + 1
             return index + 1
         params, _intermediate, final = match.groups()
         self._handle_csi(params, final)

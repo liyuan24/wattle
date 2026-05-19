@@ -115,7 +115,7 @@ class BashTool(Tool):
         try:
             stdout, stderr = process.communicate(timeout=clamped_timeout)
         except subprocess.TimeoutExpired as timeout_error:
-            with suppress(ProcessLookupError):
+            with suppress(ProcessLookupError, PermissionError):
                 os.killpg(process.pid, signal.SIGKILL)
             capture_incomplete = False
             try:
@@ -132,7 +132,7 @@ class BashTool(Tool):
                     if pipe is not None:
                         with suppress(OSError):
                             pipe.close()
-                with suppress(ProcessLookupError):
+                with suppress(ProcessLookupError, PermissionError):
                     os.killpg(process.pid, signal.SIGKILL)
                 with suppress(subprocess.TimeoutExpired):
                     process.wait(timeout=0.1)

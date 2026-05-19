@@ -848,11 +848,11 @@ def test_tui_attaches_local_image_from_user_text(tmp_path: Path) -> None:
     assert message.role == "user"
     assert isinstance(message.content[0], TextBlock)
     assert isinstance(message.content[1], ImageBlock)
-    assert message.content[0].text == "check image at [Image #1]"
+    assert message.content[0].text == "check image at [image#1]"
     assert message.content[1].path == str(image.resolve())
     assert message.content[1].media_type == "image/png"
     rendered = out.getvalue()
-    assert "check image at [Image #1]" in rendered
+    assert "check image at [image#1]" in rendered
     assert str(image) not in rendered
     assert "[image] debug shot.png" in rendered
 
@@ -869,12 +869,12 @@ def test_tui_numbers_multiple_local_images_in_user_text(tmp_path: Path) -> None:
 
     message = app.messages[-1]
     assert message.role == "user"
-    assert message.content[0] == TextBlock(text="compare [Image #1] with [Image #2]")
+    assert message.content[0] == TextBlock(text="compare [image#1] with [image#2]")
     assert [
         block.filename for block in message.content if isinstance(block, ImageBlock)
     ] == ["left.png", "right.png"]
     rendered = out.getvalue()
-    assert "compare [Image #1] with [Image #2]" in rendered
+    assert "compare [image#1] with [image#2]" in rendered
     assert str(first) not in rendered
     assert str(second) not in rendered
 
@@ -915,7 +915,7 @@ def test_tui_supports_at_prefixed_image_and_file_paths(
     assert app._submit_user_text("check @shot.png and @notes.txt", render=True)
 
     message = app.messages[-1]
-    assert message.content[0] == TextBlock(text="check [Image #1] and @notes.txt")
+    assert message.content[0] == TextBlock(text="check [image#1] and @notes.txt")
     assert any(
         isinstance(block, ImageBlock) and block.filename == "shot.png"
         for block in message.content
@@ -939,7 +939,7 @@ def test_absolute_dragged_image_path_is_not_treated_as_slash_command(
     assert len(provider.requests) == 1
     message = provider.requests[0].messages[0]
     assert message.role == "user"
-    assert message.content[0] == TextBlock(text="[Image #1]")
+    assert message.content[0] == TextBlock(text="[image#1]")
     assert any(
         isinstance(block, ImageBlock) and block.filename == image.name
         for block in message.content
@@ -987,12 +987,12 @@ def test_chat_text_blocks_keep_single_row_vertical_padding() -> None:
 
     rendered_lines = _strip_ansi(out.getvalue()).splitlines()
     assert rendered_lines == [
-        "",
-        " hello",
-        "",
-        "",
-        " hi",
-        "",
+        "          ",
+        " hello    ",
+        "          ",
+        "          ",
+        " hi       ",
+        "          ",
     ]
 
 
@@ -1030,7 +1030,7 @@ def test_styled_terminal_line_clears_before_applying_background() -> None:
     assert rendered.startswith("\r")
     assert f"{tui.PROMPT_STYLE}\x1b[2K" in rendered
     assert f"\x1b[2K{tui.PROMPT_STYLE}" not in rendered
-    assert _strip_ansi(rendered) == "hi"
+    assert _strip_ansi(rendered) == "hi      "
 
 
 def test_terminal_width_allows_zoomed_terminals_below_forty_columns(
@@ -1096,8 +1096,8 @@ def test_running_terminal_line_animates_without_changing_text() -> None:
     assert "\x1b[40;38;5;51;1m" in bright
     assert "\x1b[40;38;5;255m" in first
     assert tui.STATUS_STYLE not in first
-    assert _strip_ansi(first) == " running bash - pytest"
-    assert _strip_ansi(second) == " running bash - pytest"
+    assert _strip_ansi(first) == " running bash - pytest      "
+    assert _strip_ansi(second) == " running bash - pytest      "
 
 
 @pytest.mark.parametrize(
@@ -1992,7 +1992,7 @@ def test_live_prompt_shows_queued_image_messages_as_anchors(tmp_path: Path) -> N
     live._draw_prompt()
 
     rendered = out.getvalue()
-    assert "↳ check [Image #1]" in rendered
+    assert "↳ check [image#1]" in rendered
     assert str(image) not in rendered
 
 
@@ -2095,17 +2095,17 @@ def test_live_queued_image_inputs_keep_placeholder_order(tmp_path: Path) -> None
 
     message = app.messages[-1]
     assert message.content[0] == TextBlock(
-        text="[queued user message 1 of 2]\nfirst [Image #1]"
+        text="[queued user message 1 of 2]\nfirst [image#1]"
     )
     assert message.content[1] == TextBlock(
-        text="[queued user message 2 of 2]\nsecond [Image #2]"
+        text="[queued user message 2 of 2]\nsecond [image#2]"
     )
     assert [
         block.filename for block in message.content if isinstance(block, ImageBlock)
     ] == ["first.png", "second.png"]
     rendered = out.getvalue()
-    assert "first [Image #1]" in rendered
-    assert "second [Image #2]" in rendered
+    assert "first [image#1]" in rendered
+    assert "second [image#2]" in rendered
     assert str(first) not in rendered
     assert str(second) not in rendered
 
@@ -2126,11 +2126,11 @@ def test_live_finish_response_anchors_pending_image_input(tmp_path: Path) -> Non
     )
 
     rendered = out.getvalue()
-    assert "check [Image #1]" in rendered
+    assert "check [image#1]" in rendered
     assert str(image) not in rendered
     assert [message.role for message in app.messages] == ["assistant", "user"]
     followup = app.messages[1]
-    assert followup.content[0] == TextBlock(text="check [Image #1]")
+    assert followup.content[0] == TextBlock(text="check [image#1]")
     assert any(
         isinstance(block, ImageBlock) and block.filename == image.name
         for block in followup.content
