@@ -41,22 +41,23 @@ COLLABORATION_TOOL_NAMES = frozenset(
 DEFAULT_AGENT_TYPE = "default"
 
 SUBAGENT_DISPLAY_NAMES = (
-    "Euclid",
-    "Archimedes",
-    "Ptolemy",
-    "Hypatia",
-    "Avicenna",
-    "Averroes",
-    "Aquinas",
-    "Copernicus",
-    "Kepler",
-    "Galileo",
-    "Bacon",
-    "Descartes",
+    "Hopper",
+    "Grace",
+    "Ada",
+    "Lovelace",
+    "Ampere",
+    "Turing",
+    "Volta",
     "Pascal",
-    "Fermat",
-    "Huygens",
-    "Leibniz",
+    "Maxwell",
+    "Kepler",
+    "Fermi",
+    "Blackwell",
+    "Rubin",
+    "Vera",
+    "Thor",
+    "Orin",
+    "Xavier",
 )
 
 

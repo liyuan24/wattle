@@ -2005,7 +2005,7 @@ def test_live_prompt_shows_active_subagent_waiting_status(
             return [
                 {
                     "subagent_id": "subagent-123",
-                    "display_name": "Euclid",
+                    "display_name": "Hopper",
                     "role": "explorer",
                     "status": "running",
                     "task": "Inspect the prompt state",
@@ -2018,7 +2018,7 @@ def test_live_prompt_shows_active_subagent_waiting_status(
 
     rendered = out.getvalue()
     assert "Waiting for 1 subagent" in rendered
-    assert "Euclid [explorer] Inspect the prompt state" in rendered
+    assert "Hopper [explorer] Inspect the prompt state" in rendered
 
 
 def test_live_prompt_shows_queued_image_messages_as_anchors(tmp_path: Path) -> None:
@@ -2089,7 +2089,7 @@ def test_live_subagent_event_renders_notification_without_queueing() -> None:
         {
             "event_type": "subagent",
             "subagent_id": "subagent-123",
-            "name": "Euclid",
+            "name": "Hopper",
             "role": "explorer",
             "status": "completed",
             "task": "Inspect the prompt state",
@@ -2097,7 +2097,7 @@ def test_live_subagent_event_renders_notification_without_queueing() -> None:
     )
 
     rendered = _strip_ansi(out.getvalue())
-    assert "Euclid [explorer] completed" in rendered
+    assert "Hopper [explorer] completed" in rendered
     assert "Inspect the prompt state" in rendered
     assert live.pending_monitor_inputs == []
     assert started == []
@@ -2678,7 +2678,7 @@ def test_live_terminal_configures_subagents_before_tool_dispatch() -> None:
 
     rendered = _strip_ansi(out.getvalue())
     assert provider.child_requests
-    assert "Spawned Euclid [explorer] (gpt-5.5)" in rendered
+    assert "Spawned Hopper [explorer] (gpt-5.5)" in rendered
     assert "Workspace:" in rendered
     assert "inspect child task" in rendered
     assert "subagent runtime is not configured" not in rendered
@@ -2698,7 +2698,7 @@ def test_spawn_agent_success_renders_friendly_summary() -> None:
         tool_use_id="call_1",
         content=(
             "subagent_id: subagent-123\n"
-            "name: Euclid\n"
+            "name: Hopper\n"
             "role: explorer\n"
             "status: running\n"
             "model: gpt-5.5\n"
@@ -2712,7 +2712,7 @@ def test_spawn_agent_success_renders_friendly_summary() -> None:
     app._write_tool_result(block, result)
 
     rendered = _strip_ansi(out.getvalue())
-    assert "Spawned Euclid [explorer] (gpt-5.5 xhigh)" in rendered
+    assert "Spawned Hopper [explorer] (gpt-5.5 xhigh)" in rendered
     assert (
         "Workspace: /Users/LiyuanLiu/repos/enterprise-rag. "
         "Investigate reproduction surfaces for issue 3 only"

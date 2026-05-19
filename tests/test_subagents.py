@@ -41,7 +41,7 @@ def test_spawn_agent_runs_managed_child_session(tmp_path: Path) -> None:
         instructions="Report only facts.",
     )
     subagent_id = _field(spawn_output, "subagent_id")
-    assert _field(spawn_output, "name") == "Euclid"
+    assert _field(spawn_output, "name") == "Hopper"
     assert _field(spawn_output, "role") == "explorer"
     assert _field(spawn_output, "workspace") == str(tmp_path)
     assert _field(spawn_output, "task") == "inspect the parser"
@@ -85,7 +85,7 @@ def test_spawn_agent_defaults_to_default_role_without_prompt_inference(
 
     spawn_output = tools["spawn_agent"].run(task="inspect the parser")
 
-    assert _field(spawn_output, "name") == "Euclid"
+    assert _field(spawn_output, "name") == "Hopper"
     assert _field(spawn_output, "role") == "default"
 
 

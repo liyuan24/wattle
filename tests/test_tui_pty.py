@@ -203,9 +203,9 @@ def test_pty_subagent_waiting_and_completion_notifications(tmp_path: Path) -> No
         cols=120,
         rows=36,
     ) as session:
-        session.read_until("Spawned Euclid [explorer] (gpt-5.5 xhigh)", timeout=4)
+        session.read_until("Spawned Hopper [explorer] (gpt-5.5 xhigh)", timeout=4)
         session.read_until("Waiting for subagent(s)", timeout=4)
-        session.read_until("Euclid [explorer] completed", timeout=6)
+        session.read_until("Hopper [explorer] completed", timeout=6)
 
         screen_text = session.screen.text()
         assert "Workspace:" in screen_text
