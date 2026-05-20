@@ -113,6 +113,11 @@ def _guidelines(
         "with that contract, and validate heuristic constants or stopping "
         "conditions with repeatable evidence instead of a single successful "
         "trial.",
+        "When investigating a failure, prioritize reproducing and explaining "
+        "the observed symptom. Treat cwd, repo identity, filenames, and nearby "
+        "docs as context, not as proof of user intent. If evidence conflicts, "
+        "keep multiple hypotheses alive until one explains the symptom end to "
+        "end.",
     ]
 
     if "bash" in names:
