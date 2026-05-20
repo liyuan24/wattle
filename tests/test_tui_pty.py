@@ -5,7 +5,7 @@ from __future__ import annotations
 import textwrap
 from pathlib import Path
 
-from pty_harness import PtySession
+from pty_harness import ANSI_RE, PtySession
 
 
 def _slow_willow_child_code(
@@ -376,3 +376,31 @@ def test_pty_resize_does_not_leave_large_gap_between_user_and_assistant(
         user_row = session.screen.find_row_containing(" hello")
         assistant_row = session.screen.find_row_containing(" done 1")
         assert assistant_row - user_row == 3
+
+
+def test_pty_transcript_rows_do_not_store_zoom_reflow_fill_spaces(
+    tmp_path: Path,
+) -> None:
+    with PtySession.spawn_python(
+        _slow_willow_child_code(first_delay=0.1, later_delay=0.1, prompt=None),
+        cwd=tmp_path,
+        cols=120,
+        rows=32,
+    ) as session:
+        session.read_until(">", timeout=3)
+        session.write("zoom regression\n")
+        session.read_until("done 1", timeout=3)
+        session.read_until("Worked for", timeout=3)
+
+        raw = session.output.decode(errors="ignore")
+        visible = ANSI_RE.sub("", raw).replace("\r", "")
+        transcript_lines = [
+            line
+            for line in visible.splitlines()
+            if line in {" zoom regression", " done 1"}
+            or line.rstrip(" ") in {" zoom regression", " done 1"}
+        ]
+
+        assert " zoom regression" in transcript_lines
+        assert " done 1" in transcript_lines
+        assert all(line == line.rstrip(" ") for line in transcript_lines)

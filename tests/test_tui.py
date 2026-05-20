@@ -979,7 +979,7 @@ def test_assistant_text_uses_terminal_background() -> None:
     assert rendered.count(tui.RESET) >= 3
 
 
-def test_chat_text_blocks_keep_single_row_vertical_padding() -> None:
+def test_chat_text_blocks_keep_single_row_vertical_padding_without_trailing_fill() -> None:
     out = _TTYBuffer()
     app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
@@ -990,12 +990,12 @@ def test_chat_text_blocks_keep_single_row_vertical_padding() -> None:
 
     rendered_lines = _strip_ansi(out.getvalue()).splitlines()
     assert rendered_lines == [
-        "          ",
-        " hello    ",
-        "          ",
-        "          ",
-        " hi       ",
-        "          ",
+        "",
+        " hello",
+        "",
+        "",
+        " hi",
+        "",
     ]
 
 
@@ -1033,7 +1033,7 @@ def test_styled_terminal_line_clears_before_applying_background() -> None:
     assert rendered.startswith("\r")
     assert f"{tui.PROMPT_STYLE}\x1b[2K" in rendered
     assert f"\x1b[2K{tui.PROMPT_STYLE}" not in rendered
-    assert _strip_ansi(rendered) == "hi      "
+    assert _strip_ansi(rendered) == "hi"
 
 
 def test_terminal_width_allows_zoomed_terminals_below_forty_columns(
@@ -1062,7 +1062,30 @@ def test_styled_transcript_wraps_long_lines_without_dropping_text() -> None:
     rendered = out.getvalue()
     assert "mnopqrstuvw" in rendered
     assert "xyz" in rendered
-    assert "z           " in rendered
+    assert "z\n" in _strip_ansi(rendered)
+
+
+def test_transcript_rows_avoid_trailing_fill_spaces_that_reflow_on_zoom() -> None:
+    out = _TTYBuffer()
+    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+    app._terminal_width = lambda: 120  # type: ignore[method-assign]
+
+    app._write_block("HELLO", tui.USER_STYLE)
+    app._write_block("HELLO! How can I help?", tui.ASSISTANT_STYLE)
+
+    rendered_lines = _strip_ansi(out.getvalue()).splitlines()
+    assert rendered_lines == [
+        "",
+        " HELLO",
+        "",
+        "",
+        " HELLO! How can I help?",
+        "",
+    ]
+    assert all(line == line.rstrip(" ") for line in rendered_lines)
+    assert " " * 20 not in _strip_ansi(out.getvalue())
+    assert "\x1b[2K" in out.getvalue()
 
 
 def test_assistant_markdown_renders_as_terminal_text() -> None:

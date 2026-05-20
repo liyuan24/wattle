@@ -972,7 +972,7 @@ def _terminal_line_width(width: int) -> int:
 
 def _styled_terminal_line(text: str, style: str, width: int) -> str:
     visible_width = _terminal_line_width(width)
-    line = text[:visible_width].ljust(visible_width)
+    line = text[:visible_width]
     return f"\r\x1b[?7l{style}\x1b[2K{line}{RESET}\x1b[?7h"
 
 
@@ -2501,14 +2501,16 @@ class WillowApp:
 
         width = self._terminal_width()
         header = f" {label} "
-        self._write(f"\r{style}{header.ljust(width)}{RESET}\n")
+        self._write(f"{_styled_terminal_line(header, style, width)}\n")
         for line in (text.splitlines() or [""]):
             body = f" {line}"
             for wrapped in _wrap_terminal_line(body, width):
-                content = wrapped.ljust(width)
+                content = wrapped
                 if label == "status":
                     content = _style_statusline_text(content)
-                self._write(f"{style}{content}{RESET}\n")
+                    self._write(f"{_filled_terminal_line(content, style, width)}\n")
+                else:
+                    self._write(f"{_styled_terminal_line(content, style, width)}\n")
 
     def _write_block(self, text: str, style: str) -> None:
         self._last_transcript_was_separator = False
