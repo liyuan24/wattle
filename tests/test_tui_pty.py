@@ -272,13 +272,27 @@ def _assert_single_three_row_input_box(screen: object) -> None:
     for row_index in rows:
         backgrounds = screen.row_backgrounds(row_index)
         assert "black" not in backgrounds
-        assert any(background == "ansi-235" for background in backgrounds)
+    prompt_backgrounds = screen.row_backgrounds(rows[1])
+    assert any(background == "ansi-235" for background in prompt_backgrounds)
     before_row = rows[0] - 1
     after_row = rows[2] + 1
     if before_row >= 0:
         assert any(background != "ansi-235" for background in screen.row_backgrounds(before_row))
     if after_row < screen.rows:
         assert any(background != "ansi-235" for background in screen.row_backgrounds(after_row))
+
+
+def _assert_no_right_side_prompt_or_status_stripes(screen: object) -> None:
+    for row_index in range(screen.rows):
+        backgrounds = screen.row_backgrounds(row_index)
+        for background in ("ansi-235", "ansi-236"):
+            if background not in backgrounds:
+                continue
+            first_index = backgrounds.index(background)
+            assert first_index == 0, (
+                f"row {row_index} has orphan {background} stripe starting at "
+                f"column {first_index}: {screen.row_text(row_index)!r}"
+            )
 
 
 def test_pty_repeated_resize_keeps_black_out_of_input_box(tmp_path: Path) -> None:
@@ -301,6 +315,7 @@ def test_pty_repeated_resize_keeps_black_out_of_input_box(tmp_path: Path) -> Non
         assert "queued input" in text
 
         _assert_single_three_row_input_box(session.screen)
+        _assert_no_right_side_prompt_or_status_stripes(session.screen)
 
 
 def test_pty_resize_does_not_leave_reflowed_prompt_box_rows(tmp_path: Path) -> None:
@@ -316,6 +331,7 @@ def test_pty_resize_does_not_leave_reflowed_prompt_box_rows(tmp_path: Path) -> N
         session.read_for(0.35)
 
         _assert_single_three_row_input_box(session.screen)
+        _assert_no_right_side_prompt_or_status_stripes(session.screen)
 
 
 def test_pty_exit_command_works_while_assistant_is_working(tmp_path: Path) -> None:

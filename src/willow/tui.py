@@ -973,15 +973,15 @@ def _terminal_line_width(width: int) -> int:
 def _styled_terminal_line(text: str, style: str, width: int) -> str:
     visible_width = _terminal_line_width(width)
     line = text[:visible_width]
-    return f"\r\x1b[?7l{style}\x1b[2K{line}{RESET}\x1b[?7h"
+    return f"\r\x1b[?7l\x1b[0m\x1b[2K{style}{line}{RESET}\x1b[?7h"
 
 
 def _styled_transcript_line(text: str, style: str) -> str:
-    return f"\r\x1b[?7l{style}\x1b[2K\x1b[?7h{text}{RESET}"
+    return f"\r\x1b[?7l\x1b[0m\x1b[2K\x1b[?7h{style}{text}{RESET}"
 
 
 def _filled_terminal_line(rendered: str, fill_style: str, _width: int) -> str:
-    return f"\r\x1b[?7l{fill_style}\x1b[2K{rendered}{RESET}\x1b[?7h"
+    return f"\r\x1b[?7l\x1b[0m\x1b[2K{rendered}{RESET}\x1b[?7h"
 
 
 def _running_terminal_line(

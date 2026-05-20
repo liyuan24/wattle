@@ -1024,15 +1024,15 @@ def test_styled_transcript_block_returns_to_column_zero_before_painting() -> Non
 
     rendered = out.getvalue()
     assert "stale cursor column\r" in rendered
-    assert f"\r\r\x1b[?7l{tui.ASSISTANT_STYLE}\x1b[2K" in rendered
+    assert f"\r\r\x1b[?7l\x1b[0m\x1b[2K{tui.ASSISTANT_STYLE}" in rendered
 
 
-def test_styled_terminal_line_clears_before_applying_background() -> None:
+def test_styled_terminal_line_clears_on_default_background_before_styling() -> None:
     rendered = tui._styled_terminal_line("hi", tui.PROMPT_STYLE, 8)
 
     assert rendered.startswith("\r")
-    assert f"{tui.PROMPT_STYLE}\x1b[2K" in rendered
-    assert f"\x1b[2K{tui.PROMPT_STYLE}" not in rendered
+    assert f"\x1b[0m\x1b[2K{tui.PROMPT_STYLE}" in rendered
+    assert f"{tui.PROMPT_STYLE}\x1b[2K" not in rendered
     assert _strip_ansi(rendered) == "hi"
 
 
@@ -2124,7 +2124,7 @@ def test_live_prompt_shows_active_subagent_waiting_status(
     live._draw_prompt()
 
     rendered = out.getvalue()
-    assert f"{tui.SUBAGENT_WAIT_TITLE_STYLE}\x1b[2K Waiting for 3 subagents" in rendered
+    assert f"\x1b[0m\x1b[2K{tui.SUBAGENT_WAIT_TITLE_STYLE} Waiting for 3 subagents" in rendered
     assert "Waiting for subagent(s)" not in rendered
     assert "Waiting for 3 subagents" in rendered
     assert "Hopper [explorer] Inspect the prompt state" in rendered
