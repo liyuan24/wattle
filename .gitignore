@@ -10,7 +10,6 @@ wheels/
 .venv
 
 # Local debug output
-AGENTS.md
 debug_images/
 system_prompt_investigation.md
 .willow/jobs/

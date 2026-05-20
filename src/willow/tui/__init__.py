@@ -22,7 +22,6 @@ import shutil
 import signal
 import sys
 import termios
-import textwrap
 import threading
 import time as _time
 import tty
@@ -96,8 +95,17 @@ from willow.skills import (
 from willow.system_prompt import build_system_prompt
 from willow.tools import DEFAULT_RUNTIME, TOOLS_BY_NAME
 from willow.tools.base import Tool
-from willow.tui_flowers import Flower, flower_for_elapsed, gradient_style
+from willow.tui import terminal as terminal_rendering
+from willow.tui_flowers import Flower, flower_for_elapsed
 from willow.turns import append_turn_step, build_turn_step
+
+_black_terminal_line = terminal_rendering.black_terminal_line
+_filled_terminal_line = terminal_rendering.filled_terminal_line
+_running_terminal_line = terminal_rendering.running_terminal_line
+_styled_terminal_line = terminal_rendering.styled_terminal_line
+_styled_transcript_line = terminal_rendering.styled_transcript_line
+_terminal_line_width = terminal_rendering.terminal_line_width
+_wrap_terminal_line = terminal_rendering.wrap_terminal_line
 
 time = SimpleNamespace(
     monotonic=_time.monotonic,
@@ -222,14 +230,49 @@ def _compact_lines(content: str, *, max_lines: int = 4, max_width: int = 110) ->
     if not lines:
         return []
     selected = lines[:max_lines]
-    rendered = [
-        line if len(line) <= max_width else line[: max_width - 3] + "..."
-        for line in selected
-    ]
+    rendered = [_truncate_preview_line(line, max_width=max_width) for line in selected]
     omitted = len(lines) - len(selected)
     if omitted > 0:
         rendered.append(f"... +{omitted} lines")
     return rendered
+
+
+def _compact_head_tail_lines(
+    content: str,
+    *,
+    max_head_lines: int = 2,
+    max_tail_lines: int = 2,
+    max_width: int = 110,
+) -> list[str]:
+    lines = [line.rstrip() for line in content.splitlines()]
+    if not lines:
+        return []
+    max_lines = max_head_lines + max_tail_lines
+    if len(lines) <= max_lines:
+        return [_truncate_preview_line(line, max_width=max_width) for line in lines]
+
+    head = lines[:max_head_lines]
+    tail = lines[-max_tail_lines:] if max_tail_lines else []
+    omitted = len(lines) - len(head) - len(tail)
+    return [
+        *[_truncate_preview_line(line, max_width=max_width) for line in head],
+        f"... +{omitted} lines",
+        *[_truncate_preview_line(line, max_width=max_width) for line in tail],
+    ]
+
+
+def _truncate_preview_line(line: str, *, max_width: int) -> str:
+    return line if len(line) <= max_width else line[: max_width - 3] + "..."
+
+
+def _bash_preview_content(content: str) -> str:
+    lines = [line for line in content.splitlines() if not line.startswith("[elapsed ")]
+    try:
+        excerpt_start = lines.index("[excerpt]") + 1
+        excerpt_end = lines.index("[/excerpt]", excerpt_start)
+    except ValueError:
+        return "\n".join(lines)
+    return "\n".join(lines[excerpt_start:excerpt_end])
 
 
 def _key_value_lines(content: str) -> dict[str, str]:
@@ -286,7 +329,7 @@ def _tool_action_title(block: ToolUseBlock, *, is_error: bool = False) -> str:
             return f"{block.name} error - {_tool_arg(block, 'path', '<missing path>')}"
         return f"{block.name} error"
     if block.name == "bash":
-        return f"bash ok - ran {_tool_arg(block, 'command', '<missing command>')}"
+        return f"Ran {_tool_arg(block, 'command', '<missing command>')}"
     if block.name == "read":
         path = _tool_arg(block, "path", "<missing path>")
         offset = block.input.get("offset")
@@ -955,76 +998,9 @@ def _input_history_from_messages(messages: list[Message]) -> list[str]:
     return history
 
 
-def _wrap_terminal_line(line: str, width: int) -> list[str]:
-    return textwrap.wrap(
-        line,
-        width=max(1, width),
-        break_long_words=True,
-        break_on_hyphens=False,
-        drop_whitespace=False,
-        replace_whitespace=False,
-    ) or [""]
-
-
-def _terminal_line_width(width: int) -> int:
-    return max(1, width)
-
-
-def _styled_terminal_line(text: str, style: str, width: int) -> str:
-    visible_width = _terminal_line_width(width)
-    line = text[:visible_width]
-    return f"\r\x1b[?7l\x1b[0m\x1b[2K{style}{line}{RESET}\x1b[?7h"
-
-
-def _styled_transcript_line(text: str, style: str) -> str:
-    return f"\r\x1b[?7l\x1b[0m\x1b[2K\x1b[?7h{style}{text}{RESET}"
-
-
-def _filled_terminal_line(rendered: str, fill_style: str, _width: int) -> str:
-    return f"\r\x1b[?7l\x1b[0m\x1b[2K{rendered}{RESET}\x1b[?7h"
-
-
-def _running_terminal_line(
-    text: str,
-    width: int,
-    *,
-    frame: int,
-    flower: Flower | None = None,
-) -> str:
-    visible_width = _terminal_line_width(width)
-    line = text[:visible_width].ljust(visible_width)
-    highlight = frame % (visible_width + 8) - 4
-    flower_index = line.find(flower.shape) if flower is not None else -1
-    parts = ["\r\x1b[?7l\x1b[40;38;5;255m\x1b[2K"]
-    for index, char in enumerate(line):
-        if index == flower_index:
-            style = gradient_style(flower, frame=frame)
-        else:
-            distance = abs(index - highlight)
-            if distance == 0:
-                style = "\x1b[40;38;5;51;1m"
-            elif distance == 1:
-                style = "\x1b[40;38;5;87;1m"
-            elif distance <= 3:
-                style = "\x1b[40;38;5;159m"
-            elif distance <= 5:
-                style = "\x1b[40;38;5;251m"
-            else:
-                style = "\x1b[40;38;5;255m"
-        parts.append(f"{style}{char}")
-    parts.append(f"{RESET}\x1b[?7h")
-    return "".join(parts)
-
-
 def _flower_working_status(elapsed_seconds: int) -> tuple[Flower, str]:
     flower = flower_for_elapsed(elapsed_seconds)
     return flower, f"{flower.shape} {flower.verb}..."
-
-
-def _black_terminal_line(text: str, width: int) -> str:
-    visible_width = _terminal_line_width(width)
-    line = text[:visible_width].ljust(visible_width)
-    return f"\r\x1b[?7l\x1b[40;38;5;255m\x1b[2K{line}{RESET}\x1b[?7h"
 
 
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
@@ -1908,12 +1884,10 @@ class WillowApp:
         title = _tool_action_title(block, is_error=result.is_error)
         preview_content = result.content
         if block.name == "bash":
-            preview_content = "\n".join(
-                line
-                for line in result.content.splitlines()
-                if not line.startswith("[elapsed ")
-            )
-        preview = _compact_lines(preview_content, max_lines=4, max_width=110)
+            preview_content = _bash_preview_content(result.content)
+            preview = _compact_head_tail_lines(preview_content, max_width=110)
+        else:
+            preview = _compact_lines(preview_content, max_lines=4, max_width=110)
         if not preview:
             preview = ["[no output]"]
         if not self._styles_enabled():
@@ -2519,8 +2493,8 @@ class WillowApp:
             return
 
         width = self._terminal_width()
-        should_pad = style in {USER_STYLE, ASSISTANT_STYLE}
         self._write("\r")
+        should_pad = style in {USER_STYLE, ASSISTANT_STYLE}
         if should_pad:
             blank = f"{_styled_terminal_line('', style, width)}\n"
             self._write(blank * MESSAGE_BLOCK_VERTICAL_PADDING)
@@ -2531,7 +2505,9 @@ class WillowApp:
         )
         for row in rows:
             body = f" {row.text}"
-            self._write(f"{_styled_transcript_line(body, row.style)}\n")
+            self._write(
+                f"{_styled_transcript_line(body, row.style, fill_remainder=should_pad)}\n"
+            )
         if should_pad:
             blank = f"{_styled_terminal_line('', style, width)}\n"
             self._write(blank * MESSAGE_BLOCK_VERTICAL_PADDING)
@@ -3926,7 +3902,7 @@ def _run_resume_picker(entries: list[SessionEntry]) -> SessionEntry | None:
                 text = text[: width - 7] + "..."
             if idx == selected:
                 sys.stdout.write(
-                    f"{USER_STYLE} {marker} {text.ljust(width - 4)} {RESET}\n"
+                    f"{SELECTED_ROW_STYLE} {marker} {text.ljust(width - 4)} {RESET}\n"
                 )
             else:
                 sys.stdout.write(f" {marker} {text}\n")

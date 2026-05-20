@@ -5,7 +5,7 @@ from __future__ import annotations
 import textwrap
 from pathlib import Path
 
-from pty_harness import ANSI_RE, PtySession
+from pty_harness import PtySession
 
 
 def _slow_willow_child_code(
@@ -272,6 +272,7 @@ def _assert_single_three_row_input_box(screen: object) -> None:
     for row_index in rows:
         backgrounds = screen.row_backgrounds(row_index)
         assert "black" not in backgrounds
+        assert all(background == "ansi-235" for background in backgrounds)
     prompt_backgrounds = screen.row_backgrounds(rows[1])
     assert any(background == "ansi-235" for background in prompt_backgrounds)
     before_row = rows[0] - 1
@@ -368,6 +369,54 @@ def test_pty_idle_resize_refills_statusline_to_new_width(tmp_path: Path) -> None
         assert all(background == "ansi-236" for background in backgrounds)
 
 
+def test_pty_idle_screen_preserves_core_visual_contract(tmp_path: Path) -> None:
+    with PtySession.spawn_python(
+        _slow_willow_child_code(first_delay=0.1, later_delay=0.1, prompt=None),
+        cwd=tmp_path,
+        cols=96,
+        rows=36,
+    ) as session:
+        session.read_until(">", timeout=3)
+        session.write("hello\n")
+        session.read_until("done 1", timeout=3)
+        session.read_until("Worked for", timeout=3)
+
+        screen_text = session.screen.text()
+        assert "Willow Agent" in screen_text
+        assert "model:     gpt-5.5" in screen_text
+
+        user_row = session.screen.find_row_containing(" hello")
+        assistant_row = session.screen.find_row_containing(" done 1")
+        worked_row = session.screen.find_row_containing("Worked for")
+        prompt_rows = _input_box_rows(session.screen)
+        status_row = session.screen.find_row_containing("Context")
+
+        assert assistant_row - user_row == 3
+        assert worked_row - assistant_row == 2
+        assert prompt_rows[0] - worked_row >= 1
+        assert status_row == prompt_rows[2] + 1
+
+        for row in (user_row - 1, user_row, user_row + 1):
+            assert all(
+                background == "ansi-235"
+                for background in session.screen.row_backgrounds(row)
+            )
+        for row in (assistant_row - 1, assistant_row, assistant_row + 1):
+            assert all(
+                background == "black"
+                for background in session.screen.row_backgrounds(row)
+            )
+        for row in prompt_rows:
+            assert all(
+                background == "ansi-235"
+                for background in session.screen.row_backgrounds(row)
+            )
+        assert all(
+            background == "ansi-236"
+            for background in session.screen.row_backgrounds(status_row)
+        )
+
+
 def test_pty_height_shrink_keeps_prompt_near_transcript(tmp_path: Path) -> None:
     with PtySession.spawn_python(
         _slow_willow_child_code(first_delay=0.1, later_delay=0.1, prompt=None),
@@ -445,15 +494,16 @@ def test_pty_transcript_rows_do_not_store_zoom_reflow_fill_spaces(
         session.read_until("done 1", timeout=3)
         session.read_until("Worked for", timeout=3)
 
-        raw = session.output.decode(errors="ignore")
-        visible = ANSI_RE.sub("", raw).replace("\r", "")
-        transcript_lines = [
-            line
-            for line in visible.splitlines()
-            if line in {" zoom regression", " done 1"}
-            or line.rstrip(" ") in {" zoom regression", " done 1"}
-        ]
+        user_row = session.screen.find_row_containing(" zoom regression")
+        assistant_row = session.screen.find_row_containing(" done 1")
+        assert session.screen.row_text(user_row).rstrip() == " zoom regression"
+        assert session.screen.row_text(assistant_row).rstrip() == " done 1"
 
-        assert " zoom regression" in transcript_lines
-        assert " done 1" in transcript_lines
-        assert all(line == line.rstrip(" ") for line in transcript_lines)
+        for row in (user_row, assistant_row):
+            backgrounds = session.screen.row_backgrounds(row)
+            text = session.screen.row_text(row)
+            visible_columns = [index for index, char in enumerate(text) if char != " "]
+            assert visible_columns
+            expected_background = "ansi-235" if row == user_row else "black"
+            assert all(backgrounds[index] == expected_background for index in visible_columns)
+            assert all(background == expected_background for background in backgrounds)

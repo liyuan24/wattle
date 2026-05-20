@@ -956,7 +956,7 @@ def test_unknown_slash_text_still_routes_to_command_error() -> None:
     assert "Unknown command: /definitely-not-a-command" in out
 
 
-def test_assistant_text_uses_terminal_background() -> None:
+def test_transcript_user_text_keeps_distinct_prompt_background() -> None:
     out = _TTYBuffer()
     app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
@@ -969,17 +969,16 @@ def test_assistant_text_uses_terminal_background() -> None:
     assert tui.USER_STYLE in rendered
     assert tui.ASSISTANT_STYLE in rendered
     assert tui.TOOL_STYLE in rendered
-    assert "48;5" not in tui.ASSISTANT_STYLE
+    assert "48;5;235" in tui.USER_STYLE
     assert "48;5" not in tui.THINKING_STYLE
     assert "48;5" in tui.PROMPT_STYLE
-    assert "48;5;235" in tui.USER_STYLE
     assert tui.USER_STYLE == tui.PROMPT_STYLE
     assert "you" not in rendered
     assert "assistant" not in rendered
     assert rendered.count(tui.RESET) >= 3
 
 
-def test_chat_text_blocks_keep_single_row_vertical_padding_without_trailing_fill() -> None:
+def test_chat_text_blocks_keep_three_row_shape_without_trailing_fill_spaces() -> None:
     out = _TTYBuffer()
     app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
@@ -997,6 +996,7 @@ def test_chat_text_blocks_keep_single_row_vertical_padding_without_trailing_fill
         " hi",
         "",
     ]
+    assert all(line == line.rstrip(" ") for line in rendered_lines)
 
 
 def test_user_history_block_clears_full_terminal_rows() -> None:
@@ -1027,12 +1027,13 @@ def test_styled_transcript_block_returns_to_column_zero_before_painting() -> Non
     assert f"\r\r\x1b[?7l\x1b[0m\x1b[2K{tui.ASSISTANT_STYLE}" in rendered
 
 
-def test_styled_terminal_line_clears_on_default_background_before_styling() -> None:
+def test_styled_terminal_line_clears_then_fills_styled_background() -> None:
     rendered = tui._styled_terminal_line("hi", tui.PROMPT_STYLE, 8)
 
     assert rendered.startswith("\r")
     assert f"\x1b[0m\x1b[2K{tui.PROMPT_STYLE}" in rendered
     assert f"{tui.PROMPT_STYLE}\x1b[2K" not in rendered
+    assert "\x1b[K" in rendered
     assert _strip_ansi(rendered) == "hi"
 
 
@@ -3068,11 +3069,45 @@ def test_terminal_bash_tool_renders_command_and_concise_output() -> None:
 
     out, _app = _drive(provider, ["run command", "/exit"])
 
-    assert "| bash ok - ran seq 1 5" in out
+    assert "| Ran seq 1 5" in out
     assert "  1" in out
-    assert "  4" in out
+    assert "  2" in out
     assert "... +1 lines" in out
-    assert "\n  5\n" not in out
+    assert "  4" in out
+    assert "  5" in out
+
+
+def test_terminal_bash_tool_externalized_output_hides_metadata() -> None:
+    out = _TTYBuffer()
+    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = True
+    block = ToolUseBlock(id="call_1", name="bash", input={"command": "uv run pytest"})
+    result = ToolResultBlock(
+        tool_use_id="call_1",
+        content=(
+            "[output truncated: 12000 chars]\n"
+            "full_output_path: /tmp/willow-output.txt\n"
+            "full_output_chars: 12000\n"
+            "excerpt_chars: 1000\n"
+            "omitted_chars: 11000\n"
+            "[excerpt]\n"
+            "============================= test session starts ==============================\n"
+            "platform darwin -- Python 3.12.11\n"
+            "[... omitted 11000 chars; see full_output_path ...]\n"
+            "tests/test_tui.py::test_example PASSED\n"
+            "============================= 437 passed in 28.06s =============================\n"
+            "[/excerpt]"
+        ),
+    )
+
+    app._write_tool_result(block, result)
+
+    rendered = _strip_ansi(out.getvalue())
+    assert "| Ran uv run pytest" in rendered
+    assert "test session starts" in rendered
+    assert "437 passed in 28.06s" in rendered
+    assert "full_output_path:" not in rendered
+    assert "excerpt_chars:" not in rendered
 
 
 def test_live_tool_execution_keeps_working_prompt_visible(

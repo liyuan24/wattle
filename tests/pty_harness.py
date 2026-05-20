@@ -177,7 +177,9 @@ class TerminalScreen:
             self.cursor_col = max(0, self.cursor_col - count)
         elif final == "K":
             mode = values[0] if values else 0
-            if mode == 2:
+            if mode == 0:
+                self._clear_line_from_cursor()
+            elif mode == 2:
                 self._clear_line()
         elif final == "J":
             mode = values[0] if values else 0
@@ -230,6 +232,11 @@ class TerminalScreen:
 
     def _clear_line(self) -> None:
         self.cells[self.cursor_row] = [Cell(bg=self.bg) for _ in range(self.cols)]
+        self.soft_wrap_rows.discard(self.cursor_row)
+
+    def _clear_line_from_cursor(self) -> None:
+        for col in range(self.cursor_col, self.cols):
+            self.cells[self.cursor_row][col] = Cell(bg=self.bg)
         self.soft_wrap_rows.discard(self.cursor_row)
 
     def _clear_to_end(self) -> None:
