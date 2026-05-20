@@ -36,16 +36,24 @@ def render_file_diff(
 class _EditReplacement(TypedDict):
     old_text: str
     new_text: str
-    replace_all: bool
+
+
+class _EditMatch(TypedDict):
+    replacement: _EditReplacement
+    index: int
+    start: int
+    end: int
 
 
 class EditTool(Tool):
     name = "edit"
     description = (
-        "Edit an existing text file by replacing old_text with new_text. For multiple "
-        "changes in one file, pass edits as an array of replacements so they are applied "
-        "together. Use this tool for file edits; do not use bash, sed, perl, or python "
-        "scripts to modify files."
+        "Edit an existing text file by replacing exact old_text with new_text. Each "
+        "old_text must match a unique, non-overlapping region of the original file. "
+        "For multiple disjoint changes in one file, pass edits as an array of "
+        "replacements so they are applied together. Merge nearby or overlapping "
+        "changes into one replacement. Use this tool for file edits; do not use bash, "
+        "sed, perl, or python scripts to modify files."
     )
     input_schema = {
         "type": "object",
@@ -62,16 +70,12 @@ class EditTool(Tool):
                 "type": "string",
                 "description": "Replacement text.",
             },
-            "replace_all": {
-                "type": "boolean",
-                "description": "Replace every occurrence instead of only the first.",
-            },
             "edits": {
                 "type": "array",
                 "description": (
-                    "Multiple replacements to apply sequentially to the same file in "
-                    "one edit call. Each item accepts old_text, new_text, and optional "
-                    "replace_all."
+                    "Multiple replacements to apply together to the same file in one "
+                    "edit call. Each item accepts old_text and new_text. Each "
+                    "old_text is matched against the original file and must be unique."
                 ),
                 "items": {
                     "type": "object",
@@ -83,13 +87,6 @@ class EditTool(Tool):
                         "new_text": {
                             "type": "string",
                             "description": "Replacement text.",
-                        },
-                        "replace_all": {
-                            "type": "boolean",
-                            "description": (
-                                "Replace every occurrence for this edit instead of only "
-                                "the first."
-                            ),
                         },
                     },
                     "required": ["old_text", "new_text"],
@@ -104,29 +101,25 @@ class EditTool(Tool):
         path: str,
         old_text: str | None = None,
         new_text: str | None = None,
-        replace_all: bool = False,
         edits: list[dict[str, Any]] | None = None,
     ) -> str:
         p = Path(path)
-        before = p.read_text()
+        before_raw = _read_text_preserving_newlines(p)
+        bom, before_without_bom = _strip_utf8_bom(before_raw)
+        line_ending = _detect_line_ending(before_without_bom)
+        before = _normalize_line_endings(before_without_bom)
         replacements = _normalize_replacements(
             old_text=old_text,
             new_text=new_text,
-            replace_all=replace_all,
             edits=edits,
         )
-        after = before
-        total_replacements = 0
-        for index, replacement in enumerate(replacements, start=1):
-            try:
-                after, occurrences = _apply_replacement(after, replacement)
-            except ValueError as exc:
-                if len(replacements) == 1:
-                    raise ValueError(f"old_text not found in {p}") from exc
-                raise ValueError(f"old_text not found in {p} for edit {index}") from exc
-            total_replacements += occurrences
-        p.write_text(after)
+        matches = _match_replacements(before, replacements, p)
+        after = _apply_matches(before, matches)
+        if after == before:
+            raise ValueError(f"No changes made to {p}")
+        _write_text_preserving_newlines(p, bom + _restore_line_endings(after, line_ending))
         diff = render_file_diff(before, after, p)
+        total_replacements = len(matches)
         replacement_label = "replacement" if total_replacements == 1 else "replacements"
         if len(replacements) == 1:
             summary = f"Edited {p} ({total_replacements} {replacement_label})"
@@ -143,7 +136,6 @@ def _normalize_replacements(
     *,
     old_text: str | None,
     new_text: str | None,
-    replace_all: bool,
     edits: list[dict[str, Any]] | None,
 ) -> list[_EditReplacement]:
     if edits is not None:
@@ -157,7 +149,7 @@ def _normalize_replacements(
         ]
     if old_text is None or new_text is None:
         raise ValueError("old_text and new_text are required when edits is not provided")
-    return [_validate_replacement(old_text, new_text, replace_all=replace_all)]
+    return [_validate_replacement(old_text, new_text)]
 
 
 def _replacement_from_mapping(mapping: dict[str, Any], *, index: int) -> _EditReplacement:
@@ -165,63 +157,121 @@ def _replacement_from_mapping(mapping: dict[str, Any], *, index: int) -> _EditRe
     new_text = mapping.get("new_text")
     if not isinstance(old_text, str) or not isinstance(new_text, str):
         raise ValueError(f"edit {index} requires string old_text and new_text")
-    replace_all = mapping.get("replace_all", False)
-    if not isinstance(replace_all, bool):
-        raise ValueError(f"edit {index} replace_all must be a boolean")
-    return _validate_replacement(old_text, new_text, replace_all=replace_all)
+    if "replace_all" in mapping:
+        raise ValueError(f"edit {index} replace_all is no longer supported")
+    return _validate_replacement(old_text, new_text)
 
 
-def _validate_replacement(
-    old_text: str,
-    new_text: str,
-    *,
-    replace_all: bool,
-) -> _EditReplacement:
+def _validate_replacement(old_text: str, new_text: str) -> _EditReplacement:
     if old_text == "":
         raise ValueError("old_text must not be empty")
-    return {"old_text": old_text, "new_text": new_text, "replace_all": replace_all}
+    return {
+        "old_text": _normalize_line_endings(old_text),
+        "new_text": _normalize_line_endings(new_text),
+    }
 
 
-def _apply_replacement(
+def _match_replacements(
+    text: str,
+    replacements: list[_EditReplacement],
+    path: Path,
+) -> list[_EditMatch]:
+    matches: list[_EditMatch] = []
+    for index, replacement in enumerate(replacements, start=1):
+        found = _find_replacement_matches(text, replacement)
+        if not found:
+            if len(replacements) == 1:
+                raise ValueError(f"old_text not found in {path}")
+            raise ValueError(f"old_text not found in {path} for edit {index}")
+        if len(found) > 1:
+            if len(replacements) == 1:
+                raise ValueError(
+                    f"old_text matched {len(found)} occurrences in {path}; "
+                    "include more context so it is unique"
+                )
+            raise ValueError(
+                f"old_text matched {len(found)} occurrences in {path} for edit {index}; "
+                "include more context so it is unique"
+            )
+        match = found[0]
+        matches.append(
+            {
+                "replacement": replacement,
+                "index": index,
+                "start": match["start"],
+                "end": match["end"],
+            }
+        )
+
+    matches.sort(key=lambda match: match["start"])
+    for previous, current in zip(matches, matches[1:], strict=False):
+        if previous["end"] > current["start"]:
+            raise ValueError(
+                f"edits {previous['index']} and {current['index']} overlap in {path}; "
+                "merge them into one replacement"
+            )
+    return matches
+
+
+def _find_replacement_matches(
     text: str,
     replacement: _EditReplacement,
-) -> tuple[str, int]:
+) -> list[dict[str, int]]:
     old_text = replacement["old_text"]
-    new_text = replacement["new_text"]
-    replace_all = replacement["replace_all"]
-    if old_text in text:
-        occurrences = text.count(old_text) if replace_all else 1
-        count = -1 if replace_all else 1
-        return text.replace(old_text, new_text, count), occurrences
-    return _apply_whitespace_flexible_replacement(text, replacement)
+    exact_matches = _find_exact_matches(text, old_text)
+    if exact_matches:
+        return exact_matches
+    return _find_whitespace_flexible_matches(text, replacement)
 
 
-def _apply_whitespace_flexible_replacement(
+def _find_exact_matches(text: str, old_text: str) -> list[dict[str, int]]:
+    matches: list[dict[str, int]] = []
+    start = 0
+    while True:
+        index = text.find(old_text, start)
+        if index == -1:
+            return matches
+        end = index + len(old_text)
+        matches.append({"start": index, "end": end})
+        start = end
+
+
+def _find_whitespace_flexible_matches(
     text: str,
     replacement: _EditReplacement,
-) -> tuple[str, int]:
+) -> list[dict[str, int]]:
     old_lines = replacement["old_text"].splitlines(keepends=True)
     if not old_lines or not any(_is_whitespace_only_line(line) for line in old_lines):
-        raise ValueError("old_text not found")
+        return []
 
     text_lines = text.splitlines(keepends=True)
+    offsets = _line_offsets(text_lines)
     window = len(old_lines)
-    match_starts: list[int] = []
+    matches: list[dict[str, int]] = []
     for start in range(0, len(text_lines) - window + 1):
         if _lines_match_with_flexible_blank_lines(
             text_lines[start : start + window],
             old_lines,
         ):
-            match_starts.append(start)
-            if not replacement["replace_all"]:
-                break
-    if not match_starts:
-        raise ValueError("old_text not found")
+            matches.append({"start": offsets[start], "end": offsets[start + window]})
+    return matches
 
-    new_lines = replacement["new_text"].splitlines(keepends=True)
-    for start in reversed(match_starts):
-        text_lines[start : start + window] = new_lines
-    return "".join(text_lines), len(match_starts)
+
+def _apply_matches(text: str, matches: list[_EditMatch]) -> str:
+    after = text
+    for match in sorted(matches, key=lambda item: item["start"], reverse=True):
+        replacement = match["replacement"]
+        after = after[: match["start"]] + replacement["new_text"] + after[match["end"] :]
+    return after
+
+
+def _line_offsets(lines: list[str]) -> list[int]:
+    offsets = [0]
+    total = 0
+    for line in lines:
+        total += len(line)
+        offsets.append(total)
+    return offsets
 
 
 def _lines_match_with_flexible_blank_lines(
@@ -237,3 +287,40 @@ def _lines_match_with_flexible_blank_lines(
 
 def _is_whitespace_only_line(line: str) -> bool:
     return line.strip("\r\n").strip(" \t") == ""
+
+
+def _strip_utf8_bom(text: str) -> tuple[str, str]:
+    if text.startswith("\ufeff"):
+        return "\ufeff", text[1:]
+    return "", text
+
+
+def _detect_line_ending(text: str) -> str:
+    crlf = text.count("\r\n")
+    lf = text.count("\n") - crlf
+    cr = text.count("\r") - crlf
+    if crlf >= lf and crlf >= cr and crlf > 0:
+        return "\r\n"
+    if cr > lf and cr > 0:
+        return "\r"
+    return "\n"
+
+
+def _normalize_line_endings(text: str) -> str:
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _restore_line_endings(text: str, line_ending: str) -> str:
+    if line_ending == "\n":
+        return text
+    return text.replace("\n", line_ending)
+
+
+def _read_text_preserving_newlines(path: Path) -> str:
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        return handle.read()
+
+
+def _write_text_preserving_newlines(path: Path, text: str) -> None:
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        handle.write(text)

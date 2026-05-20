@@ -42,6 +42,9 @@ class TerminalScreen:
         self.cursor_col = 0
         self.saved_cursor = (0, 0)
         self.bg: str | None = None
+        self.autowrap = True
+        self.pending_wrap = False
+        self.soft_wrap_rows: set[int] = set()
         self.pending_escape = ""
         self.cells: list[list[Cell]] = [
             [Cell() for _ in range(cols)] for _ in range(rows)
@@ -49,14 +52,43 @@ class TerminalScreen:
 
     def resize(self, *, cols: int, rows: int) -> None:
         old_cells = self.cells
+        old_soft_wrap_rows = self.soft_wrap_rows
         self.cols = cols
         self.rows = rows
+        reflowed_rows: list[tuple[list[Cell], bool]] = []
+        row_index = 0
+        while row_index < len(old_cells):
+            group: list[Cell] = []
+            has_soft_wrap = False
+            while True:
+                row = old_cells[row_index]
+                if row_index in old_soft_wrap_rows:
+                    has_soft_wrap = True
+                    group.extend(Cell(cell.char, cell.bg) for cell in row)
+                else:
+                    group.extend(_rstrip_cells(row))
+                if row_index not in old_soft_wrap_rows or row_index + 1 >= len(old_cells):
+                    break
+                row_index += 1
+            if has_soft_wrap:
+                wrapped = _wrap_cells(group, cols)
+            else:
+                wrapped = [([Cell(cell.char, cell.bg) for cell in group[:cols]], False)]
+            reflowed_rows.extend(wrapped)
+            row_index += 1
+
+        if len(reflowed_rows) > rows:
+            reflowed_rows = reflowed_rows[:rows]
         self.cells = [[Cell() for _ in range(cols)] for _ in range(rows)]
-        for row_index, row in enumerate(old_cells[:rows]):
+        self.soft_wrap_rows = set()
+        for row_index, (row, is_soft_wrapped) in enumerate(reflowed_rows[:rows]):
             for col_index, cell in enumerate(row[:cols]):
                 self.cells[row_index][col_index] = Cell(cell.char, cell.bg)
+            if is_soft_wrapped:
+                self.soft_wrap_rows.add(row_index)
         self.cursor_row = min(self.cursor_row, rows - 1)
         self.cursor_col = min(self.cursor_col, cols - 1)
+        self.pending_wrap = False
 
     def feed(self, text: str) -> None:
         if self.pending_escape:
@@ -74,6 +106,7 @@ class TerminalScreen:
                 continue
             if char == "\r":
                 self.cursor_col = 0
+                self.pending_wrap = False
                 index += 1
                 continue
             if char == "\n":
@@ -123,7 +156,12 @@ class TerminalScreen:
         if final == "m":
             self._set_sgr(params)
             return
-        if params.startswith(("?", ">")):
+        if params == "?7" and final in {"h", "l"}:
+            self.autowrap = final == "h"
+            if not self.autowrap:
+                self.pending_wrap = False
+            return
+        if params.startswith(("?", ">", "<")):
             return
         values = [int(value) if value else 0 for value in params.split(";") if value != "?"]
         count = values[0] if values else 1
@@ -170,25 +208,53 @@ class TerminalScreen:
             index += 1
 
     def _put_char(self, char: str) -> None:
+        if self.pending_wrap:
+            self.soft_wrap_rows.add(self.cursor_row)
+            self._newline()
+            self.cursor_col = 0
+            self.pending_wrap = False
         self.cells[self.cursor_row][self.cursor_col] = Cell(char, self.bg)
         if self.cursor_col < self.cols - 1:
             self.cursor_col += 1
+        elif self.autowrap:
+            self.pending_wrap = True
 
     def _newline(self) -> None:
+        self.pending_wrap = False
         if self.cursor_row == self.rows - 1:
             self.cells.pop(0)
             self.cells.append([Cell() for _ in range(self.cols)])
+            self.soft_wrap_rows = {row - 1 for row in self.soft_wrap_rows if row > 0}
         else:
             self.cursor_row += 1
 
     def _clear_line(self) -> None:
         self.cells[self.cursor_row] = [Cell(bg=self.bg) for _ in range(self.cols)]
+        self.soft_wrap_rows.discard(self.cursor_row)
 
     def _clear_to_end(self) -> None:
         for row in range(self.cursor_row, self.rows):
             start = self.cursor_col if row == self.cursor_row else 0
             for col in range(start, self.cols):
                 self.cells[row][col] = Cell(bg=self.bg)
+            self.soft_wrap_rows.discard(row)
+
+
+def _rstrip_cells(cells: list[Cell]) -> list[Cell]:
+    end = len(cells)
+    while end > 0 and cells[end - 1].char == " ":
+        end -= 1
+    return [Cell(cell.char, cell.bg) for cell in cells[:end]]
+
+
+def _wrap_cells(cells: list[Cell], cols: int) -> list[tuple[list[Cell], bool]]:
+    if not cells:
+        return [([], False)]
+    rows: list[tuple[list[Cell], bool]] = []
+    for start in range(0, len(cells), cols):
+        chunk = [Cell(cell.char, cell.bg) for cell in cells[start : start + cols]]
+        rows.append((chunk, start + cols < len(cells)))
+    return rows
 
 
 class PtySession:

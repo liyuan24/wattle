@@ -45,7 +45,9 @@ def test_build_system_prompt_uses_willow_default_without_pi_docs(tmp_path: Path)
     assert "set agent_type explicitly when the role matters" in prompt
     assert "do not duplicate their assigned work locally while they are still running" in prompt
     assert "first find the image path using available file-search tools" in prompt
+    assert "Each old_text must match exactly and uniquely" in prompt
     assert "send them together in one edit call with the edits array" in prompt
+    assert "Merge nearby or overlapping changes into one replacement" in prompt
     assert "Current date: 2026-05-10" in prompt
     assert f"Current working directory: {tmp_path.resolve()}" in prompt
 

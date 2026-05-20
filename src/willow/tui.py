@@ -125,7 +125,7 @@ BUILTIN_SLASH_COMMANDS = frozenset(command for command, _description in SLASH_CO
 LOGIN_PROVIDER_CHOICES: tuple[tuple[str, str], ...] = (
     ("openai-codex", "ChatGPT Plus/Pro Codex OAuth"),
 )
-PASTE_PLACEHOLDER_MIN_CHARS = 200
+PASTE_PLACEHOLDER_MIN_CHARS = 500
 MAX_IMAGE_ATTACHMENT_BYTES = 20 * 1024 * 1024
 SUPPORTED_IMAGE_MEDIA_TYPES = frozenset(
     {"image/png", "image/jpeg", "image/webp", "image/gif"}
@@ -974,6 +974,10 @@ def _styled_terminal_line(text: str, style: str, width: int) -> str:
     visible_width = _terminal_line_width(width)
     line = text[:visible_width]
     return f"\r\x1b[?7l{style}\x1b[2K{line}{RESET}\x1b[?7h"
+
+
+def _styled_transcript_line(text: str, style: str) -> str:
+    return f"\r\x1b[?7l{style}\x1b[2K\x1b[?7h{text}{RESET}"
 
 
 def _filled_terminal_line(rendered: str, fill_style: str, _width: int) -> str:
@@ -2535,8 +2539,7 @@ class WillowApp:
         )
         for row in rows:
             body = f" {row.text}"
-            for wrapped in _wrap_terminal_line(body, width):
-                self._write(f"{_styled_terminal_line(wrapped, row.style, width)}\n")
+            self._write(f"{_styled_transcript_line(body, row.style)}\n")
         if should_pad:
             blank = f"{_styled_terminal_line('', style, width)}\n"
             self._write(blank * MESSAGE_BLOCK_VERTICAL_PADDING)
@@ -2837,7 +2840,7 @@ class _LiveTerminal:
     def _insert_pasted_text(self, text: str) -> None:
         start = self.cursor
         self._insert_text(text)
-        if len(text) >= PASTE_PLACEHOLDER_MIN_CHARS or "\n" in text:
+        if len(text) >= PASTE_PLACEHOLDER_MIN_CHARS:
             self.pasted_ranges = _merge_pasted_ranges(
                 [*self.pasted_ranges, (start, start + len(text))]
             )
@@ -3043,20 +3046,16 @@ class _LiveTerminal:
             self._draw_prompt()
             return
         self._record_input_history(text)
-        if self.streaming:
-            self.pending_user_inputs.append(text)
-            self._draw_prompt()
-            return
         expanded_text = self.app._expand_skill_text(text)
-        if (
-            expanded_text is None
-            and _should_route_slash_command(text)
-            and not self.streaming
-        ):
+        if expanded_text is None and _should_route_slash_command(text):
             should_exit = self.app._handle_slash(text)
             if should_exit:
                 self.running = False
                 return
+            self._draw_prompt()
+            return
+        if self.streaming:
+            self.pending_user_inputs.append(text)
             self._draw_prompt()
             return
 

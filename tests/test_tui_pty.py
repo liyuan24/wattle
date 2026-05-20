@@ -318,6 +318,22 @@ def test_pty_resize_does_not_leave_reflowed_prompt_box_rows(tmp_path: Path) -> N
         _assert_single_three_row_input_box(session.screen)
 
 
+def test_pty_exit_command_works_while_assistant_is_working(tmp_path: Path) -> None:
+    with PtySession.spawn_python(
+        _slow_willow_child_code(first_delay=3.0, later_delay=0.1),
+        cwd=tmp_path,
+        cols=100,
+        rows=30,
+    ) as session:
+        session.read_until("press esc to interrupt", timeout=3)
+        session.write("/exit\n")
+        session.read_until("Goodbye.", timeout=3)
+
+        assert "Messages to be submitted after next tool call" not in session.plain_output
+        assert "done 1" not in session.plain_output
+        assert session.process.wait(timeout=3) == 0
+
+
 def test_pty_idle_resize_refills_statusline_to_new_width(tmp_path: Path) -> None:
     with PtySession.spawn_python(
         _slow_willow_child_code(first_delay=0.1, later_delay=0.1),
@@ -376,6 +392,27 @@ def test_pty_resize_does_not_leave_large_gap_between_user_and_assistant(
         user_row = session.screen.find_row_containing(" hello")
         assistant_row = session.screen.find_row_containing(" done 1")
         assert assistant_row - user_row == 3
+
+
+def test_pty_transcript_message_reflows_when_terminal_width_grows(
+    tmp_path: Path,
+) -> None:
+    message = "this submitted message should reflow after the terminal gets wider"
+    with PtySession.spawn_python(
+        _slow_willow_child_code(first_delay=0.1, later_delay=0.1, prompt=None),
+        cwd=tmp_path,
+        cols=24,
+        rows=40,
+    ) as session:
+        session.read_until(">", timeout=3)
+        session.write(f"{message}\n")
+        session.read_until("done 1", timeout=3)
+
+        session.resize(cols=96, rows=40)
+        session.read_for(0.25)
+
+        user_row = session.screen.find_row_containing(f" {message}")
+        assert session.screen.row_text(user_row).rstrip() == f" {message}"
 
 
 def test_pty_transcript_rows_do_not_store_zoom_reflow_fill_spaces(

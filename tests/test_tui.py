@@ -1065,6 +1065,19 @@ def test_styled_transcript_wraps_long_lines_without_dropping_text() -> None:
     assert "z\n" in _strip_ansi(rendered)
 
 
+def test_styled_transcript_uses_soft_wrapping_for_resize_reflow() -> None:
+    out = _TTYBuffer()
+    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+    app._terminal_width = lambda: 12  # type: ignore[method-assign]
+
+    app._write_block("abcdefghijklmnopqrstuvwxyz", tui.USER_STYLE)
+
+    rendered = _strip_ansi(out.getvalue())
+    assert " abcdefghijklmnopqrstuvwxyz\n" in rendered
+    assert "abcdefghijkl\nmnopqrstuvwxyz" not in rendered
+
+
 def test_transcript_rows_avoid_trailing_fill_spaces_that_reflow_on_zoom() -> None:
     out = _TTYBuffer()
     app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
@@ -1442,7 +1455,7 @@ def test_live_prompt_collapses_pasted_content_placeholder() -> None:
     app._force_plain = False
     app._statusline_enabled = False
     live = tui._LiveTerminal(app)
-    pasted = "Instruction\n" + ("Set up service.\n" * 20)
+    pasted = "Instruction\n" + ("Set up service.\n" * 40)
 
     live._insert_pasted_text(pasted)
     live._draw_prompt()
@@ -1450,6 +1463,25 @@ def test_live_prompt_collapses_pasted_content_placeholder() -> None:
     rendered = out.getvalue()
     assert f"[Pasted Content {len(pasted)} chars]" in rendered
     assert "Set up service." not in rendered
+    assert live.buffer == pasted
+    assert live.cursor == len(pasted)
+
+
+def test_live_prompt_shows_short_multiline_pasted_content() -> None:
+    out = _TTYBuffer()
+    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+    app._statusline_enabled = False
+    live = tui._LiveTerminal(app)
+    pasted = "Instruction\nSet up service."
+
+    live._insert_pasted_text(pasted)
+    live._draw_prompt()
+
+    rendered = out.getvalue()
+    assert "[Pasted Content" not in rendered
+    assert "Instruction" in rendered
+    assert "Set up service." in rendered
     assert live.buffer == pasted
     assert live.cursor == len(pasted)
 
@@ -2645,6 +2677,39 @@ def test_live_submit_records_prompt_for_input_history() -> None:
     assert live.cursor == len("remember this")
 
 
+def test_live_submit_exit_command_while_streaming_exits_instead_of_queueing() -> None:
+    out = _TTYBuffer()
+    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+    live = tui._LiveTerminal(app)
+    live.streaming = True
+    live.buffer = "/exit"
+    live.cursor = len(live.buffer)
+
+    live._submit_buffer()
+
+    assert live.running is False
+    assert live.pending_user_inputs == []
+    assert app.messages == []
+
+
+def test_live_submit_builtin_command_while_streaming_runs_instead_of_queueing() -> None:
+    out = _TTYBuffer()
+    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+    live = tui._LiveTerminal(app)
+    live.streaming = True
+    live.buffer = "/help"
+    live.cursor = len(live.buffer)
+
+    live._submit_buffer()
+
+    assert live.running is True
+    assert live.pending_user_inputs == []
+    assert app.messages == []
+    assert "Commands:" in out.getvalue()
+
+
 def test_live_bracketed_paste_split_across_reads_preserves_newlines() -> None:
     out = _TTYBuffer()
     app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
@@ -2663,7 +2728,7 @@ def test_live_bracketed_paste_split_across_reads_preserves_newlines() -> None:
 
     assert live.buffer == "line one\nline two\n"
     assert live.cursor == len(live.buffer)
-    assert live.pasted_ranges == [(0, len(live.buffer))]
+    assert live.pasted_ranges == []
     assert app.messages == []
 
 

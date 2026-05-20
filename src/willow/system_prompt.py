@@ -170,8 +170,11 @@ def _guidelines(
         )
     if "edit" in names:
         guidelines.append(
-            "Use edit for precise changes. When making multiple replacements in the "
-            "same file, send them together in one edit call with the edits array."
+            "Use edit for precise existing-file changes. Each old_text must match "
+            "exactly and uniquely in the original file; include small surrounding "
+            "context when needed. When making multiple disjoint replacements in the "
+            "same file, send them together in one edit call with the edits array. "
+            "Merge nearby or overlapping changes into one replacement."
         )
     if "write" in names:
         guidelines.append("Use write only for new files or complete rewrites")

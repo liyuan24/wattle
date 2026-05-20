@@ -33,6 +33,8 @@ def test_edit_tool_schema_avoids_top_level_composition_keywords() -> None:
     assert "anyOf" not in schema
     assert "oneOf" not in schema
     assert "allOf" not in schema
+    assert "replace_all" not in schema["properties"]
+    assert "replace_all" not in schema["properties"]["edits"]["items"]["properties"]
 
 
 def test_grep_tool_is_not_registered() -> None:
@@ -117,6 +119,60 @@ def test_edit_tool_applies_multiple_replacements_in_one_call(tmp_path) -> None:
     assert "+three" in output
 
 
+def test_edit_tool_applies_multiple_replacements_against_original_file(tmp_path) -> None:
+    path = tmp_path / "story.txt"
+    path.write_text("foo\nbar\nbaz\n")
+
+    EditTool().run(
+        str(path),
+        edits=[
+            {"old_text": "foo\n", "new_text": "foo bar\n"},
+            {"old_text": "bar\n", "new_text": "BAR\n"},
+        ],
+    )
+
+    assert path.read_text() == "foo bar\nBAR\nbaz\n"
+
+
+def test_edit_tool_rejects_duplicate_old_text(tmp_path) -> None:
+    path = tmp_path / "story.txt"
+    path.write_text("foo foo foo\n")
+
+    with pytest.raises(ValueError, match="include more context"):
+        EditTool().run(str(path), "foo", "bar")
+
+    assert path.read_text() == "foo foo foo\n"
+
+
+def test_edit_tool_rejects_overlapping_replacements(tmp_path) -> None:
+    path = tmp_path / "story.txt"
+    path.write_text("one\ntwo\nthree\n")
+
+    with pytest.raises(ValueError, match="overlap"):
+        EditTool().run(
+            str(path),
+            edits=[
+                {"old_text": "one\ntwo\n", "new_text": "ONE\nTWO\n"},
+                {"old_text": "two\nthree\n", "new_text": "TWO\nTHREE\n"},
+            ],
+        )
+
+    assert path.read_text() == "one\ntwo\nthree\n"
+
+
+def test_edit_tool_rejects_replace_all_in_edits(tmp_path) -> None:
+    path = tmp_path / "story.txt"
+    path.write_text("foo\n")
+
+    with pytest.raises(ValueError, match="replace_all is no longer supported"):
+        EditTool().run(
+            str(path),
+            edits=[{"old_text": "foo", "new_text": "bar", "replace_all": True}],
+        )
+
+    assert path.read_text() == "foo\n"
+
+
 def test_edit_tool_tolerates_whitespace_only_line_drift(tmp_path) -> None:
     path = tmp_path / "story.txt"
     path.write_text("start\n\nend\n")
@@ -141,6 +197,24 @@ def test_edit_tool_batch_failure_does_not_write_partial_changes(tmp_path) -> Non
         )
 
     assert path.read_text() == "alpha\nbeta\n"
+
+
+def test_edit_tool_preserves_crlf_line_endings(tmp_path) -> None:
+    path = tmp_path / "story.txt"
+    path.write_bytes(b"alpha\r\nbeta\r\n")
+
+    EditTool().run(str(path), "alpha\n", "ALPHA\n")
+
+    assert path.read_bytes() == b"ALPHA\r\nbeta\r\n"
+
+
+def test_edit_tool_preserves_utf8_bom(tmp_path) -> None:
+    path = tmp_path / "story.txt"
+    path.write_text("\ufeffhello\n")
+
+    EditTool().run(str(path), "hello", "hi")
+
+    assert path.read_text() == "\ufeffhi\n"
 
 
 def test_read_tool_large_output_is_externalized(monkeypatch, tmp_path: Path) -> None:
