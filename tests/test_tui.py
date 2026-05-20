@@ -1036,6 +1036,29 @@ def test_styled_terminal_line_clears_before_applying_background() -> None:
     assert _strip_ansi(rendered) == "hi"
 
 
+def test_prompt_clear_resets_styles_before_erasing_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        tui.shutil,
+        "get_terminal_size",
+        lambda _fallback: os.terminal_size((96, 10)),
+    )
+    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=_TTYBuffer())
+    app._terminal_width = lambda: 24  # type: ignore[method-assign]
+    live = tui._LiveTerminal(app)
+    live.prompt_lines = 3
+    live.prompt_width = 48
+    live.prompt_cursor_offset_from_bottom = 1
+
+    sequence = live._clear_prompt_sequence(force_reflow_clear=True)
+
+    assert sequence.startswith("\x1b[1B")
+    assert "\x1b[0m\x1b[J" in sequence
+    assert sequence.count("\x1b[0m\x1b[2K") == 2
+    assert live.prompt_lines == 0
+
+
 def test_terminal_width_allows_zoomed_terminals_below_forty_columns(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1326,8 +1349,8 @@ def test_live_running_status_zoom_in_clears_below_prompt_bottom() -> None:
     live._redraw_running_status_line()
 
     rendered = out.getvalue()
-    assert "\x1b[1B\x1b[?25l\r\x1b[J" in rendered
-    assert "\x1b[1A\r\x1b[2K" in rendered
+    assert "\x1b[1B\x1b[?25l\r\x1b[0m\x1b[J" in rendered
+    assert "\x1b[1A\r\x1b[0m\x1b[2K" in rendered
     visible_lines = _strip_ansi(rendered).splitlines()
     input_line_index = next(
         index for index, line in enumerate(visible_lines) if line.startswith(" > ")
@@ -1501,8 +1524,8 @@ def test_live_prompt_clear_accounts_for_terminal_zoom_in() -> None:
     live._draw_prompt()
 
     rendered = out.getvalue()
-    assert "\x1b[2B\x1b[?25l\r\x1b[J" in rendered
-    assert "\x1b[1A\r\x1b[2K" in rendered
+    assert "\x1b[2B\x1b[?25l\r\x1b[0m\x1b[J" in rendered
+    assert "\x1b[1A\r\x1b[0m\x1b[2K" in rendered
     assert " > " in rendered
     assert live.prompt_width == 10
 
@@ -1525,8 +1548,8 @@ def test_live_prompt_clear_accounts_for_cursor_line_reflow_after_zoom_in() -> No
     live._draw_prompt()
 
     rendered = out.getvalue()
-    assert "\x1b[1B\x1b[?25l\r\x1b[J" in rendered
-    assert "\x1b[1A\r\x1b[2K" in rendered
+    assert "\x1b[1B\x1b[?25l\r\x1b[0m\x1b[J" in rendered
+    assert "\x1b[1A\r\x1b[0m\x1b[2K" in rendered
     assert " > abc" in rendered
     assert live.prompt_width == 8
 
@@ -2892,7 +2915,7 @@ def test_subagent_housekeeping_successes_are_hidden_in_transcript(tool_name: str
     assert out.getvalue() == ""
 
 
-def test_subagent_housekeeping_errors_are_visible_in_transcript() -> None:
+def test_subagent_housekeeping_errors_are_hidden_in_transcript() -> None:
     out = _TTYBuffer()
     app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
@@ -2910,8 +2933,8 @@ def test_subagent_housekeeping_errors_are_visible_in_transcript() -> None:
     app._write_tool_result(block, result)
 
     rendered = _strip_ansi(out.getvalue())
-    assert "wait_agent error" in rendered
-    assert "RuntimeError: failed" in rendered
+    assert "wait_agent error" not in rendered
+    assert "RuntimeError: failed" not in rendered
 
 
 def test_terminal_read_only_blocks_non_read_tool(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2935,15 +2958,22 @@ def test_terminal_read_only_blocks_non_read_tool(monkeypatch: pytest.MonkeyPatch
         ]
     )
 
-    out, _app = _drive(
+    out, app = _drive(
         provider,
         ["use tool", "/exit"],
         args=_make_args(permission_mode=tui.PermissionMode.READ_ONLY),
     )
 
     assert tool.calls == []
-    assert "| echo error" in out
-    assert "read-only mode" in out
+    assert "| echo error" not in out
+    assert "read-only mode" not in out
+    followup = app.messages[2]
+    assert any(
+        isinstance(block, ToolResultBlock)
+        and block.is_error
+        and "read-only mode" in block.content
+        for block in followup.content
+    )
 
 
 def test_terminal_ask_permission_denies_tool(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2964,7 +2994,7 @@ def test_terminal_ask_permission_denies_tool(monkeypatch: pytest.MonkeyPatch) ->
         ]
     )
 
-    out, _app = _drive(
+    out, app = _drive(
         provider,
         ["use tool", "n", "/exit"],
         args=_make_args(permission_mode=tui.PermissionMode.ASK),
@@ -2972,7 +3002,14 @@ def test_terminal_ask_permission_denies_tool(monkeypatch: pytest.MonkeyPatch) ->
 
     assert tool.calls == []
     assert "[permission] Allow echo" in out
-    assert "Permission denied by user" in out
+    assert "Permission denied by user" not in out
+    followup = app.messages[2]
+    assert any(
+        isinstance(block, ToolResultBlock)
+        and block.is_error
+        and "Permission denied by user" in block.content
+        for block in followup.content
+    )
 
 
 def test_terminal_ask_permission_allows_tool(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -3115,7 +3152,7 @@ def test_terminal_project_hello_world_skill_works(
     assert "/hello_world confirm skill wiring" in out
 
 
-def test_terminal_tool_error_renders_tool_name_state_and_clean_error(
+def test_terminal_tool_error_is_hidden_but_kept_for_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class FailingTool(Tool):
@@ -3142,14 +3179,22 @@ def test_terminal_tool_error_renders_tool_name_state_and_clean_error(
         ]
     )
 
-    out, _app = _drive(provider, ["run tool", "/exit"])
+    out, app = _drive(provider, ["run tool", "/exit"])
 
-    assert "| explode error" in out
-    assert "ValueError: bad input" in out
+    assert "| explode error" not in out
+    assert "ValueError: bad input" not in out
     assert "ValueError('bad input')" not in out
+    followup = app.messages[2]
+    assert followup.role == "user"
+    assert any(
+        isinstance(block, ToolResultBlock)
+        and block.is_error
+        and block.content == "ValueError: bad input"
+        for block in followup.content
+    )
 
 
-def test_terminal_edit_error_title_includes_path() -> None:
+def test_terminal_edit_error_is_hidden_from_transcript() -> None:
     out = _TTYBuffer()
     app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     block = ToolUseBlock(
@@ -3166,8 +3211,8 @@ def test_terminal_edit_error_title_includes_path() -> None:
     app._write_tool_result(block, result)
 
     rendered = out.getvalue()
-    assert "edit error - src/willow/loop.py" in rendered
-    assert "old_text not found" in rendered
+    assert "edit error - src/willow/loop.py" not in rendered
+    assert "old_text not found" not in rendered
 
 
 def test_tui_persists_tool_use_before_tool_execution(
@@ -3298,6 +3343,37 @@ def test_write_added_file_renders_full_diff_preview() -> None:
     rendered = out.getvalue()
     assert f"write ok - added {path} (+23 -0)" in rendered
     assert "   23 +line 23" in rendered
+    assert "changed lines" not in rendered
+
+
+def test_edit_tool_result_renders_full_diff_preview() -> None:
+    out = _TTYBuffer()
+    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+    path = "/app/service.py"
+    diff_lines = []
+    for index in range(1, 18):
+        diff_lines.extend([f"-old {index}", f"+new {index}"])
+    block = ToolUseBlock(id="call_1", name="edit", input={"path": path})
+    result = ToolResultBlock(
+        tool_use_id="call_1",
+        content="\n".join(
+            [
+                f"Edited {path}",
+                f"--- {path} (before)",
+                f"+++ {path} (after)",
+                "@@ -1,17 +1,17 @@",
+                *diff_lines,
+            ]
+        ),
+    )
+
+    app._write_tool_result(block, result)
+
+    rendered = out.getvalue()
+    assert f"edit ok - edited {path} (+17 -17)" in rendered
+    assert "   17 -old 17" in rendered
+    assert "   17 +new 17" in rendered
     assert "changed lines" not in rendered
 
 

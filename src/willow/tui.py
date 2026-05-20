@@ -1895,6 +1895,8 @@ class WillowApp:
         result: ToolResultBlock,
     ) -> None:
         self._last_transcript_was_separator = False
+        if result.is_error:
+            return
         if _suppress_successful_tool_result(block, result):
             return
         if block.name in {"write", "edit"} and not result.is_error:
@@ -1951,17 +1953,7 @@ class WillowApp:
         diff_lines = lines[1:] if lines else []
         added, deleted = _diff_counts(diff_lines)
         title = _tool_edit_title(block, path=path, added=added, deleted=deleted)
-        max_changes = (
-            None
-            if (
-                block.name == "write"
-                and added > 0
-                and deleted == 0
-                and _diff_starts_from_empty_old_file(diff_lines)
-            )
-            else 12
-        )
-        rows = _diff_preview_lines(diff_lines, max_changes=max_changes)
+        rows = _diff_preview_lines(diff_lines, max_changes=None)
         if not rows:
             rows = [("meta", lines[0] if lines else "[no changes]")]
 
@@ -3838,9 +3830,9 @@ class _LiveTerminal:
         if rows_down_to_prompt_bottom:
             parts.append(f"\x1b[{rows_down_to_prompt_bottom}B")
             self.prompt_cursor_offset_from_bottom = 0
-        parts.append("\x1b[?25l\r\x1b[J")
+        parts.append("\x1b[?25l\r\x1b[0m\x1b[J")
         for _ in range(rows_to_clear - 1):
-            parts.append("\x1b[1A\r\x1b[2K")
+            parts.append("\x1b[1A\r\x1b[0m\x1b[2K")
         parts.append("\x1b[?25h")
         self._reset_prompt_state()
         return "".join(parts)
