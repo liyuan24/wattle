@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from willow.message_history import (
+from wattle.message_history import (
     interrupted_user_text_blocks,
     monitor_event_text_blocks,
     queued_user_text_blocks,
 )
-from willow.providers import TextBlock
+from wattle.providers import TextBlock
 
 
 def test_single_queued_user_text_is_unchanged() -> None:

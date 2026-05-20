@@ -17,7 +17,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from willow.providers import (
+from wattle.providers import (
     CompletionRequest,
     ImageBlock,
     Message,
@@ -197,7 +197,7 @@ def test_user_image_block_translates_to_chat_image_part(tmp_path) -> None:
 
 def test_user_text_blocks_are_separated_when_flattened() -> None:
     """Chat Completions has one content string per user message, so multiple
-    Willow text blocks need an explicit separator when flattened."""
+    Wattle text blocks need an explicit separator when flattened."""
     client = _make_client(_fake_response(content="ok"))
     provider = OpenAICompletionsProvider(async_client=client)
 
@@ -327,7 +327,7 @@ def test_multiple_tool_results_lift_to_separate_wire_messages() -> None:
     ]
 
 
-def test_user_text_can_follow_tool_results_in_same_willow_message() -> None:
+def test_user_text_can_follow_tool_results_in_same_wattle_message() -> None:
     client = _make_client(_fake_response(content="ok"))
     provider = OpenAICompletionsProvider(async_client=client)
 

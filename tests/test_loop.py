@@ -5,9 +5,9 @@ from __future__ import annotations
 from collections import deque
 from collections.abc import Iterable, Iterator
 
-from willow.loop import run, run_streaming
-from willow.permissions import PermissionGate, PermissionMode
-from willow.providers import (
+from wattle.loop import run, run_streaming
+from wattle.permissions import PermissionGate, PermissionMode
+from wattle.providers import (
     CompletionRequest,
     CompletionResponse,
     Provider,
@@ -21,8 +21,8 @@ from willow.providers import (
     ToolUseBlock,
     ToolUseDelta,
 )
-from willow.runtime import WillowRuntime
-from willow.tools import BashTool
+from wattle.runtime import WattleRuntime
+from wattle.tools import BashTool
 
 
 def test_loop_runs_tool_and_terminates() -> None:
@@ -204,7 +204,7 @@ def test_loop_reports_tool_errors_as_blocks() -> None:
 
 
 def test_loop_adds_monitor_events_to_tool_followup_message() -> None:
-    runtime = WillowRuntime()
+    runtime = WattleRuntime()
 
     class EmitEventTool:
         name = "emit_event"

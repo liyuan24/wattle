@@ -1,4 +1,4 @@
-"""End-to-end PTY tests for Willow's live TUI."""
+"""End-to-end PTY tests for Wattle's live TUI."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from pathlib import Path
 from pty_harness import PtySession
 
 
-def _slow_willow_child_code(
+def _slow_wattle_child_code(
     *,
     first_delay: float = 1.0,
     later_delay: float = 0.2,
@@ -19,15 +19,15 @@ def _slow_willow_child_code(
         import argparse
         import time
 
-        from willow.permissions import PermissionMode
-        from willow.providers import (
+        from wattle.permissions import PermissionMode
+        from wattle.providers import (
             CompletionResponse,
             Provider,
             StreamComplete,
             TextBlock,
             TextDelta,
         )
-        from willow.tui import WillowApp
+        from wattle.tui import WattleApp
 
 
         class SlowProvider(Provider):
@@ -65,7 +65,7 @@ def _slow_willow_child_code(
             persist_session=False,
             permission_mode=PermissionMode.YOLO,
         )
-        raise SystemExit(WillowApp(args, SlowProvider()).run())
+        raise SystemExit(WattleApp(args, SlowProvider()).run())
         """
     )
 
@@ -76,8 +76,8 @@ def _subagent_wait_child_code() -> str:
         import argparse
         import time
 
-        from willow.permissions import PermissionMode
-        from willow.providers import (
+        from wattle.permissions import PermissionMode
+        from wattle.providers import (
             CompletionResponse,
             Provider,
             StreamComplete,
@@ -86,7 +86,7 @@ def _subagent_wait_child_code() -> str:
             ToolUseBlock,
             ToolUseDelta,
         )
-        from willow.tui import WillowApp
+        from wattle.tui import WattleApp
 
 
         def find_subagent_id(messages):
@@ -191,7 +191,7 @@ def _subagent_wait_child_code() -> str:
             persist_session=False,
             permission_mode=PermissionMode.YOLO,
         )
-        raise SystemExit(WillowApp(args, ParentProvider()).run())
+        raise SystemExit(WattleApp(args, ParentProvider()).run())
         """
     )
 
@@ -220,7 +220,7 @@ def test_pty_dragged_image_uses_anchor_while_queued_and_after_finish(tmp_path: P
     escaped_path = str(image).replace(" ", "\\ ")
 
     with PtySession.spawn_python(
-        _slow_willow_child_code(first_delay=2.0, later_delay=0.1),
+        _slow_wattle_child_code(first_delay=2.0, later_delay=0.1),
         cwd=tmp_path,
         cols=100,
         rows=30,
@@ -247,7 +247,7 @@ def test_pty_dragged_image_uses_anchor_in_active_input(tmp_path: Path) -> None:
     escaped_path = str(image).replace(" ", "\\ ")
 
     with PtySession.spawn_python(
-        _slow_willow_child_code(first_delay=2.0, later_delay=0.1),
+        _slow_wattle_child_code(first_delay=2.0, later_delay=0.1),
         cwd=tmp_path,
         cols=60,
         rows=30,
@@ -298,7 +298,7 @@ def _assert_no_right_side_prompt_or_status_stripes(screen: object) -> None:
 
 def test_pty_repeated_resize_keeps_black_out_of_input_box(tmp_path: Path) -> None:
     with PtySession.spawn_python(
-        _slow_willow_child_code(first_delay=1.4, later_delay=0.1),
+        _slow_wattle_child_code(first_delay=1.4, later_delay=0.1),
         cwd=tmp_path,
         cols=90,
         rows=28,
@@ -321,7 +321,7 @@ def test_pty_repeated_resize_keeps_black_out_of_input_box(tmp_path: Path) -> Non
 
 def test_pty_resize_does_not_leave_reflowed_prompt_box_rows(tmp_path: Path) -> None:
     with PtySession.spawn_python(
-        _slow_willow_child_code(first_delay=2.0, later_delay=0.1),
+        _slow_wattle_child_code(first_delay=2.0, later_delay=0.1),
         cwd=tmp_path,
         cols=120,
         rows=30,
@@ -337,7 +337,7 @@ def test_pty_resize_does_not_leave_reflowed_prompt_box_rows(tmp_path: Path) -> N
 
 def test_pty_exit_command_works_while_assistant_is_working(tmp_path: Path) -> None:
     with PtySession.spawn_python(
-        _slow_willow_child_code(first_delay=3.0, later_delay=0.1),
+        _slow_wattle_child_code(first_delay=3.0, later_delay=0.1),
         cwd=tmp_path,
         cols=100,
         rows=30,
@@ -353,7 +353,7 @@ def test_pty_exit_command_works_while_assistant_is_working(tmp_path: Path) -> No
 
 def test_pty_idle_resize_refills_statusline_to_new_width(tmp_path: Path) -> None:
     with PtySession.spawn_python(
-        _slow_willow_child_code(first_delay=0.1, later_delay=0.1),
+        _slow_wattle_child_code(first_delay=0.1, later_delay=0.1),
         cwd=tmp_path,
         cols=44,
         rows=24,
@@ -371,7 +371,7 @@ def test_pty_idle_resize_refills_statusline_to_new_width(tmp_path: Path) -> None
 
 def test_pty_idle_screen_preserves_core_visual_contract(tmp_path: Path) -> None:
     with PtySession.spawn_python(
-        _slow_willow_child_code(first_delay=0.1, later_delay=0.1, prompt=None),
+        _slow_wattle_child_code(first_delay=0.1, later_delay=0.1, prompt=None),
         cwd=tmp_path,
         cols=96,
         rows=36,
@@ -382,7 +382,7 @@ def test_pty_idle_screen_preserves_core_visual_contract(tmp_path: Path) -> None:
         session.read_until("Worked for", timeout=3)
 
         screen_text = session.screen.text()
-        assert "Willow Agent" in screen_text
+        assert "Wattle Agent" in screen_text
         assert "model:     gpt-5.5" in screen_text
 
         user_row = session.screen.find_row_containing(" hello")
@@ -419,7 +419,7 @@ def test_pty_idle_screen_preserves_core_visual_contract(tmp_path: Path) -> None:
 
 def test_pty_height_shrink_keeps_prompt_near_transcript(tmp_path: Path) -> None:
     with PtySession.spawn_python(
-        _slow_willow_child_code(first_delay=0.1, later_delay=0.1, prompt=None),
+        _slow_wattle_child_code(first_delay=0.1, later_delay=0.1, prompt=None),
         cwd=tmp_path,
         cols=120,
         rows=50,
@@ -441,7 +441,7 @@ def test_pty_resize_does_not_leave_large_gap_between_user_and_assistant(
     tmp_path: Path,
 ) -> None:
     with PtySession.spawn_python(
-        _slow_willow_child_code(first_delay=1.0, later_delay=0.1, prompt=None),
+        _slow_wattle_child_code(first_delay=1.0, later_delay=0.1, prompt=None),
         cwd=tmp_path,
         cols=48,
         rows=60,
@@ -464,7 +464,7 @@ def test_pty_transcript_message_reflows_when_terminal_width_grows(
 ) -> None:
     message = "this submitted message should reflow after the terminal gets wider"
     with PtySession.spawn_python(
-        _slow_willow_child_code(first_delay=0.1, later_delay=0.1, prompt=None),
+        _slow_wattle_child_code(first_delay=0.1, later_delay=0.1, prompt=None),
         cwd=tmp_path,
         cols=24,
         rows=40,
@@ -484,7 +484,7 @@ def test_pty_transcript_rows_do_not_store_zoom_reflow_fill_spaces(
     tmp_path: Path,
 ) -> None:
     with PtySession.spawn_python(
-        _slow_willow_child_code(first_delay=0.1, later_delay=0.1, prompt=None),
+        _slow_wattle_child_code(first_delay=0.1, later_delay=0.1, prompt=None),
         cwd=tmp_path,
         cols=120,
         rows=32,

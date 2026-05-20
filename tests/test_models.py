@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from willow import models
+from wattle import models
 
 
 def test_available_model_choices_includes_openai_compatible_vendors(
@@ -20,5 +20,5 @@ def test_available_model_choices_includes_openai_compatible_vendors(
 
 def test_render_model_choices_empty_mentions_generic_provider_auth() -> None:
     assert models.render_model_choices([], current_model="x") == (
-        "No models available. Add provider auth to ~/.willow/auth.json."
+        "No models available. Add provider auth to ~/.wattle/auth.json."
     )

@@ -1,7 +1,7 @@
-"""Tests for willow.auth.
+"""Tests for wattle.auth.
 
-These tests redirect ``willow.auth.AUTH_PATH`` at a per-test ``tmp_path`` so
-they never read or write the real ``~/.willow/auth.json``.
+These tests redirect ``wattle.auth.AUTH_PATH`` at a per-test ``tmp_path`` so
+they never read or write the real ``~/.wattle/auth.json``.
 """
 
 from __future__ import annotations
@@ -12,12 +12,12 @@ from pathlib import Path
 
 import pytest
 
-from willow import auth
+from wattle import auth
 
 
 @pytest.fixture
 def auth_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Point willow.auth.AUTH_PATH at tmp_path/auth.json and return the path."""
+    """Point wattle.auth.AUTH_PATH at tmp_path/auth.json and return the path."""
     path = tmp_path / "auth.json"
     monkeypatch.setattr(auth, "AUTH_PATH", path)
     monkeypatch.setattr(auth, "CODEX_AUTH_PATH", tmp_path / "codex-auth.json")
@@ -41,10 +41,10 @@ def _jwt_with_exp(exp: int) -> str:
 # ---------------------------------------------------------------------------
 
 
-def test_auth_path_default_is_home_dotwillow_auth_json() -> None:
+def test_auth_path_default_is_home_dotwattle_auth_json() -> None:
     """The unpatched constants must resolve to documented auth paths."""
     # Re-import to be safe; the module attribute should equal the documented path.
-    assert Path.home() / ".willow" / "auth.json" == auth.AUTH_PATH
+    assert Path.home() / ".wattle" / "auth.json" == auth.AUTH_PATH
     assert Path.home() / ".codex" / "auth.json" == auth.CODEX_AUTH_PATH
 
 
@@ -88,7 +88,7 @@ def test_get_credential_returns_api_key_metadata(auth_file: Path) -> None:
     assert credential.expires_at is None
 
 
-def test_get_credential_returns_openai_oauth_from_willow(auth_file: Path) -> None:
+def test_get_credential_returns_openai_oauth_from_wattle(auth_file: Path) -> None:
     token = _jwt_with_exp(2_000_000_000)
     auth_file.write_text(
         json.dumps(
@@ -163,7 +163,7 @@ def test_get_api_key_returns_oauth_access_token_for_compatibility(auth_file: Pat
     assert auth.get_api_key("openai") == token
 
 
-def test_get_credential_falls_back_to_codex_oauth_when_willow_missing(
+def test_get_credential_falls_back_to_codex_oauth_when_wattle_missing(
     auth_file: Path,
 ) -> None:
     token = _jwt_with_exp(2_000_000_000)
@@ -542,20 +542,20 @@ def test_get_api_key_malformed_json_propagates_valueerror(auth_file: Path) -> No
 
 
 # ---------------------------------------------------------------------------
-# willow package does not eagerly import auth
+# wattle package does not eagerly import auth
 # ---------------------------------------------------------------------------
 
 
-def test_importing_willow_does_not_auto_load_auth() -> None:
-    """`import willow` must not read the auth file (no side effects)."""
+def test_importing_wattle_does_not_auto_load_auth() -> None:
+    """`import wattle` must not read the auth file (no side effects)."""
     import importlib
     import sys
 
-    # Drop any cached references so we re-execute willow/__init__.py.
+    # Drop any cached references so we re-execute wattle/__init__.py.
     for name in list(sys.modules):
-        if name == "willow" or name.startswith("willow."):
+        if name == "wattle" or name.startswith("wattle."):
             del sys.modules[name]
 
-    willow = importlib.import_module("willow")
+    wattle = importlib.import_module("wattle")
     # The package should not have eagerly bound `auth` as an attribute.
-    assert not hasattr(willow, "auth")
+    assert not hasattr(wattle, "auth")

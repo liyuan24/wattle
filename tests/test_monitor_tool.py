@@ -5,8 +5,8 @@ import sys
 import time
 from pathlib import Path
 
-from willow.runtime import WillowRuntime
-from willow.tools.monitor import MonitorTool
+from wattle.runtime import WattleRuntime
+from wattle.tools.monitor import MonitorTool
 
 
 def _wait_for(predicate, timeout: float = 2.0) -> None:
@@ -23,7 +23,7 @@ def _python_command(code: str) -> str:
 
 
 def test_monitor_command_emits_stdout_and_terminal_summary(tmp_path: Path) -> None:
-    runtime = WillowRuntime(root=tmp_path)
+    runtime = WattleRuntime(root=tmp_path)
 
     output = MonitorTool(runtime=runtime).run(
         command=_python_command("print('READY', flush=True)"),
@@ -47,7 +47,7 @@ def test_monitor_command_emits_stdout_and_terminal_summary(tmp_path: Path) -> No
 
 
 def test_monitor_command_timeout_marks_timed_out(tmp_path: Path) -> None:
-    runtime = WillowRuntime(root=tmp_path)
+    runtime = WattleRuntime(root=tmp_path)
 
     output = MonitorTool(runtime=runtime).run(
         command=_python_command("import time; print('started', flush=True); time.sleep(60)"),
@@ -69,7 +69,7 @@ def test_monitor_command_timeout_marks_timed_out(tmp_path: Path) -> None:
 
 
 def test_monitor_command_timeout_kills_process_group(tmp_path: Path) -> None:
-    runtime = WillowRuntime(root=tmp_path)
+    runtime = WattleRuntime(root=tmp_path)
     leaked_path = tmp_path / "leaked"
     child = (
         "import pathlib, time; "
@@ -97,7 +97,7 @@ def test_monitor_command_timeout_kills_process_group(tmp_path: Path) -> None:
 
 
 def test_monitor_command_persistent_ignores_timeout_ms(tmp_path: Path) -> None:
-    runtime = WillowRuntime(root=tmp_path)
+    runtime = WattleRuntime(root=tmp_path)
 
     MonitorTool(runtime=runtime).run(
         command=_python_command("import time; time.sleep(0.2); print('done', flush=True)"),
@@ -115,7 +115,7 @@ def test_monitor_command_persistent_ignores_timeout_ms(tmp_path: Path) -> None:
 
 
 def test_monitor_caps_command_output_events(tmp_path: Path) -> None:
-    runtime = WillowRuntime(root=tmp_path)
+    runtime = WattleRuntime(root=tmp_path)
 
     MonitorTool(runtime=runtime).run(
         command=_python_command("print('one', flush=True); print('two', flush=True)"),
@@ -135,7 +135,7 @@ def test_monitor_caps_command_output_events(tmp_path: Path) -> None:
 
 
 def test_monitor_rejects_empty_command(tmp_path: Path) -> None:
-    runtime = WillowRuntime(root=tmp_path)
+    runtime = WattleRuntime(root=tmp_path)
 
     output = MonitorTool(runtime=runtime).run(command=" ")
 

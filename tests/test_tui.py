@@ -1,4 +1,4 @@
-"""Tests for Willow's native terminal TUI."""
+"""Tests for Wattle's native terminal TUI."""
 
 from __future__ import annotations
 
@@ -15,9 +15,9 @@ from typing import Any
 
 import pytest
 
-from willow import auth, session, tui
-from willow.models import ModelChoice
-from willow.providers import (
+from wattle import auth, session, tui
+from wattle.models import ModelChoice
+from wattle.providers import (
     CompletionRequest,
     CompletionResponse,
     ImageBlock,
@@ -31,8 +31,8 @@ from willow.providers import (
     ToolUseBlock,
     ToolUseDelta,
 )
-from willow.tools import TOOLS_BY_NAME
-from willow.tools.base import Tool
+from wattle.tools import TOOLS_BY_NAME
+from wattle.tools.base import Tool
 
 ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
@@ -217,7 +217,7 @@ def _drive(
     provider: Provider,
     inputs: list[str],
     args: argparse.Namespace | None = None,
-) -> tuple[str, tui.WillowApp]:
+) -> tuple[str, tui.WattleApp]:
     args = args or _make_args()
     inputs_iter = iter(inputs)
 
@@ -228,7 +228,7 @@ def _drive(
             raise EOFError from exc
 
     out = io.StringIO()
-    app = tui.WillowApp(args, provider, input_func=input_func, out=out)
+    app = tui.WattleApp(args, provider, input_func=input_func, out=out)
     assert app.run() == 0
     return out.getvalue(), app
 
@@ -295,11 +295,11 @@ def _text_message(index: int, text: str) -> Message:
 
 def test_run_tui_builds_provider_and_runs_native_session(monkeypatch: pytest.MonkeyPatch) -> None:
     provider = object()
-    monkeypatch.setattr("willow.cli._build_provider", lambda _name: provider)
+    monkeypatch.setattr("wattle.cli._build_provider", lambda _name: provider)
 
-    instances: list[FakeWillowApp] = []
+    instances: list[FakeWattleApp] = []
 
-    class FakeWillowApp:
+    class FakeWattleApp:
         def __init__(
             self,
             args: argparse.Namespace,
@@ -317,7 +317,7 @@ def test_run_tui_builds_provider_and_runs_native_session(monkeypatch: pytest.Mon
         def run(self) -> int:
             return 42
 
-    monkeypatch.setattr(tui, "WillowApp", FakeWillowApp)
+    monkeypatch.setattr(tui, "WattleApp", FakeWattleApp)
 
     args = _make_args()
     assert tui.run_tui(args) == 42
@@ -348,11 +348,11 @@ def test_run_tui_resumes_session_id_and_restores_saved_settings(
         built.append(name)
         return provider
 
-    monkeypatch.setattr("willow.cli._build_provider", build_provider)
+    monkeypatch.setattr("wattle.cli._build_provider", build_provider)
 
     instances: list[Any] = []
 
-    class FakeWillowApp:
+    class FakeWattleApp:
         def __init__(
             self,
             args: argparse.Namespace,
@@ -370,7 +370,7 @@ def test_run_tui_resumes_session_id_and_restores_saved_settings(
         def run(self) -> int:
             return 0
 
-    monkeypatch.setattr(tui, "WillowApp", FakeWillowApp)
+    monkeypatch.setattr(tui, "WattleApp", FakeWattleApp)
 
     args = _make_args(resume="sess_123")
     assert tui.run_tui(args) == 0
@@ -411,7 +411,7 @@ def test_resumed_session_renders_saved_history_before_prompt() -> None:
             raise EOFError from exc
 
     out_buffer = io.StringIO()
-    app = tui.WillowApp(
+    app = tui.WattleApp(
         args,
         _ScriptedStreamProvider([]),
         state=tui._state_from_session(record),
@@ -453,7 +453,7 @@ def test_resumed_session_sends_saved_history_on_next_request() -> None:
         except StopIteration as exc:
             raise EOFError from exc
 
-    app = tui.WillowApp(
+    app = tui.WattleApp(
         args,
         provider,
         state=tui._state_from_session(record),
@@ -518,7 +518,7 @@ def test_resumed_session_ending_with_tool_result_continues_turn(tmp_path: Path) 
             raise EOFError from exc
 
     out_buffer = io.StringIO()
-    app = tui.WillowApp(
+    app = tui.WattleApp(
         args,
         provider,
         state=tui._state_from_session(record),
@@ -552,11 +552,11 @@ def test_run_tui_resume_picker_uses_latest_session_when_not_interactive(
         ),
     )
     monkeypatch.setattr(tui, "list_sessions", lambda: [latest, older])
-    monkeypatch.setattr("willow.cli._build_provider", lambda _name: object())
+    monkeypatch.setattr("wattle.cli._build_provider", lambda _name: object())
 
     instances: list[Any] = []
 
-    class FakeWillowApp:
+    class FakeWattleApp:
         def __init__(
             self,
             args: argparse.Namespace,
@@ -572,7 +572,7 @@ def test_run_tui_resume_picker_uses_latest_session_when_not_interactive(
         def run(self) -> int:
             return 0
 
-    monkeypatch.setattr(tui, "WillowApp", FakeWillowApp)
+    monkeypatch.setattr(tui, "WattleApp", FakeWattleApp)
 
     args = _make_args(resume="")
     assert tui.run_tui(args) == 0
@@ -585,11 +585,11 @@ def test_run_tui_resume_picker_uses_latest_session_when_not_interactive(
 
 def test_run_tui_resume_without_sessions_starts_new(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(tui, "list_sessions", lambda: [])
-    monkeypatch.setattr("willow.cli._build_provider", lambda _name: object())
+    monkeypatch.setattr("wattle.cli._build_provider", lambda _name: object())
 
     instances: list[Any] = []
 
-    class FakeWillowApp:
+    class FakeWattleApp:
         def __init__(
             self,
             args: argparse.Namespace,
@@ -605,7 +605,7 @@ def test_run_tui_resume_without_sessions_starts_new(monkeypatch: pytest.MonkeyPa
         def run(self) -> int:
             return 0
 
-    monkeypatch.setattr(tui, "WillowApp", FakeWillowApp)
+    monkeypatch.setattr(tui, "WattleApp", FakeWattleApp)
 
     args = _make_args(resume="")
     assert tui.run_tui(args) == 0
@@ -628,7 +628,7 @@ def test_skill_hints_match_skill_prefix(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
-    skill_path = tmp_path / "project" / ".willow" / "skills" / "reviewer" / "SKILL.md"
+    skill_path = tmp_path / "project" / ".wattle" / "skills" / "reviewer" / "SKILL.md"
     skill_path.parent.mkdir(parents=True)
     skill_path.write_text("---\ndescription: Review code.\n---\nbody", encoding="utf-8")
 
@@ -643,7 +643,7 @@ def test_input_hints_show_commands_and_skills(
 ) -> None:
     monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
     skill_path = (
-        tmp_path / "project" / ".willow" / "skills" / "hello_world" / "SKILL.md"
+        tmp_path / "project" / ".wattle" / "skills" / "hello_world" / "SKILL.md"
     )
     skill_path.parent.mkdir(parents=True)
     skill_path.write_text(
@@ -663,7 +663,7 @@ def test_input_hints_filter_commands_and_skills_by_same_prefix(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
-    skills_root = tmp_path / "project" / ".willow" / "skills"
+    skills_root = tmp_path / "project" / ".wattle" / "skills"
     hello_path = skills_root / "hello_world" / "SKILL.md"
     review_path = skills_root / "reviewer" / "SKILL.md"
     hello_path.parent.mkdir(parents=True)
@@ -687,8 +687,8 @@ def test_input_hints_filter_commands_and_skills_by_same_prefix(
 
 def test_input_hints_fuzzy_match_at_file_paths(tmp_path: Path) -> None:
     project = tmp_path / "project"
-    (project / "src" / "willow").mkdir(parents=True)
-    (project / "src" / "willow" / "tui.py").write_text("print('hi')", encoding="utf-8")
+    (project / "src" / "wattle").mkdir(parents=True)
+    (project / "src" / "wattle" / "tui.py").write_text("print('hi')", encoding="utf-8")
     (project / "README.md").write_text("docs", encoding="utf-8")
     (project / "notes draft.txt").write_text("draft", encoding="utf-8")
     (project / "node_modules").mkdir()
@@ -696,7 +696,7 @@ def test_input_hints_fuzzy_match_at_file_paths(tmp_path: Path) -> None:
 
     rendered = tui._render_input_hints("please inspect @tui", project)
 
-    assert "@src/willow/tui.py" in rendered
+    assert "@src/wattle/tui.py" in rendered
     assert "node_modules" not in rendered
 
     rendered = tui._render_input_hints("please inspect @draft", project)
@@ -722,13 +722,13 @@ def test_render_statusline_includes_context_usage_and_total_tokens() -> None:
         input_tokens=40_000,
         cached_tokens=12_000,
         output_tokens=2_000,
-        cwd="~/repos/willow",
+        cwd="~/repos/wattle",
     )
 
     assert (
         rendered
         == "gpt-5.5 | Context 1.0% used (10.5k tok) | window: 1.1M tok | "
-        "input: 40.0k tok | cached total: 12.0k tok | output: 2.0k tok | cwd: ~/repos/willow"
+        "input: 40.0k tok | cached total: 12.0k tok | output: 2.0k tok | cwd: ~/repos/wattle"
     )
     assert " · " not in rendered
 
@@ -741,19 +741,19 @@ def test_render_statusline_shows_zero_before_provider_usage() -> None:
         input_tokens=0,
         cached_tokens=0,
         output_tokens=0,
-        cwd="~/repos/willow",
+        cwd="~/repos/wattle",
     )
 
     assert (
         rendered
-        == "gpt-5.5 | Context 0.0% used (0 tok) | window: 1.1M tok | cwd: ~/repos/willow"
+        == "gpt-5.5 | Context 0.0% used (0 tok) | window: 1.1M tok | cwd: ~/repos/wattle"
     )
 
 
 def test_styled_statusline_colors_model_and_context_usage() -> None:
     rendered = tui._style_statusline_text(
         "gpt-5.5 | Context 0.0% used (3 tok) | window: 1.1M tok | "
-        "input: 1 tok | cached total: 0 tok | output: 2 tok | cwd: ~/repos/willow"
+        "input: 1 tok | cached total: 0 tok | output: 2 tok | cwd: ~/repos/wattle"
     )
 
     assert f"{tui.STATUS_MODEL_STYLE}gpt-5.5{tui.STATUS_STYLE}" in rendered
@@ -764,11 +764,11 @@ def test_styled_statusline_colors_model_and_context_usage() -> None:
         f"input: 1 tok | cached total: 0 tok | output: 2 tok"
         f"{tui.STATUS_STYLE}"
     ) in rendered
-    assert "cwd: ~/repos/willow" in rendered
+    assert "cwd: ~/repos/wattle" in rendered
 
 
 def test_status_text_uses_last_provider_input_tokens_not_heuristic() -> None:
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=io.StringIO())
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=io.StringIO())
     app.system = None
     app.tool_specs = []
     app.messages = [Message(role="user", content=[TextBlock(text="x" * 42_000)])]
@@ -797,7 +797,7 @@ def test_terminal_appends_without_rewriting_scrollback() -> None:
 
     out, _app = _drive(provider, ["hello", "/exit"])
 
-    assert "Willow Agent" in out
+    assert "Wattle Agent" in out
     assert "~~ \\|/ ~~" in out
     assert "model:     gpt-5.5" in out
     assert "directory:" in out
@@ -830,7 +830,7 @@ def test_tty_worked_duration_uses_muted_foreground(
 ) -> None:
     monkeypatch.setattr(tui.time, "monotonic", lambda: 75.0)
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
 
     app._write_worked_duration(10.0)
@@ -843,7 +843,7 @@ def test_tui_attaches_local_image_from_user_text(tmp_path: Path) -> None:
     image = tmp_path / "debug shot.png"
     image.write_bytes(b"fake-png")
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
 
     assert app._submit_user_text(f'check image at "{image}"', render=True)
 
@@ -866,7 +866,7 @@ def test_tui_numbers_multiple_local_images_in_user_text(tmp_path: Path) -> None:
     first.write_bytes(b"fake-png-left")
     second.write_bytes(b"fake-png-right")
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
 
     assert app._submit_user_text(f"compare {first} with {second}", render=True)
 
@@ -887,7 +887,7 @@ def test_tui_sends_text_file_path_as_text_context(tmp_path: Path) -> None:
     text_file.write_text("secret file content", encoding="utf-8")
     cwd = Path.cwd()
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
 
     assert app._submit_user_text(f'check file "{text_file}"', render=True)
 
@@ -913,7 +913,7 @@ def test_tui_supports_at_prefixed_image_and_file_paths(
     text_file.write_text("secret file content", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
 
     assert app._submit_user_text("check @shot.png and @notes.txt", render=True)
 
@@ -958,7 +958,7 @@ def test_unknown_slash_text_still_routes_to_command_error() -> None:
 
 def test_transcript_user_text_keeps_distinct_prompt_background() -> None:
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
 
     app._write_block("hello", tui.USER_STYLE)
@@ -980,7 +980,7 @@ def test_transcript_user_text_keeps_distinct_prompt_background() -> None:
 
 def test_chat_text_blocks_keep_three_row_shape_without_trailing_fill_spaces() -> None:
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     app._terminal_width = lambda: 10  # type: ignore[method-assign]
 
@@ -1001,7 +1001,7 @@ def test_chat_text_blocks_keep_three_row_shape_without_trailing_fill_spaces() ->
 
 def test_user_history_block_clears_full_terminal_rows() -> None:
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     app._terminal_width = lambda: 10  # type: ignore[method-assign]
 
@@ -1015,7 +1015,7 @@ def test_user_history_block_clears_full_terminal_rows() -> None:
 
 def test_styled_transcript_block_returns_to_column_zero_before_painting() -> None:
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     app._terminal_width = lambda: 10  # type: ignore[method-assign]
     app._write("stale cursor column")
@@ -1045,7 +1045,7 @@ def test_prompt_clear_resets_styles_before_erasing_rows(
         "get_terminal_size",
         lambda _fallback: os.terminal_size((96, 10)),
     )
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=_TTYBuffer())
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=_TTYBuffer())
     app._terminal_width = lambda: 24  # type: ignore[method-assign]
     live = tui._LiveTerminal(app)
     live.prompt_lines = 3
@@ -1064,7 +1064,7 @@ def test_terminal_width_allows_zoomed_terminals_below_forty_columns(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     monkeypatch.setattr(
         tui.shutil,
         "get_terminal_size",
@@ -1076,7 +1076,7 @@ def test_terminal_width_allows_zoomed_terminals_below_forty_columns(
 
 def test_styled_transcript_wraps_long_lines_without_dropping_text() -> None:
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     app._terminal_width = lambda: 12  # type: ignore[method-assign]
 
@@ -1091,7 +1091,7 @@ def test_styled_transcript_wraps_long_lines_without_dropping_text() -> None:
 
 def test_styled_transcript_uses_soft_wrapping_for_resize_reflow() -> None:
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     app._terminal_width = lambda: 12  # type: ignore[method-assign]
 
@@ -1104,7 +1104,7 @@ def test_styled_transcript_uses_soft_wrapping_for_resize_reflow() -> None:
 
 def test_transcript_rows_avoid_trailing_fill_spaces_that_reflow_on_zoom() -> None:
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     app._terminal_width = lambda: 120  # type: ignore[method-assign]
 
@@ -1127,7 +1127,7 @@ def test_transcript_rows_avoid_trailing_fill_spaces_that_reflow_on_zoom() -> Non
 
 def test_assistant_markdown_renders_as_terminal_text() -> None:
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     app._terminal_width = lambda: 40  # type: ignore[method-assign]
 
@@ -1229,7 +1229,7 @@ def test_live_prompt_box_shows_working_when_streaming_without_input(
 ) -> None:
     monkeypatch.setattr(tui.time, "monotonic", lambda: 100.0)
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     live = tui._LiveTerminal(app)
     live.streaming = True
@@ -1261,7 +1261,7 @@ def test_live_prompt_box_shows_working_when_streaming_without_input(
 
 def test_live_active_tool_status_has_gap_before_input_box() -> None:
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     live = tui._LiveTerminal(app)
     live.streaming = True
@@ -1285,7 +1285,7 @@ def test_live_active_tool_status_has_gap_before_input_box() -> None:
 
 def test_live_running_status_redraw_does_not_repaint_input_box() -> None:
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     live = tui._LiveTerminal(app)
     live.streaming = True
@@ -1305,7 +1305,7 @@ def test_live_running_status_redraw_does_not_repaint_input_box() -> None:
 
 def test_live_running_status_width_change_repaints_prompt_box() -> None:
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     widths = [24]
     app._terminal_width = lambda: widths[-1]  # type: ignore[method-assign]
@@ -1332,7 +1332,7 @@ def test_live_running_status_width_change_repaints_prompt_box() -> None:
 
 def test_live_running_status_zoom_in_clears_below_prompt_bottom() -> None:
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     app._statusline_enabled = False
     widths = [28]
@@ -1362,7 +1362,7 @@ def test_live_running_status_zoom_in_clears_below_prompt_bottom() -> None:
 
 def test_live_prompt_survives_repeated_zoom_in_and_out_without_black_input_gap() -> None:
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     widths = [34]
     app._terminal_width = lambda: widths[-1]  # type: ignore[method-assign]
@@ -1394,7 +1394,7 @@ def test_live_prompt_survives_repeated_zoom_in_and_out_without_black_input_gap()
 
 def test_live_prompt_box_switches_to_type_box_when_streaming_with_input() -> None:
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     live = tui._LiveTerminal(app)
     live.streaming = True
@@ -1413,7 +1413,7 @@ def test_live_prompt_box_switches_to_type_box_when_streaming_with_input() -> Non
 
 def test_live_prompt_cursor_overlays_character_without_shifting_text() -> None:
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     live = tui._LiveTerminal(app)
     live.buffer = "abcdef"
@@ -1430,7 +1430,7 @@ def test_live_prompt_cursor_overlays_character_without_shifting_text() -> None:
 
 def test_live_prompt_wraps_long_input_across_lines() -> None:
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     app._statusline_enabled = False
     app._terminal_width = lambda: 10  # type: ignore[method-assign]
@@ -1451,7 +1451,7 @@ def test_live_prompt_wraps_long_input_across_lines() -> None:
 
 def test_live_prompt_growing_input_overwrites_without_full_clear() -> None:
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     app._statusline_enabled = False
     app._terminal_width = lambda: 10  # type: ignore[method-assign]
@@ -1475,7 +1475,7 @@ def test_live_prompt_growing_input_overwrites_without_full_clear() -> None:
 
 def test_live_prompt_collapses_pasted_content_placeholder() -> None:
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     app._statusline_enabled = False
     live = tui._LiveTerminal(app)
@@ -1493,7 +1493,7 @@ def test_live_prompt_collapses_pasted_content_placeholder() -> None:
 
 def test_live_prompt_shows_short_multiline_pasted_content() -> None:
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     app._statusline_enabled = False
     live = tui._LiveTerminal(app)
@@ -1512,7 +1512,7 @@ def test_live_prompt_shows_short_multiline_pasted_content() -> None:
 
 def test_live_prompt_clear_accounts_for_terminal_zoom_in() -> None:
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     widths = [20]
     app._terminal_width = lambda: widths[-1]  # type: ignore[method-assign]
@@ -1533,7 +1533,7 @@ def test_live_prompt_clear_accounts_for_terminal_zoom_in() -> None:
 
 def test_live_prompt_clear_accounts_for_cursor_line_reflow_after_zoom_in() -> None:
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     app._statusline_enabled = False
     widths = [24]
@@ -1557,7 +1557,7 @@ def test_live_prompt_clear_accounts_for_cursor_line_reflow_after_zoom_in() -> No
 
 def test_live_prompt_redraw_flushes_one_frame() -> None:
     out = _FlushingTTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     live = tui._LiveTerminal(app)
 
@@ -1575,7 +1575,7 @@ def test_live_prompt_redraw_flushes_one_frame() -> None:
 
 def test_welcome_card_keeps_compact_width() -> None:
     out = io.StringIO()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._terminal_width = lambda: 120  # type: ignore[method-assign]
 
     app._write_welcome_card()
@@ -1586,7 +1586,7 @@ def test_welcome_card_keeps_compact_width() -> None:
 
 def test_live_prompt_shows_slash_command_hints_for_prefix() -> None:
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     live = tui._LiveTerminal(app)
     live.buffer = "/mo"
@@ -1606,7 +1606,7 @@ def test_live_input_hints_move_highlight_with_up_and_down(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     project = tmp_path / "project"
-    skill_path = project / ".willow" / "skills" / "hello_world" / "SKILL.md"
+    skill_path = project / ".wattle" / "skills" / "hello_world" / "SKILL.md"
     skill_path.parent.mkdir(parents=True)
     skill_path.write_text(
         "---\ndescription: Say hello.\n---\nbody",
@@ -1615,7 +1615,7 @@ def test_live_input_hints_move_highlight_with_up_and_down(
     monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
     monkeypatch.chdir(project)
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     live = tui._LiveTerminal(app)
     live.buffer = "/he"
@@ -1640,13 +1640,13 @@ def test_live_input_hint_enter_executes_selected_skill(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     project = tmp_path / "project"
-    skill_path = project / ".willow" / "skills" / "hello_world" / "SKILL.md"
+    skill_path = project / ".wattle" / "skills" / "hello_world" / "SKILL.md"
     skill_path.parent.mkdir(parents=True)
     skill_path.write_text("Say hello before doing the task.", encoding="utf-8")
     monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
     monkeypatch.chdir(project)
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     live = tui._LiveTerminal(app)
     live.buffer = "/he write docs"
@@ -1665,7 +1665,7 @@ def test_live_input_hint_enter_executes_selected_skill(
     assert len(app.messages) == 1
     block = app.messages[0].content[0]
     assert isinstance(block, TextBlock)
-    assert "Use the Willow skill 'hello_world'" in block.text
+    assert "Use the Wattle skill 'hello_world'" in block.text
     assert "User task:\nwrite docs" in block.text
 
 
@@ -1674,13 +1674,13 @@ def test_live_tab_completes_selected_skill_without_submitting(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     project = tmp_path / "project"
-    skill_path = project / ".willow" / "skills" / "hello_world" / "SKILL.md"
+    skill_path = project / ".wattle" / "skills" / "hello_world" / "SKILL.md"
     skill_path.parent.mkdir(parents=True)
     skill_path.write_text("Say hello before doing the task.", encoding="utf-8")
     monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
     monkeypatch.chdir(project)
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     live = tui._LiveTerminal(app)
     live.buffer = "/he write docs"
@@ -1697,7 +1697,7 @@ def test_live_tab_completes_selected_skill_without_submitting(
 
 def test_live_tab_completes_selected_command_and_adds_space() -> None:
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     live = tui._LiveTerminal(app)
     live.buffer = "/he"
@@ -1720,7 +1720,7 @@ def test_live_tab_completes_selected_at_file_without_submitting(
     (project / "notes.txt").write_text("secret", encoding="utf-8")
     monkeypatch.chdir(project)
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     live = tui._LiveTerminal(app)
     live.buffer = "check @not"
@@ -1744,7 +1744,7 @@ def test_live_input_hint_enter_selects_at_file_without_submitting(
     notes.write_text("secret", encoding="utf-8")
     monkeypatch.chdir(project)
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     live = tui._LiveTerminal(app)
     live.buffer = "check @not"
@@ -1758,7 +1758,7 @@ def test_live_input_hint_enter_selects_at_file_without_submitting(
 
 def test_live_input_hint_enter_executes_selected_command() -> None:
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     live = tui._LiveTerminal(app)
     live.buffer = "/he"
@@ -1791,7 +1791,7 @@ def test_live_prompt_shows_model_picker_for_model_command(
     ]
     monkeypatch.setattr(tui, "available_model_choices", lambda: choices)
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     live = tui._LiveTerminal(app)
     live.buffer = "/model"
@@ -1811,7 +1811,7 @@ def test_live_prompt_shows_model_picker_for_model_command(
 
 def test_live_prompt_shows_login_picker_for_login_command() -> None:
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     live = tui._LiveTerminal(app)
     live.buffer = "/login"
@@ -1830,7 +1830,7 @@ def test_live_prompt_shows_login_picker_for_login_command() -> None:
 
 def test_live_prompt_shows_auto_compacting_status() -> None:
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     live = tui._LiveTerminal(app)
     live.compacting = True
@@ -1851,7 +1851,7 @@ def test_live_login_picker_enter_logs_in_selected_provider(
         calls.append(provider)
 
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     app._handle_login = fake_handle_login  # type: ignore[method-assign]
     live = tui._LiveTerminal(app)
@@ -1867,7 +1867,7 @@ def test_live_login_picker_enter_logs_in_selected_provider(
 
 def test_live_tab_completes_selected_login_provider_without_submitting() -> None:
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     live = tui._LiveTerminal(app)
     live.buffer = "/login"
@@ -1900,7 +1900,7 @@ def test_live_model_picker_moves_highlight_with_up_and_down(
     ]
     monkeypatch.setattr(tui, "available_model_choices", lambda: choices)
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     live = tui._LiveTerminal(app)
     live.buffer = "/model"
@@ -1941,9 +1941,9 @@ def test_live_model_picker_enter_applies_selected_model(
     ]
 
     monkeypatch.setattr(tui, "available_model_choices", lambda: choices)
-    monkeypatch.setattr("willow.cli._build_provider", lambda _name: anthropic_provider)
+    monkeypatch.setattr("wattle.cli._build_provider", lambda _name: anthropic_provider)
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     live = tui._LiveTerminal(app)
     live.buffer = "/model"
@@ -1976,7 +1976,7 @@ def test_live_tab_completes_selected_model_without_applying(
     ]
     monkeypatch.setattr(tui, "available_model_choices", lambda: choices)
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     live = tui._LiveTerminal(app)
     live.buffer = "/model"
@@ -1993,7 +1993,7 @@ def test_live_tab_completes_selected_model_without_applying(
 
 def test_live_prompt_restores_statusline_when_command_prefix_is_removed() -> None:
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     live = tui._LiveTerminal(app)
     live.buffer = "/mo"
@@ -2013,7 +2013,7 @@ def test_live_prompt_restores_statusline_when_command_prefix_is_removed() -> Non
 
 def test_live_stream_chunk_keeps_prompt_stable_until_completion() -> None:
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     live = tui._LiveTerminal(app)
     live.streaming = True
@@ -2044,7 +2044,7 @@ def test_live_stream_chunk_keeps_prompt_stable_until_completion() -> None:
 
 def test_live_provider_error_flushes_partial_output_and_keeps_prompt_usable() -> None:
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     live = tui._LiveTerminal(app)
     live.active_turn_id = 3
@@ -2070,7 +2070,7 @@ def test_live_provider_error_flushes_partial_output_and_keeps_prompt_usable() ->
 
 def test_live_prompt_shows_queued_messages_with_interrupt_hint() -> None:
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     live = tui._LiveTerminal(app)
     live.streaming = True
@@ -2089,7 +2089,7 @@ def test_live_prompt_shows_active_subagent_waiting_status(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     live = tui._LiveTerminal(app)
     live.streaming = True
@@ -2137,7 +2137,7 @@ def test_live_prompt_suppresses_generic_wait_agent_status_for_active_subagents(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     live = tui._LiveTerminal(app)
     live.streaming = True
@@ -2168,7 +2168,7 @@ def test_live_prompt_shows_queued_image_messages_as_anchors(tmp_path: Path) -> N
     image = tmp_path / "dragged image.png"
     image.write_bytes(b"fake-png")
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     live = tui._LiveTerminal(app)
     live.streaming = True
@@ -2184,7 +2184,7 @@ def test_live_prompt_shows_queued_image_messages_as_anchors(tmp_path: Path) -> N
 
 def test_live_prompt_hides_pending_monitor_events() -> None:
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     live = tui._LiveTerminal(app)
     live.streaming = True
@@ -2200,7 +2200,7 @@ def test_live_prompt_hides_pending_monitor_events() -> None:
 
 def test_live_queue_monitor_event_uses_hidden_queue() -> None:
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     live = tui._LiveTerminal(app)
     live.streaming = True
@@ -2222,7 +2222,7 @@ def test_live_queue_monitor_event_uses_hidden_queue() -> None:
 
 def test_live_subagent_event_renders_notification_without_queueing() -> None:
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     live = tui._LiveTerminal(app)
     started: list[bool] = []
@@ -2248,7 +2248,7 @@ def test_live_subagent_event_renders_notification_without_queueing() -> None:
 
 def test_live_finish_response_sends_monitor_events_without_rendering_them() -> None:
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     live = tui._LiveTerminal(app)
     live.streaming = True
@@ -2275,7 +2275,7 @@ def test_live_finish_response_sends_monitor_events_without_rendering_them() -> N
 
 def test_live_submit_while_streaming_shows_queue_only_in_prompt() -> None:
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     live = tui._LiveTerminal(app)
     live.streaming = True
@@ -2298,7 +2298,7 @@ def test_live_queued_image_inputs_keep_placeholder_order(tmp_path: Path) -> None
     first.write_bytes(b"fake-png-first")
     second.write_bytes(b"fake-png-second")
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     live = tui._LiveTerminal(app)
     live.pending_user_inputs = [f"first {first}", f"second {second}"]
@@ -2326,7 +2326,7 @@ def test_live_finish_response_anchors_pending_image_input(tmp_path: Path) -> Non
     image = tmp_path / "dragged image.png"
     image.write_bytes(b"fake-png")
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     live = tui._LiveTerminal(app)
     live.streaming = True
@@ -2351,7 +2351,7 @@ def test_live_finish_response_anchors_pending_image_input(tmp_path: Path) -> Non
 
 def test_live_esc_interrupt_keeps_user_and_queued_messages_without_partial_assistant() -> None:
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     live = tui._LiveTerminal(app)
     live.streaming = True
@@ -2390,7 +2390,7 @@ def test_live_esc_interrupt_sends_queued_message_to_provider_request() -> None:
     out = _TTYBuffer()
     response = CompletionResponse(content=[TextBlock(text="done")], stop_reason="end_turn")
     provider = _ScriptedStreamProvider([[StreamComplete(response=response)]])
-    app = tui.WillowApp(_make_args(), provider, out=out)
+    app = tui.WattleApp(_make_args(), provider, out=out)
     app._force_plain = False
     live = tui._LiveTerminal(app)
     live.streaming = True
@@ -2420,7 +2420,7 @@ def test_live_esc_interrupt_replaces_provider_before_sending_queued_message(
     old_provider = _ScriptedStreamProvider([])
     response = CompletionResponse(content=[TextBlock(text="done")], stop_reason="end_turn")
     new_provider = _ScriptedStreamProvider([[StreamComplete(response=response)]])
-    app = tui.WillowApp(_make_args(), old_provider, out=out)
+    app = tui.WattleApp(_make_args(), old_provider, out=out)
     app._force_plain = False
     app.messages.append(Message(role="user", content=[TextBlock(text="previous")]))
     app.messages.append(Message(role="assistant", content=[TextBlock(text="previous answer")]))
@@ -2429,7 +2429,7 @@ def test_live_esc_interrupt_replaces_provider_before_sending_queued_message(
     live.streaming = True
     live.pending_user_inputs = ["steer now"]
 
-    monkeypatch.setattr("willow.cli._build_provider", lambda _name: new_provider)
+    monkeypatch.setattr("wattle.cli._build_provider", lambda _name: new_provider)
 
     live._interrupt_and_send_queued()
     assert live.worker is not None
@@ -2453,7 +2453,7 @@ def test_live_esc_interrupt_sends_current_buffer_to_provider_request() -> None:
     out = _TTYBuffer()
     response = CompletionResponse(content=[TextBlock(text="done")], stop_reason="end_turn")
     provider = _ScriptedStreamProvider([[StreamComplete(response=response)]])
-    app = tui.WillowApp(_make_args(), provider, out=out)
+    app = tui.WattleApp(_make_args(), provider, out=out)
     app._force_plain = False
     live = tui._LiveTerminal(app)
     live.streaming = True
@@ -2481,7 +2481,7 @@ def test_live_esc_without_buffer_defers_interrupted_message_until_next_submit() 
     out = _TTYBuffer()
     response = CompletionResponse(content=[TextBlock(text="done")], stop_reason="end_turn")
     provider = _ScriptedStreamProvider([[StreamComplete(response=response)]])
-    app = tui.WillowApp(_make_args(), provider, out=out)
+    app = tui.WattleApp(_make_args(), provider, out=out)
     app._force_plain = False
     live = tui._LiveTerminal(app)
     live.streaming = True
@@ -2515,7 +2515,7 @@ def test_live_esc_without_buffer_defers_interrupted_message_until_next_submit() 
 
 def test_live_left_arrow_moves_cursor_for_mid_buffer_edit() -> None:
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     live = tui._LiveTerminal(app)
     read_fd, write_fd = os.pipe()
@@ -2533,7 +2533,7 @@ def test_live_left_arrow_moves_cursor_for_mid_buffer_edit() -> None:
 
 def test_live_up_and_down_arrows_navigate_input_history() -> None:
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     live = tui._LiveTerminal(app)
     live.input_history = ["first prompt", "second prompt"]
@@ -2564,7 +2564,7 @@ def test_live_up_and_down_arrows_navigate_input_history() -> None:
 
 def test_live_split_arrow_escape_navigates_input_history() -> None:
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     live = tui._LiveTerminal(app)
     live.input_history = ["first prompt", "second prompt"]
@@ -2588,7 +2588,7 @@ def test_live_split_arrow_escape_navigates_input_history() -> None:
 
 def test_live_split_csi_arrow_escape_navigates_input_history() -> None:
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     live = tui._LiveTerminal(app)
     live.input_history = ["first prompt", "second prompt"]
@@ -2616,7 +2616,7 @@ def test_live_split_csi_arrow_escape_navigates_input_history() -> None:
 )
 def test_live_shift_enter_inserts_newline_without_submitting(sequence: str) -> None:
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     live = tui._LiveTerminal(app)
     read_fd, write_fd = os.pipe()
@@ -2642,7 +2642,7 @@ def test_live_shift_enter_inserts_newline_without_submitting(sequence: str) -> N
 
 def test_live_split_shift_enter_escape_inserts_newline() -> None:
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     live = tui._LiveTerminal(app)
     read_fd, write_fd = os.pipe()
@@ -2667,7 +2667,7 @@ def test_live_raw_terminal_enables_modified_key_reporting(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     live = tui._LiveTerminal(app)
     live.fd = 123
     old_attrs = ["old"]
@@ -2687,7 +2687,7 @@ def test_live_raw_terminal_enables_modified_key_reporting(
 
 def test_live_submit_records_prompt_for_input_history() -> None:
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     live = tui._LiveTerminal(app)
     live.buffer = "remember this"
@@ -2703,7 +2703,7 @@ def test_live_submit_records_prompt_for_input_history() -> None:
 
 def test_live_submit_exit_command_while_streaming_exits_instead_of_queueing() -> None:
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     live = tui._LiveTerminal(app)
     live.streaming = True
@@ -2719,7 +2719,7 @@ def test_live_submit_exit_command_while_streaming_exits_instead_of_queueing() ->
 
 def test_live_submit_builtin_command_while_streaming_runs_instead_of_queueing() -> None:
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     live = tui._LiveTerminal(app)
     live.streaming = True
@@ -2736,7 +2736,7 @@ def test_live_submit_builtin_command_while_streaming_runs_instead_of_queueing() 
 
 def test_live_bracketed_paste_split_across_reads_preserves_newlines() -> None:
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     live = tui._LiveTerminal(app)
     read_fd, write_fd = os.pipe()
@@ -2758,7 +2758,7 @@ def test_live_bracketed_paste_split_across_reads_preserves_newlines() -> None:
 
 def test_live_option_arrow_moves_cursor_by_word_for_mid_buffer_edit() -> None:
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     live = tui._LiveTerminal(app)
     read_fd, write_fd = os.pipe()
@@ -2776,7 +2776,7 @@ def test_live_option_arrow_moves_cursor_by_word_for_mid_buffer_edit() -> None:
 
 def test_live_ignores_stale_stream_and_complete_events_after_interrupt() -> None:
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     live = tui._LiveTerminal(app)
     live.active_turn_id = 2
@@ -2835,7 +2835,7 @@ def test_terminal_streams_text_thinking_and_tool_markers_in_order(
 def test_live_terminal_configures_subagents_before_tool_dispatch() -> None:
     out = _TTYBuffer()
     provider = _ParentChildProvider()
-    app = tui.WillowApp(_make_args(), provider, out=out)
+    app = tui.WattleApp(_make_args(), provider, out=out)
     app._force_plain = False
     app.messages.append(Message(role="user", content=[TextBlock(text="delegate")]))
     live = tui._LiveTerminal(app)
@@ -2863,7 +2863,7 @@ def test_live_terminal_configures_subagents_before_tool_dispatch() -> None:
 
 def test_spawn_agent_success_renders_friendly_summary() -> None:
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     block = ToolUseBlock(
         id="call_1",
@@ -2899,7 +2899,7 @@ def test_spawn_agent_success_renders_friendly_summary() -> None:
 @pytest.mark.parametrize("tool_name", ["wait_agent", "send_input", "close_agent"])
 def test_subagent_housekeeping_successes_are_hidden_in_transcript(tool_name: str) -> None:
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     block = ToolUseBlock(
         id="call_1",
@@ -2918,7 +2918,7 @@ def test_subagent_housekeeping_successes_are_hidden_in_transcript(tool_name: str
 
 def test_subagent_housekeeping_errors_are_hidden_in_transcript() -> None:
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     block = ToolUseBlock(
         id="call_1",
@@ -3079,14 +3079,14 @@ def test_terminal_bash_tool_renders_command_and_concise_output() -> None:
 
 def test_terminal_bash_tool_externalized_output_hides_metadata() -> None:
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = True
     block = ToolUseBlock(id="call_1", name="bash", input={"command": "uv run pytest"})
     result = ToolResultBlock(
         tool_use_id="call_1",
         content=(
             "[output truncated: 12000 chars]\n"
-            "full_output_path: /tmp/willow-output.txt\n"
+            "full_output_path: /tmp/wattle-output.txt\n"
             "full_output_chars: 12000\n"
             "excerpt_chars: 1000\n"
             "omitted_chars: 11000\n"
@@ -3116,7 +3116,7 @@ def test_live_tool_execution_keeps_working_prompt_visible(
     out = _TTYBuffer()
     tool = _PromptObservingTool(out)
     monkeypatch.setitem(TOOLS_BY_NAME, tool.name, tool)
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     live = tui._LiveTerminal(app)
     live.streaming = True
@@ -3140,7 +3140,7 @@ def test_terminal_skill_command_expands_user_message(
 ) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
-    skill_path = tmp_path / ".willow" / "skills" / "writer" / "SKILL.md"
+    skill_path = tmp_path / ".wattle" / "skills" / "writer" / "SKILL.md"
     skill_path.parent.mkdir(parents=True)
     skill_path.write_text("Write tersely.", encoding="utf-8")
     response = CompletionResponse(
@@ -3161,7 +3161,7 @@ def test_terminal_project_hello_world_skill_works(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    skill_path = tmp_path / ".willow" / "skills" / "hello_world" / "SKILL.md"
+    skill_path = tmp_path / ".wattle" / "skills" / "hello_world" / "SKILL.md"
     skill_path.parent.mkdir(parents=True)
     skill_path.write_text(
         "---\n"
@@ -3231,22 +3231,22 @@ def test_terminal_tool_error_is_hidden_but_kept_for_model(
 
 def test_terminal_edit_error_is_hidden_from_transcript() -> None:
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     block = ToolUseBlock(
         id="call_1",
         name="edit",
-        input={"path": "src/willow/loop.py"},
+        input={"path": "src/wattle/loop.py"},
     )
     result = ToolResultBlock(
         tool_use_id="call_1",
-        content="ValueError: old_text not found in src/willow/loop.py",
+        content="ValueError: old_text not found in src/wattle/loop.py",
         is_error=True,
     )
 
     app._write_tool_result(block, result)
 
     rendered = out.getvalue()
-    assert "edit error - src/willow/loop.py" not in rendered
+    assert "edit error - src/wattle/loop.py" not in rendered
     assert "old_text not found" not in rendered
 
 
@@ -3255,7 +3255,7 @@ def test_tui_persists_tool_use_before_tool_execution(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv(session.SESSION_DIR_ENV, str(tmp_path / "sessions"))
-    app_box: dict[str, tui.WillowApp] = {}
+    app_box: dict[str, tui.WattleApp] = {}
     saw_persisted_tool_use = False
 
     class InspectingTool(Tool):
@@ -3297,7 +3297,7 @@ def test_tui_persists_tool_use_before_tool_execution(
         except StopIteration as exc:
             raise EOFError from exc
 
-    app = tui.WillowApp(
+    app = tui.WattleApp(
         _make_args(persist_session=True),
         provider,
         input_func=input_func,
@@ -3322,7 +3322,7 @@ def test_tui_persists_tool_use_before_tool_execution(
 
 def test_edit_tool_result_renders_diff_review_style() -> None:
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     block = ToolUseBlock(
         id="call_1",
@@ -3355,7 +3355,7 @@ def test_edit_tool_result_renders_diff_review_style() -> None:
 
 def test_edit_tool_result_diff_rows_disable_autowrap() -> None:
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     app._terminal_width = lambda: 40  # type: ignore[method-assign]
     block = ToolUseBlock(id="call_1", name="write", input={"path": "long.txt"})
@@ -3381,7 +3381,7 @@ def test_edit_tool_result_diff_rows_disable_autowrap() -> None:
 
 def test_write_added_file_renders_full_diff_preview() -> None:
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     path = "/app/kv-store.proto"
     added_lines = [f"+line {index}" for index in range(1, 24)]
@@ -3409,7 +3409,7 @@ def test_write_added_file_renders_full_diff_preview() -> None:
 
 def test_edit_tool_result_renders_full_diff_preview() -> None:
     out = _TTYBuffer()
-    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     path = "/app/service.py"
     diff_lines = []
@@ -3546,7 +3546,7 @@ def test_terminal_login_openai_codex(monkeypatch: pytest.MonkeyPatch) -> None:
     out, _app = _drive(_ScriptedStreamProvider([]), ["/login", "/exit"])
 
     assert len(calls) == 1
-    assert calls[0]["originator"] == "willow"
+    assert calls[0]["originator"] == "wattle"
     assert "Open this URL to authenticate OpenAI Codex" in out
     assert "https://auth.example/login" in out
     assert "OpenAI Codex OAuth saved to /tmp/auth.json openai.oauth" in out
@@ -3583,7 +3583,7 @@ def test_terminal_compaction_uses_projection_but_persists_full_history(
             raise EOFError from exc
 
     out = io.StringIO()
-    app = tui.WillowApp(
+    app = tui.WattleApp(
         args,
         provider,
         state={"messages": list(prior_messages)},
@@ -3646,7 +3646,7 @@ def test_resumed_compaction_rebuilds_projected_context() -> None:
         except StopIteration as exc:
             raise EOFError from exc
 
-    app = tui.WillowApp(
+    app = tui.WattleApp(
         args,
         provider,
         state=tui._state_from_session(record),
@@ -3701,7 +3701,7 @@ def test_branch_copies_history_and_compaction_into_new_session(
             raise EOFError from exc
 
     out = io.StringIO()
-    app = tui.WillowApp(
+    app = tui.WattleApp(
         args,
         provider,
         state=tui._state_from_session(parent),
@@ -3726,7 +3726,7 @@ def test_branch_copies_history_and_compaction_into_new_session(
     assert "Branched conversation" in rendered
     assert f"session {branch.metadata.id}" in rendered
     assert f"/resume {parent.metadata.id}" in rendered
-    assert f"willow -r {parent.metadata.id}" in rendered
+    assert f"wattle -r {parent.metadata.id}" in rendered
 
     request = provider.requests[0]
     assert "parent summary" in _message_text(request.messages[0])
@@ -3781,7 +3781,7 @@ def test_tui_resume_command_switches_sessions_and_projection(
             raise EOFError from exc
 
     out = io.StringIO()
-    app = tui.WillowApp(
+    app = tui.WattleApp(
         args,
         provider,
         state=tui._state_from_session(branch),
@@ -3873,7 +3873,7 @@ def test_terminal_model_selection_switches_provider(monkeypatch: pytest.MonkeyPa
         }[name]
 
     monkeypatch.setattr(tui, "available_model_choices", lambda: choices)
-    monkeypatch.setattr("willow.cli._build_provider", build_provider)
+    monkeypatch.setattr("wattle.cli._build_provider", build_provider)
 
     out, _app = _drive(
         anthropic_provider,

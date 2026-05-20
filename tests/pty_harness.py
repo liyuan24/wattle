@@ -1,6 +1,6 @@
-"""PTY-backed helpers for exercising Willow's live terminal UI.
+"""PTY-backed helpers for exercising Wattle's live terminal UI.
 
-These helpers intentionally sit below the TUI abstraction. They run Willow in a
+These helpers intentionally sit below the TUI abstraction. They run Wattle in a
 real pseudo-terminal, feed keyboard input through the master fd, resize the
 terminal with TIOCSWINSZ, and keep a small ANSI screen model for assertions
 against what a user would see after cursor movement and clears are applied.
@@ -33,7 +33,7 @@ class Cell:
 
 
 class TerminalScreen:
-    """A deliberately small terminal emulator for Willow's ANSI output."""
+    """A deliberately small terminal emulator for Wattle's ANSI output."""
 
     def __init__(self, *, cols: int, rows: int) -> None:
         self.cols = cols

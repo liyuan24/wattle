@@ -13,7 +13,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from willow.providers import (
+from wattle.providers import (
     CompletionRequest,
     ImageBlock,
     Message,

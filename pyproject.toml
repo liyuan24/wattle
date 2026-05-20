@@ -1,7 +1,7 @@
 [project]
-name = "willow"
+name = "wattle"
 version = "0.1.0"
-description = "Willow — a pure-Python agent framework in the spirit of Claude Code."
+description = "Wattle — a pure-Python agent framework in the spirit of Claude Code."
 readme = "README.md"
 authors = [
     { name = "seanliu", email = "liyuanlacfo1990@gmail.com" }
@@ -13,7 +13,7 @@ dependencies = [
 ]
 
 [project.scripts]
-willow = "willow.cli:main"
+wattle = "wattle.cli:main"
 
 [build-system]
 requires = ["uv_build>=0.9.16,<0.10.0"]

@@ -1,4 +1,4 @@
-"""Tests for the top-level `willow` command."""
+"""Tests for the top-level `wattle` command."""
 
 from __future__ import annotations
 
@@ -10,9 +10,9 @@ from unittest.mock import patch
 
 import pytest
 
-from willow import cli
-from willow.auth import AuthCredential
-from willow.providers import CompletionResponse, TextBlock
+from wattle import cli
+from wattle.auth import AuthCredential
+from wattle.providers import CompletionResponse, TextBlock
 
 
 def test_build_parser_defaults_to_tui_settings() -> None:

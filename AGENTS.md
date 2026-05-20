@@ -1,8 +1,8 @@
-# Willow Agent Notes
+# Wattle Agent Notes
 
 ## TUI Verification
 
-For any change that touches Willow TUI behavior, run the relevant PTY harness immediately after the focused unit tests. This includes terminal input, prompt rendering, live redraw, queued messages, image anchors, subagent status, and tool status UI.
+For any change that touches Wattle TUI behavior, run the relevant PTY harness immediately after the focused unit tests. This includes terminal input, prompt rendering, live redraw, queued messages, image anchors, subagent status, and tool status UI.
 
 Prefer reproducing ambiguous TUI bugs through `tests/test_tui_pty.py` instead of relying only on parser/helper tests. For timing-sensitive PTY assertions, wait for the actual user-visible text or state being validated, not an earlier nearby marker.
 

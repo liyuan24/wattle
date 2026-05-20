@@ -5,8 +5,8 @@ import sys
 import time
 from pathlib import Path
 
-from willow.runtime import TaskRegistry, TaskStatus, WillowRuntime
-from willow.tools.bash import BashTool
+from wattle.runtime import TaskRegistry, TaskStatus, WattleRuntime
+from wattle.tools.bash import BashTool
 
 
 def _python_command(code: str) -> str:
@@ -53,7 +53,7 @@ def test_registry_registers_snapshots_and_marks_terminal(tmp_path: Path) -> None
 
 
 def test_runtime_event_queue_drains_in_order(tmp_path: Path) -> None:
-    runtime = WillowRuntime(root=tmp_path)
+    runtime = WattleRuntime(root=tmp_path)
 
     runtime.events.publish({"event_type": "first"})
     runtime.events.publish({"event_type": "second"})
@@ -69,7 +69,7 @@ def test_runtime_event_queue_drains_in_order(tmp_path: Path) -> None:
 
 
 def test_runtime_event_queue_notifies_subscribers(tmp_path: Path) -> None:
-    runtime = WillowRuntime(root=tmp_path)
+    runtime = WattleRuntime(root=tmp_path)
     received: list[dict[str, object]] = []
     unsubscribe = runtime.events.subscribe(received.append)
 
@@ -81,7 +81,7 @@ def test_runtime_event_queue_notifies_subscribers(tmp_path: Path) -> None:
 
 
 def test_registry_cleanup_terminates_running_background_process(tmp_path: Path) -> None:
-    runtime = WillowRuntime(root=tmp_path)
+    runtime = WattleRuntime(root=tmp_path)
     tool = BashTool(runtime=runtime, cwd=tmp_path)
     output = tool.run(_python_command("import time; time.sleep(30)"), background=True)
     task_id = dict(line.split(": ", 1) for line in output.splitlines())["task_id"]

@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from willow.providers import CompletionResponse, StubProvider, TextBlock
-from willow.runtime import WillowRuntime
-from willow.tools import build_tools
+from wattle.providers import CompletionResponse, StubProvider, TextBlock
+from wattle.runtime import WattleRuntime
+from wattle.tools import build_tools
 
 
 def _field(output: str, name: str) -> str:
@@ -16,7 +16,7 @@ def _field(output: str, name: str) -> str:
 
 
 def test_spawn_agent_runs_managed_child_session(tmp_path: Path) -> None:
-    runtime = WillowRuntime(root=tmp_path)
+    runtime = WattleRuntime(root=tmp_path)
     tools = build_tools(runtime)
     provider = StubProvider(
         [
@@ -65,7 +65,7 @@ def test_spawn_agent_runs_managed_child_session(tmp_path: Path) -> None:
 def test_spawn_agent_defaults_to_default_role_without_prompt_inference(
     tmp_path: Path,
 ) -> None:
-    runtime = WillowRuntime(root=tmp_path)
+    runtime = WattleRuntime(root=tmp_path)
     tools = build_tools(runtime)
     provider = StubProvider(
         [
@@ -90,7 +90,7 @@ def test_spawn_agent_defaults_to_default_role_without_prompt_inference(
 
 
 def test_send_input_continues_existing_subagent_history(tmp_path: Path) -> None:
-    runtime = WillowRuntime(root=tmp_path)
+    runtime = WattleRuntime(root=tmp_path)
     tools = build_tools(runtime)
     provider = StubProvider(
         [

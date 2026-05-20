@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from willow.providers.base import (
+from wattle.providers.base import (
     CompletionResponse,
     Message,
     TextBlock,
     ToolResultBlock,
     ToolUseBlock,
 )
-from willow.turns import append_turn_step, build_turn_step
+from wattle.turns import append_turn_step, build_turn_step
 
 
 def test_no_tool_queued_user_text_follows_assistant_response() -> None:

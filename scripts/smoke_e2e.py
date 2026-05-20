@@ -1,8 +1,8 @@
-"""End-to-end smoke test for Willow's provider plugins.
+"""End-to-end smoke test for Wattle's provider plugins.
 
 For each provider plugin, runs the agent loop with a minimal task that
 exercises the Bash/Write tools, then verifies the resulting filesystem state.
-Reads API keys from ~/.willow/auth.json.
+Reads API keys from ~/.wattle/auth.json.
 """
 
 from __future__ import annotations
@@ -10,7 +10,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from willow import run_agent
+from wattle import run_agent
 
 SYSTEM = (
     "You are a coding assistant with access to file-system tools. "

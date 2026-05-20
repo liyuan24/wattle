@@ -4,8 +4,8 @@ from collections import deque
 from collections.abc import Iterator
 from typing import Any
 
-from willow.compaction import maybe_compact_messages
-from willow.providers import (
+from wattle.compaction import maybe_compact_messages
+from wattle.providers import (
     CompletionRequest,
     CompletionResponse,
     Message,

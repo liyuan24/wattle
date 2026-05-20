@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from willow.provider_errors import is_context_length_error
+from wattle.provider_errors import is_context_length_error
 
 
 @pytest.mark.parametrize(

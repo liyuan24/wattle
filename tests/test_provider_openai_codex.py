@@ -7,7 +7,7 @@ import json
 import urllib.request
 from typing import Any
 
-from willow.providers import (
+from wattle.providers import (
     CompletionRequest,
     CompletionResponse,
     Message,
@@ -123,7 +123,7 @@ def test_codex_provider_builds_chatgpt_backend_request() -> None:
     headers = dict(req.header_items())
     assert headers["Authorization"] == f"Bearer {_token()}"
     assert headers["Chatgpt-account-id"] == "acct_123"
-    assert headers["Originator"] == "willow"
+    assert headers["Originator"] == "wattle"
     assert headers["Openai-beta"] == "responses=experimental"
     assert headers["Accept"] == "text/event-stream"
 

@@ -1,4 +1,4 @@
-"""Tests for the high-level `willow.agent.run_agent` entry point.
+"""Tests for the high-level `wattle.agent.run_agent` entry point.
 
 All external surfaces are mocked: no real API calls, no SDK construction,
 no auth-file reads. We're verifying the wiring between provider name ->
@@ -13,15 +13,15 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 # If the auth module hasn't landed yet (parallel branch), inject a stub so the
-# `from willow.auth import get_credential` at the top of `willow.agent` succeeds
+# `from wattle.auth import get_credential` at the top of `wattle.agent` succeeds
 # at import time. Once real auth lands, the real module is used and this stub
-# is never installed (so the auth tests' own contract — that `import willow`
-# does not eagerly bind `willow.auth` — is unaffected by us).
-if "willow.auth" not in sys.modules:
+# is never installed (so the auth tests' own contract — that `import wattle`
+# does not eagerly bind `wattle.auth` — is unaffected by us).
+if "wattle.auth" not in sys.modules:
     try:
-        import willow.auth  # noqa: F401  # real module preferred when available
+        import wattle.auth  # noqa: F401  # real module preferred when available
     except ImportError:
-        sys.modules["willow.auth"] = SimpleNamespace(  # type: ignore[assignment]
+        sys.modules["wattle.auth"] = SimpleNamespace(  # type: ignore[assignment]
             AUTH_PATH=None,
             AuthCredential=SimpleNamespace,
             load_auth=lambda: {},
@@ -35,9 +35,9 @@ if "willow.auth" not in sys.modules:
 
 import pytest
 
-from willow import agent
-from willow.agent import PROVIDER_TO_VENDOR, run_agent
-from willow.auth import AuthCredential
+from wattle import agent
+from wattle.agent import PROVIDER_TO_VENDOR, run_agent
+from wattle.auth import AuthCredential
 
 
 @pytest.fixture

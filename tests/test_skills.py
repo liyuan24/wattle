@@ -1,4 +1,4 @@
-"""Tests for Willow skill discovery and explicit invocation."""
+"""Tests for Wattle skill discovery and explicit invocation."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from willow.skills import (
+from wattle.skills import (
     SkillNotFoundError,
     expand_skill_invocation,
     format_skills_for_system_prompt,
@@ -28,15 +28,15 @@ def test_load_available_skills_discovers_user_and_project_layouts(
     project = home / "repo" / "project"
     monkeypatch.setattr(Path, "home", lambda: home)
     _write(
-        home / ".willow" / "skills" / "reviewer" / "SKILL.md",
+        home / ".wattle" / "skills" / "reviewer" / "SKILL.md",
         "---\nname: reviewer\ndescription: Review code carefully.\n---\nbody",
     )
     _write(
-        home / "repo" / ".willow" / "skills" / "planner" / "SKILL.md",
+        home / "repo" / ".wattle" / "skills" / "planner" / "SKILL.md",
         "# Planner\nBreak work into steps.",
     )
     _write(
-        project / ".willow" / "skills" / "writer" / "SKILL.md",
+        project / ".wattle" / "skills" / "writer" / "SKILL.md",
         "Write tersely.",
     )
 
@@ -56,7 +56,7 @@ def test_direct_markdown_skill_files_are_ignored(
     home = tmp_path / "home"
     project = home / "project"
     monkeypatch.setattr(Path, "home", lambda: home)
-    _write(project / ".willow" / "skills" / "planner.md", "# Planner")
+    _write(project / ".wattle" / "skills" / "planner.md", "# Planner")
 
     assert load_available_skills(project) == []
 
@@ -68,9 +68,9 @@ def test_nearest_project_skill_overrides_parent_and_user_skill_with_same_name(
     home = tmp_path / "home"
     project = home / "repo" / "project"
     monkeypatch.setattr(Path, "home", lambda: home)
-    _write(home / ".willow" / "skills" / "test" / "SKILL.md", "user body")
-    _write(home / "repo" / ".willow" / "skills" / "test" / "SKILL.md", "parent body")
-    _write(project / ".willow" / "skills" / "test" / "SKILL.md", "project body")
+    _write(home / ".wattle" / "skills" / "test" / "SKILL.md", "user body")
+    _write(home / "repo" / ".wattle" / "skills" / "test" / "SKILL.md", "parent body")
+    _write(project / ".wattle" / "skills" / "test" / "SKILL.md", "project body")
 
     skill = resolve_skill("test", project)
 
@@ -86,7 +86,7 @@ def test_format_skills_for_system_prompt_lists_metadata_not_bodies(
     project = tmp_path / "project"
     monkeypatch.setattr(Path, "home", lambda: home)
     _write(
-        project / ".willow" / "skills" / "secret" / "SKILL.md",
+        project / ".wattle" / "skills" / "secret" / "SKILL.md",
         "---\ndescription: Use secret workflow.\n---\nFULL SECRET BODY",
     )
 
@@ -105,14 +105,14 @@ def test_expand_skill_invocation_loads_skill_body_and_task(
     home = tmp_path / "home"
     project = tmp_path / "project"
     monkeypatch.setattr(Path, "home", lambda: home)
-    _write(project / ".willow" / "skills" / "writer" / "SKILL.md", "Write tersely.")
+    _write(project / ".wattle" / "skills" / "writer" / "SKILL.md", "Write tersely.")
 
     expanded = expand_skill_invocation("/writer draft release notes", project)
 
     assert expanded is not None
-    assert "Use the Willow skill 'writer'" in expanded
+    assert "Use the Wattle skill 'writer'" in expanded
     assert "  <name>writer</name>" in expanded
-    skill_path = project / ".willow" / "skills" / "writer" / "SKILL.md"
+    skill_path = project / ".wattle" / "skills" / "writer" / "SKILL.md"
     assert f"  <path>{skill_path}</path>" in expanded
     assert "Write tersely." in expanded
     assert "User task:\ndraft release notes" in expanded

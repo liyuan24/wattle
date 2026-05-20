@@ -4,22 +4,22 @@ from pathlib import Path
 
 import pytest
 
-from willow.loop import dispatch_tool_blocks
-from willow.providers import ImageBlock, ToolResultBlock, ToolUseBlock
-from willow.runtime import WillowRuntime
-from willow.tools import TOOLS_BY_NAME, build_tools
-from willow.tools.bash import BashTool
-from willow.tools.edit import EditTool
-from willow.tools.image import ViewImageTool
-from willow.tools.monitor import MonitorTool
-from willow.tools.read import ReadTool
-from willow.tools.subagent import (
+from wattle.loop import dispatch_tool_blocks
+from wattle.providers import ImageBlock, ToolResultBlock, ToolUseBlock
+from wattle.runtime import WattleRuntime
+from wattle.tools import TOOLS_BY_NAME, build_tools
+from wattle.tools.bash import BashTool
+from wattle.tools.edit import EditTool
+from wattle.tools.image import ViewImageTool
+from wattle.tools.monitor import MonitorTool
+from wattle.tools.read import ReadTool
+from wattle.tools.subagent import (
     CloseAgentTool,
     SendInputTool,
     SpawnAgentTool,
     WaitAgentTool,
 )
-from willow.tools.write import WriteTool
+from wattle.tools.write import WriteTool
 
 
 def test_edit_tool_is_registered() -> None:
@@ -42,7 +42,7 @@ def test_grep_tool_is_not_registered() -> None:
 
 
 def test_build_tools_shares_runtime_between_bash_and_monitor(tmp_path) -> None:
-    runtime = WillowRuntime(root=tmp_path)
+    runtime = WattleRuntime(root=tmp_path)
     tools = build_tools(runtime)
 
     bash = tools["bash"]

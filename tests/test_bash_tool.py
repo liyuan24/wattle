@@ -7,8 +7,8 @@ import sys
 import time
 from pathlib import Path
 
-from willow.runtime import WillowRuntime
-from willow.tools.bash import BashTool
+from wattle.runtime import WattleRuntime
+from wattle.tools.bash import BashTool
 
 
 def _python_command(code: str) -> str:
@@ -62,7 +62,7 @@ def test_foreground_large_output_is_externalized(tmp_path: Path) -> None:
     full_output_path = Path(fields["full_output_path"])
 
     assert output.startswith("[output truncated: 30000 chars]")
-    assert str(full_output_path).startswith(str(tmp_path / ".willow" / "artifacts"))
+    assert str(full_output_path).startswith(str(tmp_path / ".wattle" / "artifacts"))
     assert full_output_path.read_text() == "x" * 30000
     assert len(output) < 14000
 
@@ -93,7 +93,7 @@ def test_foreground_timeout_clamps_and_kills_process_group(monkeypatch, tmp_path
             return "", ""
 
     monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: FakeProcess())
-    monkeypatch.setattr("willow.tools.bash.os.killpg", lambda pgid, sig: killed_pgids.append(pgid))
+    monkeypatch.setattr("wattle.tools.bash.os.killpg", lambda pgid, sig: killed_pgids.append(pgid))
 
     output = BashTool(cwd=tmp_path).run("sleep forever", timeout=999)
 
@@ -134,7 +134,7 @@ def test_foreground_tty_allocates_terminal(tmp_path: Path) -> None:
 
 
 def test_background_task_metadata_log_and_status_update(tmp_path: Path) -> None:
-    runtime = WillowRuntime(root=tmp_path)
+    runtime = WattleRuntime(root=tmp_path)
     tool = BashTool(runtime=runtime, cwd=tmp_path)
     command = _python_command("print('background-output', flush=True)")
 
@@ -163,7 +163,7 @@ def test_background_task_metadata_log_and_status_update(tmp_path: Path) -> None:
 
 
 def test_background_tty_logs_output_and_status_update(tmp_path: Path) -> None:
-    runtime = WillowRuntime(root=tmp_path)
+    runtime = WattleRuntime(root=tmp_path)
     tool = BashTool(runtime=runtime, cwd=tmp_path)
     command = _python_command("import os; print(f'tty={os.isatty(1)}', flush=True)")
 

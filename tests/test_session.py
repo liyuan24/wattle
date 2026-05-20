@@ -1,4 +1,4 @@
-"""Tests for Willow's durable session records."""
+"""Tests for Wattle's durable session records."""
 
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ from pathlib import Path
 
 import pytest
 
-from willow import session
-from willow.providers import (
+from wattle import session
+from wattle.providers import (
     ImageBlock,
     Message,
     RedactedThinkingBlock,
