@@ -1948,7 +1948,7 @@ class WillowApp:
                 style = DIFF_META_STYLE
             clipped = line if len(line) <= width else line[: width - 3] + "..."
             if kind in {"add", "delete"}:
-                self._write(f"{style}{clipped.ljust(width)}{RESET}\n")
+                self._write(f"{_styled_terminal_line(clipped, style, width)}\n")
             else:
                 self._write(f"{style}{clipped}{RESET}\n")
 

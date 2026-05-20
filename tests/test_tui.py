@@ -3353,6 +3353,32 @@ def test_edit_tool_result_renders_diff_review_style() -> None:
     assert tui.DIFF_ADD_STYLE in rendered
 
 
+def test_edit_tool_result_diff_rows_disable_autowrap() -> None:
+    out = _TTYBuffer()
+    app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+    app._terminal_width = lambda: 40  # type: ignore[method-assign]
+    block = ToolUseBlock(id="call_1", name="write", input={"path": "long.txt"})
+    result = ToolResultBlock(
+        tool_use_id="call_1",
+        content=(
+            "Wrote 80 bytes to long.txt\n"
+            "--- long.txt (before)\n"
+            "+++ long.txt (after)\n"
+            "@@ -0,0 +1,1 @@\n"
+            "+abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz"
+        ),
+    )
+
+    app._write_tool_result(block, result)
+
+    rendered = out.getvalue()
+    assert "\x1b[?7l" in rendered
+    assert "\x1b[K" in rendered
+    assert "    1 +abcdefghijklmnopqrstuvwxyzabcd..." in rendered
+    assert "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz" not in rendered
+
+
 def test_write_added_file_renders_full_diff_preview() -> None:
     out = _TTYBuffer()
     app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
