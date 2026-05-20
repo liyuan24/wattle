@@ -96,6 +96,7 @@ from willow.skills import (
 from willow.system_prompt import build_system_prompt
 from willow.tools import DEFAULT_RUNTIME, TOOLS_BY_NAME
 from willow.tools.base import Tool
+from willow.tui_flowers import Flower, flower_for_elapsed, gradient_style
 from willow.turns import append_turn_step, build_turn_step
 
 time = SimpleNamespace(
@@ -979,26 +980,41 @@ def _filled_terminal_line(rendered: str, fill_style: str, _width: int) -> str:
     return f"\r\x1b[?7l{fill_style}\x1b[2K{rendered}{RESET}\x1b[?7h"
 
 
-def _running_terminal_line(text: str, width: int, *, frame: int) -> str:
+def _running_terminal_line(
+    text: str,
+    width: int,
+    *,
+    frame: int,
+    flower: Flower | None = None,
+) -> str:
     visible_width = _terminal_line_width(width)
     line = text[:visible_width].ljust(visible_width)
     highlight = frame % (visible_width + 8) - 4
+    flower_index = line.find(flower.shape) if flower is not None else -1
     parts = ["\r\x1b[?7l\x1b[40;38;5;255m\x1b[2K"]
     for index, char in enumerate(line):
-        distance = abs(index - highlight)
-        if distance == 0:
-            style = "\x1b[40;38;5;51;1m"
-        elif distance == 1:
-            style = "\x1b[40;38;5;87;1m"
-        elif distance <= 3:
-            style = "\x1b[40;38;5;159m"
-        elif distance <= 5:
-            style = "\x1b[40;38;5;251m"
+        if index == flower_index:
+            style = gradient_style(flower, frame=frame)
         else:
-            style = "\x1b[40;38;5;255m"
+            distance = abs(index - highlight)
+            if distance == 0:
+                style = "\x1b[40;38;5;51;1m"
+            elif distance == 1:
+                style = "\x1b[40;38;5;87;1m"
+            elif distance <= 3:
+                style = "\x1b[40;38;5;159m"
+            elif distance <= 5:
+                style = "\x1b[40;38;5;251m"
+            else:
+                style = "\x1b[40;38;5;255m"
         parts.append(f"{style}{char}")
     parts.append(f"{RESET}\x1b[?7h")
     return "".join(parts)
+
+
+def _flower_working_status(elapsed_seconds: int) -> tuple[Flower, str]:
+    flower = flower_for_elapsed(elapsed_seconds)
+    return flower, f"{flower.shape} {flower.verb}..."
 
 
 def _black_terminal_line(text: str, width: int) -> str:
@@ -3739,17 +3755,32 @@ class _LiveTerminal:
         self.app._write("".join(parts))
 
     def _running_status_line(self, width: int) -> str:
-        running_text = self.active_tool_status or self._working_status_text()
         if self.app._styles_enabled():
             frame = int(time.monotonic() * 48)
-            return _running_terminal_line(f" {running_text}", width, frame=frame)
+            if self.active_tool_status is not None:
+                return _running_terminal_line(
+                    f" {self.active_tool_status}",
+                    width,
+                    frame=frame,
+                )
+            running_text, flower = self._working_status_text()
+            return _running_terminal_line(
+                f" {running_text}",
+                width,
+                frame=frame,
+                flower=flower,
+            )
+        running_text, _flower = self._working_status_text()
+        if self.active_tool_status is not None:
+            running_text = self.active_tool_status
         return _black_terminal_line(f" {running_text}", width)
 
-    def _working_status_text(self) -> str:
+    def _working_status_text(self) -> tuple[str, Flower]:
         started_at = self.working_started_at or time.monotonic()
         elapsed_seconds = max(0, int(time.monotonic() - started_at))
         elapsed = _format_elapsed_compact(elapsed_seconds)
-        return f"working... ({elapsed}, press esc to interrupt)"
+        flower, text = _flower_working_status(elapsed_seconds)
+        return f"{text} ({elapsed}, press esc to interrupt)", flower
 
     def _running_status_active(self) -> bool:
         return (

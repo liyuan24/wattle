@@ -1103,6 +1103,17 @@ def test_running_terminal_line_animates_without_changing_text() -> None:
     assert _strip_ansi(second) == " running bash - pytest      "
 
 
+def test_flower_working_status_renders_shape_with_gradient() -> None:
+    flower, text = tui._flower_working_status(0)
+
+    rendered = tui._running_terminal_line(f" {text}", 30, frame=0, flower=flower)
+
+    assert flower.name == "wattle"
+    assert text == "✿ wattling..."
+    assert "\x1b[40;38;5;227;1m✿" in rendered
+    assert _strip_ansi(rendered) == " ✿ wattling...                "
+
+
 @pytest.mark.parametrize(
     ("seconds", "expected"),
     [
@@ -1153,13 +1164,16 @@ def test_tool_running_title_describes_wait_agent() -> None:
     assert tui._tool_running_title(block) == "Waiting for subagent"
 
 
-def test_live_prompt_box_shows_working_when_streaming_without_input() -> None:
+def test_live_prompt_box_shows_working_when_streaming_without_input(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(tui.time, "monotonic", lambda: 100.0)
     out = _TTYBuffer()
     app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
     live = tui._LiveTerminal(app)
     live.streaming = True
-    live.working_started_at = time.monotonic() - 12
+    live.working_started_at = 88.0
 
     live._draw_prompt()
 
@@ -1167,19 +1181,20 @@ def test_live_prompt_box_shows_working_when_streaming_without_input() -> None:
     assert tui.PROMPT_STYLE in rendered
     assert "\x1b[40;" in rendered
     assert tui.STATUS_STYLE not in rendered[: rendered.index(tui.PROMPT_STYLE)]
-    assert "working... (12s, press esc to interrupt)" in _strip_ansi(rendered)
+    visible = _strip_ansi(rendered)
+    assert "irising... (12s, press esc to interrupt)" in visible
     assert " > " in rendered
     assert live.prompt_lines == 7
     assert live.prompt_cursor_offset_from_bottom == 2
     assert "\r\x1b[3C\x1b[?25h" in rendered
-    visible_lines = _strip_ansi(rendered).splitlines()
-    working_line_index = next(
-        index for index, line in enumerate(visible_lines) if "working..." in line
+    visible_lines = visible.splitlines()
+    status_line_index = next(
+        index for index, line in enumerate(visible_lines) if "press esc to interrupt" in line
     )
-    assert working_line_index > 0
-    assert visible_lines[working_line_index - 1].strip() == ""
-    assert visible_lines[working_line_index + 1].strip() == ""
-    assert _strip_ansi(rendered).index("working...") < _strip_ansi(rendered).index(" > ")
+    assert status_line_index > 0
+    assert visible_lines[status_line_index - 1].strip() == ""
+    assert visible_lines[status_line_index + 1].strip() == ""
+    assert visible.index("press esc to interrupt") < visible.index(" > ")
     assert "streaming" not in rendered
     assert "ready" not in rendered
 
@@ -1334,8 +1349,8 @@ def test_live_prompt_box_switches_to_type_box_when_streaming_with_input() -> Non
     assert " > queued text" in rendered
     assert "\r\x1b[14C\x1b[?25h" in rendered
     visible = _strip_ansi(rendered)
-    assert "working..." in visible
-    assert visible.index("working...") < visible.index(" > queued text")
+    assert "press esc to interrupt" in visible
+    assert visible.index("press esc to interrupt") < visible.index(" > queued text")
 
 
 def test_live_prompt_cursor_overlays_character_without_shifting_text() -> None:

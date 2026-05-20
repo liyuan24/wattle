@@ -225,7 +225,7 @@ def test_pty_dragged_image_uses_anchor_while_queued_and_after_finish(tmp_path: P
         cols=100,
         rows=30,
     ) as session:
-        session.read_until("working...", timeout=3)
+        session.read_until("press esc to interrupt", timeout=3)
         session.write(f"check {escaped_path}\n")
         session.read_until("Messages to be submitted after next tool call", timeout=3)
         session.read_until("check [image#1]", timeout=3)
@@ -252,7 +252,7 @@ def test_pty_dragged_image_uses_anchor_in_active_input(tmp_path: Path) -> None:
         cols=60,
         rows=30,
     ) as session:
-        session.read_until("working...", timeout=3)
+        session.read_until("press esc to interrupt", timeout=3)
         session.write(f"check {escaped_path}")
         session.read_until("check [image#1]", timeout=3)
 
@@ -269,7 +269,7 @@ def test_pty_repeated_resize_keeps_black_out_of_input_box(tmp_path: Path) -> Non
         cols=90,
         rows=28,
     ) as session:
-        session.read_until("working...", timeout=3)
+        session.read_until("press esc to interrupt", timeout=3)
         session.write("queued input that stays visible during resize")
         session.read_until("queued input", timeout=3)
 
@@ -316,7 +316,7 @@ def test_pty_resize_does_not_leave_large_gap_between_user_and_assistant(
     ) as session:
         session.read_until(">", timeout=3)
         session.write("hello\n")
-        session.read_until("working...", timeout=3)
+        session.read_until("press esc to interrupt", timeout=3)
         for cols in (28, 96, 36):
             session.resize(cols=cols, rows=60)
             session.read_for(0.18)
