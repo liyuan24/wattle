@@ -38,6 +38,21 @@ def test_foreground_output_elapsed_and_exit_code(tmp_path: Path) -> None:
     assert "[elapsed " in output
 
 
+def test_foreground_replaces_invalid_utf8_output(tmp_path: Path) -> None:
+    tool = BashTool(cwd=tmp_path)
+    command = _python_command(
+        "import sys; "
+        "sys.stdout.buffer.write(bytes([0x61, 0xcb, 0x62])); "
+        "sys.stderr.buffer.write(bytes([0x65, 0xcb, 0x66]))"
+    )
+
+    output = tool.run(command)
+
+    assert "a\ufffdb" in output
+    assert "[stderr]\ne\ufffdf" in output
+    assert "UnicodeDecodeError" not in output
+
+
 def test_foreground_large_output_is_externalized(tmp_path: Path) -> None:
     tool = BashTool(cwd=tmp_path)
     command = _python_command("import sys; sys.stdout.write('x' * 30000)")

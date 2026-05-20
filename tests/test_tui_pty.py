@@ -262,6 +262,25 @@ def test_pty_dragged_image_uses_anchor_in_active_input(tmp_path: Path) -> None:
         assert str(image) not in screen_text
 
 
+def _input_box_rows(screen: object) -> tuple[int, int, int]:
+    row = screen.find_row_containing(" > ")
+    return row - 1, row, row + 1
+
+
+def _assert_single_three_row_input_box(screen: object) -> None:
+    rows = _input_box_rows(screen)
+    for row_index in rows:
+        backgrounds = screen.row_backgrounds(row_index)
+        assert "black" not in backgrounds
+        assert any(background == "ansi-235" for background in backgrounds)
+    before_row = rows[0] - 1
+    after_row = rows[2] + 1
+    if before_row >= 0:
+        assert any(background != "ansi-235" for background in screen.row_backgrounds(before_row))
+    if after_row < screen.rows:
+        assert any(background != "ansi-235" for background in screen.row_backgrounds(after_row))
+
+
 def test_pty_repeated_resize_keeps_black_out_of_input_box(tmp_path: Path) -> None:
     with PtySession.spawn_python(
         _slow_willow_child_code(first_delay=1.4, later_delay=0.1),
@@ -281,10 +300,22 @@ def test_pty_repeated_resize_keeps_black_out_of_input_box(tmp_path: Path) -> Non
         text = session.screen.row_text(row)
         assert "queued input" in text
 
-        input_box_rows = [row - 1, row, row + 1]
-        for row_index in input_box_rows:
-            backgrounds = session.screen.row_backgrounds(row_index)
-            assert "black" not in backgrounds
+        _assert_single_three_row_input_box(session.screen)
+
+
+def test_pty_resize_does_not_leave_reflowed_prompt_box_rows(tmp_path: Path) -> None:
+    with PtySession.spawn_python(
+        _slow_willow_child_code(first_delay=2.0, later_delay=0.1),
+        cwd=tmp_path,
+        cols=120,
+        rows=30,
+    ) as session:
+        session.read_until("press esc to interrupt", timeout=3)
+        session.read_until(" > ", timeout=3)
+        session.resize(cols=40, rows=30)
+        session.read_for(0.35)
+
+        _assert_single_three_row_input_box(session.screen)
 
 
 def test_pty_idle_resize_refills_statusline_to_new_width(tmp_path: Path) -> None:
@@ -303,6 +334,26 @@ def test_pty_idle_resize_refills_statusline_to_new_width(tmp_path: Path) -> None
         assert text.startswith(" gpt-5.5")
         backgrounds = session.screen.row_backgrounds(row)
         assert all(background == "ansi-236" for background in backgrounds)
+
+
+def test_pty_height_shrink_keeps_prompt_near_transcript(tmp_path: Path) -> None:
+    with PtySession.spawn_python(
+        _slow_willow_child_code(first_delay=0.1, later_delay=0.1, prompt=None),
+        cwd=tmp_path,
+        cols=120,
+        rows=50,
+    ) as session:
+        session.read_until("Context", timeout=3)
+
+        session.resize(cols=120, rows=24)
+        session.read_for(0.35)
+
+        welcome_bottom = session.screen.find_row_containing("└")
+        prompt_row = session.screen.find_row_containing(" > ")
+        status_row = session.screen.find_row_containing("Context")
+        assert prompt_row - welcome_bottom <= 3
+        assert status_row - prompt_row <= 2
+        assert session.screen.row_text(status_row).startswith(" gpt-5.5")
 
 
 def test_pty_resize_does_not_leave_large_gap_between_user_and_assistant(

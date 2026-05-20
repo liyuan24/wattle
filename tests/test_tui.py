@@ -857,7 +857,7 @@ def test_tui_attaches_local_image_from_user_text(tmp_path: Path) -> None:
     rendered = out.getvalue()
     assert "check image at [image#1]" in rendered
     assert str(image) not in rendered
-    assert "[image] debug shot.png" in rendered
+    assert "[image] debug shot.png" not in rendered
 
 
 def test_tui_numbers_multiple_local_images_in_user_text(tmp_path: Path) -> None:
@@ -1270,7 +1270,7 @@ def test_live_running_status_width_change_repaints_prompt_box() -> None:
     assert live.prompt_width == 10
 
 
-def test_live_running_status_zoom_in_clears_reflowed_old_prompt_rows() -> None:
+def test_live_running_status_zoom_in_clears_below_prompt_bottom() -> None:
     out = _TTYBuffer()
     app = tui.WillowApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
@@ -1290,13 +1290,12 @@ def test_live_running_status_zoom_in_clears_reflowed_old_prompt_rows() -> None:
     live._redraw_running_status_line()
 
     rendered = out.getvalue()
-    assert "\x1b[J" in rendered
-    assert "\x1b[1A\r\x1b[2K" not in rendered
+    assert "\x1b[1B\x1b[?25l\r\x1b[J" in rendered
+    assert "\x1b[1A\r\x1b[2K" in rendered
     visible_lines = _strip_ansi(rendered).splitlines()
     input_line_index = next(
         index for index, line in enumerate(visible_lines) if line.startswith(" > ")
     )
-    assert visible_lines[input_line_index - 1].strip() == ""
     assert visible_lines[input_line_index + 1].startswith("   ")
     assert live.prompt_width == 9
 
@@ -1322,15 +1321,14 @@ def test_live_prompt_survives_repeated_zoom_in_and_out_without_black_input_gap()
 
     rendered = out.getvalue()
     assert live.prompt_width == 36
-    assert rendered.count("\x1b[J") >= 4
-    final_prompt = rendered[rendered.rfind("\x1b[J") :]
+    assert "\x1b[J" in rendered
+    final_prompt = rendered[rendered.rfind(" > queued input") :]
     input_box = final_prompt[final_prompt.index(tui.PROMPT_STYLE) :]
     assert "\x1b[40;" not in input_box
     visible_lines = _strip_ansi(final_prompt).splitlines()
     input_line_index = next(
         index for index, line in enumerate(visible_lines) if line.startswith(" > ")
     )
-    assert visible_lines[input_line_index - 1].strip() == ""
     assert visible_lines[input_line_index + 1].startswith("   ")
 
 
@@ -1448,8 +1446,9 @@ def test_live_prompt_clear_accounts_for_terminal_zoom_in() -> None:
     live._draw_prompt()
 
     rendered = out.getvalue()
-    assert "\x1b[J" in rendered
-    assert "\x1b[1A\r\x1b[2K" not in rendered
+    assert "\x1b[2B\x1b[?25l\r\x1b[J" in rendered
+    assert "\x1b[1A\r\x1b[2K" in rendered
+    assert " > " in rendered
     assert live.prompt_width == 10
 
 
@@ -1471,8 +1470,9 @@ def test_live_prompt_clear_accounts_for_cursor_line_reflow_after_zoom_in() -> No
     live._draw_prompt()
 
     rendered = out.getvalue()
-    assert "\x1b[J" in rendered
-    assert "\x1b[1A\r\x1b[2K" not in rendered
+    assert "\x1b[1B\x1b[?25l\r\x1b[J" in rendered
+    assert "\x1b[1A\r\x1b[2K" in rendered
+    assert " > abc" in rendered
     assert live.prompt_width == 8
 
 

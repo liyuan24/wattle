@@ -109,7 +109,6 @@ class BashTool(Tool):
             cwd=self.cwd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True,
             start_new_session=True,
         )
         try:
@@ -154,10 +153,12 @@ class BashTool(Tool):
             )
 
         parts = []
-        if stdout:
-            parts.append(stdout.rstrip("\n"))
-        if stderr:
-            parts.append(f"[stderr]\n{stderr.rstrip(chr(10))}")
+        stdout_text = _decode_output(stdout)
+        stderr_text = _decode_output(stderr)
+        if stdout_text:
+            parts.append(stdout_text.rstrip("\n"))
+        if stderr_text:
+            parts.append(f"[stderr]\n{stderr_text.rstrip(chr(10))}")
         if process.returncode != 0:
             parts.append(f"[exit {process.returncode}]")
         if not parts:
@@ -331,6 +332,14 @@ def _read_pty(fd: int) -> bytes:
 
 
 def _timeout_output(value: str | bytes | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode(errors="replace")
+    return value
+
+
+def _decode_output(value: str | bytes | None) -> str:
     if value is None:
         return ""
     if isinstance(value, bytes):

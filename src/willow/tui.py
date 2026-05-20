@@ -1542,9 +1542,7 @@ class WillowApp:
         display_text = text
         if prefer_content_text and content and isinstance(content[0], TextBlock):
             display_text = content[0].text
-        lines = [display_text] if display_text else []
-        lines.extend(_image_summary(block) for block in content if isinstance(block, ImageBlock))
-        return "\n".join(lines)
+        return display_text
 
     def _image_placeholders_from_text(
         self,
@@ -3833,27 +3831,13 @@ class _LiveTerminal:
     def _clear_prompt_sequence(self, *, force_reflow_clear: bool = False) -> str:
         if self.prompt_lines == 0:
             return ""
-        current_width = _terminal_line_width(self.app._terminal_width())
-        previous_width = self.prompt_width or current_width
-        if current_width != previous_width or force_reflow_clear:
-            rows_down_to_prompt_bottom = self.prompt_cursor_offset_from_bottom
-            rows_to_prompt_top_from_bottom = max(0, self.prompt_lines - 1)
-            parts: list[str] = ["\x1b[?25l"]
-            if rows_down_to_prompt_bottom:
-                parts.append(f"\x1b[{rows_down_to_prompt_bottom}B")
-            if rows_to_prompt_top_from_bottom:
-                parts.append(f"\x1b[{rows_to_prompt_top_from_bottom}A")
-            parts.append("\r\x1b[J\x1b[?25h")
-            self._reset_prompt_state()
-            return "".join(parts)
-
         rows_to_clear = self.prompt_lines
         rows_down_to_prompt_bottom = self.prompt_cursor_offset_from_bottom
         parts: list[str] = []
         if rows_down_to_prompt_bottom:
             parts.append(f"\x1b[{rows_down_to_prompt_bottom}B")
             self.prompt_cursor_offset_from_bottom = 0
-        parts.append("\x1b[?25l\r\x1b[2K")
+        parts.append("\x1b[?25l\r\x1b[J")
         for _ in range(rows_to_clear - 1):
             parts.append("\x1b[1A\r\x1b[2K")
         parts.append("\x1b[?25h")
