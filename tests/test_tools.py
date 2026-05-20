@@ -217,21 +217,122 @@ def test_edit_tool_preserves_utf8_bom(tmp_path) -> None:
     assert path.read_text() == "\ufeffhi\n"
 
 
-def test_read_tool_large_output_is_externalized(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.chdir(tmp_path)
+def test_read_tool_truncates_large_file_with_continuation_hint(tmp_path: Path) -> None:
     path = tmp_path / "large.txt"
-    path.write_text("\n".join(f"line {i}" for i in range(5000)))
+    path.write_text("\n".join(f"line {i}" for i in range(2500)))
 
-    output = ReadTool().run(str(path))
-    fields = dict(line.split(": ", 1) for line in output.splitlines() if ": " in line)
-    full_output_path = Path(fields["full_output_path"])
-    full_output = full_output_path.read_text()
+    output = ReadTool(cwd=tmp_path).run("large.txt")
 
-    assert output.startswith("[output truncated:")
-    assert str(full_output_path).startswith(str(tmp_path / ".willow" / "artifacts"))
-    assert "     1\tline 0" in full_output
-    assert "  5000\tline 4999" in full_output
-    assert len(output) < len(full_output)
+    assert output.startswith(f"path: {path.resolve()}\nlines: 1-2000 of 2500")
+    assert "     1\tline 0" in output
+    assert "  2000\tline 1999" in output
+    assert "  2001\tline 2000" not in output
+    assert "[Read incomplete: showing lines 1-2000 of 2500. Use offset=2001 to continue.]" in output
+
+
+def test_read_tool_limit_adds_remaining_lines_hint(tmp_path: Path) -> None:
+    path = tmp_path / "notes.txt"
+    path.write_text("\n".join(f"line {i}" for i in range(10)))
+
+    output = ReadTool(cwd=tmp_path).run("notes.txt", limit=3)
+
+    assert "lines: 1-3 of 10" in output
+    assert "     3\tline 2" in output
+    assert "     4\tline 3" not in output
+    assert "[Read incomplete: 7 more lines in file. Use offset=4 to continue.]" in output
+
+
+def test_read_tool_offset_beyond_end_is_clear_error(tmp_path: Path) -> None:
+    path = tmp_path / "short.txt"
+    path.write_text("one\ntwo\n")
+
+    with pytest.raises(ValueError, match=r"Offset 10 is beyond end of file \(2 lines total\)"):
+        ReadTool(cwd=tmp_path).run("short.txt", offset=10)
+
+
+def test_read_tool_rejects_invalid_offset_and_limit(tmp_path: Path) -> None:
+    path = tmp_path / "short.txt"
+    path.write_text("one\n")
+    tool = ReadTool(cwd=tmp_path)
+
+    with pytest.raises(ValueError, match="offset must be 1 or greater"):
+        tool.run("short.txt", offset=0)
+    with pytest.raises(ValueError, match="limit must be 1 or greater"):
+        tool.run("short.txt", limit=0)
+
+
+def test_read_tool_accepts_at_prefixed_paths(tmp_path: Path) -> None:
+    path = tmp_path / "notes.txt"
+    path.write_text("hello\n")
+
+    output = ReadTool(cwd=tmp_path).run("@notes.txt")
+
+    assert f"path: {path.resolve()}" in output
+    assert "     1\thello" in output
+
+
+def test_read_tool_expands_home_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    path = home / "notes.txt"
+    path.write_text("hello\n")
+    monkeypatch.setenv("HOME", str(home))
+
+    output = ReadTool(cwd=tmp_path).run("~/notes.txt")
+
+    assert f"path: {path.resolve()}" in output
+    assert "     1\thello" in output
+
+
+def test_read_tool_normalizes_unicode_spaces_in_paths(tmp_path: Path) -> None:
+    path = tmp_path / "notes draft.txt"
+    path.write_text("hello\n")
+
+    output = ReadTool(cwd=tmp_path).run("notes\u00a0draft.txt")
+
+    assert f"path: {path.resolve()}" in output
+    assert "     1\thello" in output
+
+
+def test_read_tool_byte_cap_preserves_complete_lines_with_continuation(tmp_path: Path) -> None:
+    path = tmp_path / "wide.txt"
+    path.write_text("\n".join(f"{index} " + ("x" * 1000) for index in range(100)))
+
+    output = ReadTool(cwd=tmp_path).run("wide.txt")
+
+    assert "lines: 1-51 of 100" in output
+    assert "    51\t50 " in output
+    assert "    52\t51 " not in output
+    assert "[Read incomplete: showing lines 1-51 of 100. Use offset=52 to continue.]" in output
+
+
+def test_read_tool_huge_single_line_is_clear_error(tmp_path: Path) -> None:
+    path = tmp_path / "minified.js"
+    path.write_text("x" * (60 * 1024))
+
+    with pytest.raises(ValueError, match=r"Line 1 is 60\.0 KB, exceeding the 50\.0 KB read limit"):
+        ReadTool(cwd=tmp_path).run("minified.js")
+
+
+def test_read_tool_directory_error_is_clear(tmp_path: Path) -> None:
+    with pytest.raises(IsADirectoryError, match="Path is a directory, not a file"):
+        ReadTool(cwd=tmp_path).run(".")
+
+
+def test_read_tool_rejects_binary_files(tmp_path: Path) -> None:
+    path = tmp_path / "data.bin"
+    path.write_bytes(b"abc\x00def")
+
+    with pytest.raises(ValueError, match="File appears to be binary"):
+        ReadTool(cwd=tmp_path).run("data.bin")
+
+
+def test_read_tool_utf8_decode_error_is_clear(tmp_path: Path) -> None:
+    path = tmp_path / "latin1.txt"
+    path.write_bytes(b"\xff")
+
+    with pytest.raises(UnicodeDecodeError, match="could not decode"):
+        ReadTool(cwd=tmp_path).run("latin1.txt")
 
 
 def test_view_image_tool_requires_explicit_path(tmp_path: Path) -> None:
