@@ -132,6 +132,11 @@ def _guidelines(
             "concrete answer."
         )
         guidelines.append(
+            "For nontrivial tool-heavy work, briefly tell the user what you are "
+            "investigating or changing before starting, and give short progress "
+            "updates when switching phases."
+        )
+        guidelines.append(
             "For bash commands, keep tty=false for normal scripts, tests, installs, "
             "and service launches. Use tty=true only for commands that require an "
             "interactive terminal, such as shells, REPLs, prompts, or full-screen tools."
