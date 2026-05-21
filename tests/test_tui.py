@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 
-from wattle import auth, session, settings, tui
+from wattle import auth, cli, session, settings, tui
 from wattle.models import ModelChoice
 from wattle.providers import (
     CompletionRequest,
@@ -618,7 +618,7 @@ def test_command_hints_match_slash_prefix() -> None:
     rendered = tui._render_command_hints("/stat")
 
     assert "/status  show session and status details" in rendered
-    assert "/statusline  toggle status snapshots in the prompt" in rendered
+    assert "/statusline  configure the bottom statusline" in rendered
     assert "/model" not in rendered
     assert "/clear" not in rendered
 
@@ -714,7 +714,7 @@ def test_apply_at_file_hint_replaces_active_token() -> None:
     assert completed == "check this README.md "
 
 
-def test_render_statusline_includes_context_usage_and_total_tokens() -> None:
+def test_render_statusline_defaults_to_model_thinking_and_cwd() -> None:
     rendered = tui._render_statusline(
         model="gpt-5.5",
         context_tokens=10_500,
@@ -725,15 +725,11 @@ def test_render_statusline_includes_context_usage_and_total_tokens() -> None:
         cwd="~/repos/wattle",
     )
 
-    assert (
-        rendered
-        == "gpt-5.5 | Context 1.0% used (10.5k tok) | window: 1.1M tok | "
-        "input: 40.0k tok | cached total: 12.0k tok | output: 2.0k tok | cwd: ~/repos/wattle"
-    )
+    assert rendered == "gpt-5.5 | ~/repos/wattle"
     assert " · " not in rendered
 
 
-def test_render_statusline_shows_zero_before_provider_usage() -> None:
+def test_render_statusline_can_show_context_without_provider_usage() -> None:
     rendered = tui._render_statusline(
         model="gpt-5.5",
         context_tokens=None,
@@ -742,18 +738,67 @@ def test_render_statusline_shows_zero_before_provider_usage() -> None:
         cached_tokens=0,
         output_tokens=0,
         cwd="~/repos/wattle",
+        fields=("model", "context_used", "context_size", "cwd"),
     )
 
-    assert (
-        rendered
-        == "gpt-5.5 | Context 0.0% used (0 tok) | window: 1.1M tok | cwd: ~/repos/wattle"
+    assert rendered == (
+        "gpt-5.5 | Context 0.0% used | window: 1.1M tok | ~/repos/wattle"
     )
+
+
+def test_render_statusline_uses_configured_fields() -> None:
+    rendered = tui._render_statusline(
+        model="gpt-5.5",
+        context_tokens=100,
+        context_window=1000,
+        input_tokens=40,
+        cached_tokens=12,
+        output_tokens=2,
+        cwd="~/repos/wattle",
+        thinking=True,
+        effort="high",
+        fields=(
+            "model",
+            "thinking_level",
+            "context_remaining",
+            "total_input_token_limit",
+            "current_input_tokens",
+            "output_tokens",
+            "cached_tokens",
+            "current_working_directory",
+            "5_hour_quota_limit",
+            "1_week_limit",
+        ),
+    )
+
+    assert rendered == (
+        "gpt-5.5 | thinking: high | remaining: 900 tok | window: 1.0k tok | "
+        "input: 40 tok | output: 2 tok | cached total: 12 tok | ~/repos/wattle | "
+        "5h quota: unknown | 1w limit: unknown"
+    )
+
+
+def test_render_statusline_selector_explains_controls_without_numbers() -> None:
+    rows = tui._render_statusline_selector_rows(
+        selected_fields={"model", "thinking", "cwd"},
+        selected_index=1,
+        width=88,
+        styles_enabled=False,
+    )
+    rendered = "\n".join(rows)
+
+    assert "Configure statusline" in rendered
+    assert "Use ↑/↓ to move, x to select/deselect, Enter to save, Esc to cancel" in rendered
+    assert "> [x] thinking" in rendered
+    assert "[ ] context_used" in rendered
+    assert "Selected:" not in rendered
+    assert "1." not in rendered
 
 
 def test_styled_statusline_colors_model_and_context_usage() -> None:
     rendered = tui._style_statusline_text(
-        "gpt-5.5 | Context 0.0% used (3 tok) | window: 1.1M tok | "
-        "input: 1 tok | cached total: 0 tok | output: 2 tok | cwd: ~/repos/wattle"
+        "gpt-5.5 | Context 0.0% used | window: 1.1M tok | "
+        "input: 1 tok | cached total: 0 tok | output: 2 tok | ~/repos/wattle"
     )
 
     assert f"{tui.STATUSLINE_MODEL_STYLE}gpt-5.5{tui.STATUSLINE_STYLE}" in rendered
@@ -763,15 +808,29 @@ def test_styled_statusline_colors_model_and_context_usage() -> None:
     assert "48;5" not in tui.STATUSLINE_MODEL_STYLE
     assert "48;5" not in tui.STATUSLINE_TOKEN_STYLE
     assert (
-        f"{tui.STATUSLINE_TOKEN_STYLE}Context 0.0% used (3 tok) | window: 1.1M tok | "
+        f"{tui.STATUSLINE_TOKEN_STYLE}Context 0.0% used | window: 1.1M tok | "
         f"input: 1 tok | cached total: 0 tok | output: 2 tok"
         f"{tui.STATUSLINE_STYLE}"
     ) in rendered
-    assert "cwd: ~/repos/wattle" in rendered
+    assert "~/repos/wattle" in rendered
 
 
 def test_status_text_uses_last_provider_input_tokens_not_heuristic() -> None:
-    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=io.StringIO())
+    app = tui.WattleApp(
+        _make_args(
+            statusline_fields=(
+                "model",
+                "context_used",
+                "context_size",
+                "input_tokens",
+                "cached_tokens",
+                "output_tokens",
+                "cwd",
+            )
+        ),
+        _ScriptedStreamProvider([]),
+        out=io.StringIO(),
+    )
     app.system = None
     app.tool_specs = []
     app.messages = [Message(role="user", content=[TextBlock(text="x" * 42_000)])]
@@ -782,7 +841,7 @@ def test_status_text_uses_last_provider_input_tokens_not_heuristic() -> None:
 
     rendered = app._status_text()
 
-    assert "Context 0.1% used (862 tok) | window: 1.1M tok" in rendered
+    assert "Context 0.1% used | window: 1.1M tok" in rendered
     assert "input: 900.0k tok" in rendered
     assert "cached total: 300.0k tok" in rendered
     assert "output: 100.0k tok" in rendered
@@ -806,9 +865,9 @@ def test_terminal_appends_without_rewriting_scrollback() -> None:
     assert "directory:" in out
     assert "Session:" not in out
     assert "hi there" in out
-    assert "[status] gpt-5.5 | Context " in out
-    assert "input: 1 tok | cached total: 1 tok | output: 2 tok" in out
-    assert " | cwd: " in out
+    assert "[status] gpt-5.5 | " in out
+    assert "thinking: off" not in out
+    assert "cwd: " not in out
     assert "Goodbye." in out
     forbidden = ["\x1b[2J", "\x1b[H", "\x1b[1A", "\x1b[K", "\x1b[?1049h"]
     assert all(sequence not in out for sequence in forbidden)
@@ -1417,6 +1476,11 @@ def test_live_prompt_box_switches_to_type_box_when_streaming_with_input() -> Non
     visible = _strip_ansi(rendered)
     assert "press esc to interrupt" in visible
     assert visible.index("press esc to interrupt") < visible.index(" > queued text")
+    assert "press Enter to queue after next tool call" in visible
+    assert "Tab for next turn" in visible
+    assert visible.index(" > queued text") < visible.index(
+        "press Enter to queue after next tool call"
+    )
 
 
 def test_live_prompt_cursor_overlays_character_without_shifting_text() -> None:
@@ -2016,7 +2080,7 @@ def test_live_prompt_restores_statusline_when_command_prefix_is_removed() -> Non
 
     rendered = out.getvalue()
     assert "/model  choose what model to use" not in rendered
-    assert "Context " in rendered
+    assert "gpt-5.5" in rendered
 
 
 def test_live_stream_chunk_keeps_prompt_stable_until_completion() -> None:
@@ -2342,6 +2406,32 @@ def test_live_queue_command_while_streaming_uses_end_turn_panel() -> None:
     assert live.pending_user_inputs == []
     assert live.turn_followup_user_inputs == ["after the full turn"]
     assert "Messages to be submitted after next tool call" not in rendered
+    assert "Messages to be submitted after assistant turn completes" in rendered
+    assert "↳ after the full turn" in rendered
+
+
+def test_live_tab_while_streaming_queues_buffer_for_end_of_turn() -> None:
+    out = _TTYBuffer()
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+    live = tui._LiveTerminal(app)
+    live.streaming = True
+    live.buffer = "after the full turn"
+    live.cursor = len(live.buffer)
+    read_fd, write_fd = os.pipe()
+    try:
+        live.fd = read_fd
+        os.write(write_fd, b"\t")
+        live._read_available_input()
+    finally:
+        os.close(read_fd)
+        os.close(write_fd)
+
+    rendered = out.getvalue()
+    assert live.buffer == ""
+    assert live.pending_user_inputs == []
+    assert live.turn_followup_user_inputs == ["after the full turn"]
+    assert live.input_history[-1] == "after the full turn"
     assert "Messages to be submitted after assistant turn completes" in rendered
     assert "↳ after the full turn" in rendered
 
@@ -3501,10 +3591,11 @@ def test_edit_tool_result_renders_diff_review_style() -> None:
     app._write_tool_result(block, result)
 
     rendered = out.getvalue()
-    assert (
-        "write ok - added codex_tui_test_haha1/wobbly_pickle_dispatch.txt (+2 -0)"
-        in rendered
-    )
+    plain = _strip_ansi(rendered)
+    assert "Added codex_tui_test_haha1/wobbly_pickle_dispatch.txt (+2 -0)" in plain
+    assert "write ok -" not in rendered
+    assert f"{tui.DIFF_ADD_STYLE}+2{tui.RESET}" in rendered
+    assert f"{tui.DIFF_DELETE_STYLE}-0{tui.RESET}" in rendered
     assert "    1 +hello" in rendered
     assert "    2 +world" in rendered
     assert tui.DIFF_ADD_STYLE in rendered
@@ -3559,7 +3650,9 @@ def test_write_added_file_renders_full_diff_preview() -> None:
     app._write_tool_result(block, result)
 
     rendered = out.getvalue()
-    assert f"write ok - added {path} (+23 -0)" in rendered
+    plain = _strip_ansi(rendered)
+    assert f"Added {path} (+23 -0)" in plain
+    assert "write ok -" not in rendered
     assert "   23 +line 23" in rendered
     assert "changed lines" not in rendered
 
@@ -3589,9 +3682,15 @@ def test_edit_tool_result_renders_full_diff_preview() -> None:
     app._write_tool_result(block, result)
 
     rendered = out.getvalue()
-    assert f"edit ok - edited {path} (+17 -17)" in rendered
+    plain = _strip_ansi(rendered)
+    assert f"Edited {path} (+17 -17)" in plain
+    assert "edit ok -" not in rendered
+    assert f"{tui.DIFF_ADD_STYLE}+17{tui.RESET}" in rendered
+    assert f"{tui.DIFF_DELETE_STYLE}-17{tui.RESET}" in rendered
     assert "   17 -old 17" in rendered
     assert "   17 +new 17" in rendered
+    assert tui.DIFF_DELETE_STYLE in rendered
+    assert tui.DIFF_ADD_STYLE in rendered
     assert "changed lines" not in rendered
 
 
@@ -4103,7 +4202,89 @@ def test_terminal_model_selection_switches_provider(monkeypatch: pytest.MonkeyPa
     assert openai_provider.requests[0].model == "gpt-5.5"
 
 
-def test_terminal_statusline_can_be_disabled() -> None:
+def test_tui_statusline_defaults_to_model_thinking_and_cwd(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(settings.SETTINGS_PATH_ENV, str(tmp_path / "settings.json"))
+
+    parser = cli._build_parser()
+    args = parser.parse_args([])
+    cli._apply_settings_defaults(args, [], settings.load_settings())
+
+    assert args.statusline is True
+    assert args.statusline_fields == ("model", "thinking", "cwd")
+
+
+def test_tui_statusline_empty_settings_section_disables(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(settings.SETTINGS_PATH_ENV, str(tmp_path / "settings.json"))
+    (tmp_path / "settings.json").write_text(
+        '{"tui": {"statusline": []}}',
+        encoding="utf-8",
+    )
+
+    parser = cli._build_parser()
+    args = parser.parse_args([])
+    cli._apply_settings_defaults(args, [], settings.load_settings())
+    app = tui.WattleApp(args, _ScriptedStreamProvider([]), out=io.StringIO())
+
+    assert args.statusline is False
+    assert args.statusline_fields == ()
+    assert app._statusline_enabled is False
+
+
+def test_tui_statusline_fields_load_from_settings_section(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(settings.SETTINGS_PATH_ENV, str(tmp_path / "settings.json"))
+    (tmp_path / "settings.json").write_text(
+        '{"tui": {"statusline": ["model", "thinking", "context_remaining", "quota_5h"]}}',
+        encoding="utf-8",
+    )
+
+    parser = cli._build_parser()
+    args = parser.parse_args([])
+    cli._apply_settings_defaults(args, [], settings.load_settings())
+    app = tui.WattleApp(args, _ScriptedStreamProvider([]), out=io.StringIO())
+    app.thinking = True
+    app.effort = "medium"
+    app._last_context_tokens = 50
+
+    assert args.statusline is True
+    assert args.statusline_fields == ("model", "thinking", "context_remaining", "quota_5h")
+    assert app._status_text() == (
+        "gpt-5.5 | thinking: medium | remaining: 1.0M tok | 5h quota: unknown"
+    )
+
+
+def test_live_statusline_selector_toggles_and_persists(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(settings.SETTINGS_PATH_ENV, str(tmp_path / "settings.json"))
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=io.StringIO())
+    live = tui._LiveTerminal(app)
+
+    live._open_statusline_selector()
+    live._move_statusline_selector(2)
+    live._handle_statusline_selector_input("x", "x", 1)
+    live._handle_statusline_selector_input("\r", "\r", 1)
+
+    saved = settings.load_settings()
+    assert app._statusline_fields == ("model", "thinking", "context_used", "cwd")
+    assert saved.tui.statusline == ("model", "thinking", "context_used", "cwd")
+    assert "Statusline updated: model | thinking | context_used | cwd" in app.out.getvalue()
+
+
+def test_terminal_statusline_can_be_disabled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(settings.SETTINGS_PATH_ENV, str(tmp_path / "settings.json"))
     end_response = CompletionResponse(
         content=[TextBlock(text="ok")],
         stop_reason="end_turn",
@@ -4115,9 +4296,10 @@ def test_terminal_statusline_can_be_disabled() -> None:
 
     out, app = _drive(provider, ["/statusline off", "go", "/exit"])
 
-    assert "Status snapshots disabled." in out
+    assert "Statusline disabled." in out
     assert "[status]" not in out
     assert app._statusline_enabled is False
+    assert settings.load_settings().tui.statusline == ()
 
 
 def test_terminal_effort_and_permissions_update_settings(

@@ -424,6 +424,30 @@ def test_pty_queue_command_renders_end_turn_followup_panel(tmp_path: Path) -> No
         assert "after the full turn" in screen_text
 
 
+def test_pty_tab_queues_input_for_end_turn_followup(tmp_path: Path) -> None:
+    with PtySession.spawn_python(
+        _slow_wattle_child_code(first_delay=1.5, later_delay=0.1),
+        cwd=tmp_path,
+        cols=100,
+        rows=30,
+    ) as session:
+        session.read_until("press esc to interrupt", timeout=3)
+        session.write("after the full turn")
+        session.read_until("press Enter to queue after next tool call", timeout=3)
+        session.read_until("Tab for next turn", timeout=3)
+        session.write("\t")
+        session.read_until(
+            "Messages to be submitted after assistant turn completes",
+            timeout=3,
+        )
+        session.read_until("after the full turn", timeout=3)
+
+        screen_text = session.screen.text()
+        assert "Messages to be submitted after next tool call" not in screen_text
+        assert "Messages to be submitted after assistant turn completes" in screen_text
+        assert "after the full turn" in screen_text
+
+
 def test_pty_dragged_image_uses_anchor_in_active_input(tmp_path: Path) -> None:
     image = tmp_path / "dragged image.png"
     image.write_bytes(b"fake-png")
@@ -545,7 +569,7 @@ def test_pty_idle_resize_keeps_statusline_on_terminal_background(tmp_path: Path)
         session.resize(cols=96, rows=24)
         session.read_for(0.25)
 
-        row = session.screen.find_row_containing("Context")
+        row = session.screen.find_row_containing("gpt-5.5 |")
         text = session.screen.row_text(row)
         assert text.startswith(" gpt-5.5")
         backgrounds = session.screen.row_backgrounds(row)
@@ -595,6 +619,30 @@ def test_pty_idle_screen_preserves_core_visual_contract(tmp_path: Path) -> None:
                 for background in session.screen.row_backgrounds(row)
             )
         assert all(background is None for background in session.screen.row_backgrounds(status_row))
+
+
+def test_pty_live_screen_keeps_only_latest_worked_duration(tmp_path: Path) -> None:
+    with PtySession.spawn_python(
+        _slow_wattle_child_code(first_delay=0.1, later_delay=0.1, prompt=None),
+        cwd=tmp_path,
+        cols=120,
+        rows=40,
+    ) as session:
+        session.read_until(">", timeout=3)
+        session.write("first\n")
+        session.read_until("done 1", timeout=3)
+        session.read_until("Worked for", timeout=3)
+
+        session.write("second\n")
+        session.read_until("done 2", timeout=3)
+        session.read_for(0.3)
+
+        screen_text = session.screen.text()
+        assert screen_text.count("Worked for") == 1
+        first_row = session.screen.find_row_containing(" first")
+        second_row = session.screen.find_row_containing(" second")
+        worked_row = session.screen.find_row_containing("Worked for")
+        assert first_row < second_row < worked_row
 
 
 def test_pty_clear_redraws_clean_session_screen(tmp_path: Path) -> None:

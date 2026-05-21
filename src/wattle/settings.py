@@ -11,8 +11,22 @@ from typing import Any, Literal, cast
 from wattle.permissions import PermissionMode, parse_permission_mode
 
 SETTINGS_PATH_ENV = "WATTLE_SETTINGS_PATH"
+DEFAULT_TUI_STATUSLINE_FIELDS = ("model", "thinking", "cwd")
 
 type Effort = Literal["low", "medium", "high", "xhigh", "max"]
+
+
+def _default_statusline_fields() -> tuple[str, ...]:
+    return DEFAULT_TUI_STATUSLINE_FIELDS
+
+
+@dataclass(frozen=True, slots=True)
+class TuiSettings:
+    statusline: tuple[str, ...] = field(default_factory=_default_statusline_fields)
+
+    @property
+    def statusline_fields(self) -> tuple[str, ...]:
+        return self.statusline
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,6 +38,7 @@ class WattleSettings:
     effort: Effort | None = None
     permission_mode: PermissionMode = PermissionMode.YOLO
     statusline: bool = True
+    tui: TuiSettings = field(default_factory=TuiSettings)
     enabled_models: tuple[str, ...] = field(default_factory=tuple)
     compaction_keep_recent_tokens: int = 20_000
 
@@ -70,7 +85,9 @@ def settings_to_dict(settings: WattleSettings) -> dict[str, Any]:
         "thinking": settings.thinking,
         "effort": settings.effort,
         "permission_mode": settings.permission_mode.value,
-        "statusline": settings.statusline,
+        "tui": {
+            "statusline": list(settings.tui.statusline),
+        },
         "enabled_models": list(settings.enabled_models),
         "compaction_keep_recent_tokens": settings.compaction_keep_recent_tokens,
     }
@@ -78,6 +95,7 @@ def settings_to_dict(settings: WattleSettings) -> dict[str, Any]:
 
 def settings_from_dict(data: dict[str, Any]) -> WattleSettings:
     defaults = WattleSettings()
+    tui = _tui_settings(data.get("tui"), data)
     return WattleSettings(
         provider=_str(data.get("provider"), defaults.provider),
         model=_str(data.get("model"), defaults.model),
@@ -88,7 +106,8 @@ def settings_from_dict(data: dict[str, Any]) -> WattleSettings:
             data.get("permission_mode"),
             defaults.permission_mode,
         ),
-        statusline=_bool(data.get("statusline"), defaults.statusline),
+        statusline=bool(tui.statusline),
+        tui=tui,
         enabled_models=_str_tuple(data.get("enabled_models")),
         compaction_keep_recent_tokens=max(
             1,
@@ -130,6 +149,26 @@ def _permission_mode(value: object, default: PermissionMode) -> PermissionMode:
         return parse_permission_mode(value)
     except ValueError:
         return default
+
+
+def _tui_settings(value: object, root: dict[str, Any]) -> TuiSettings:
+    if isinstance(value, dict):
+        if "statusline" in value:
+            statusline = value.get("statusline")
+            if isinstance(statusline, dict):
+                fields = statusline.get("fields")
+                if fields is None:
+                    fields = statusline.get("statusline_fields")
+                return TuiSettings(statusline=_str_tuple(fields))
+            return TuiSettings(statusline=_str_tuple(statusline))
+        if "statusline_fields" in value:
+            return TuiSettings(statusline=_str_tuple(value.get("statusline_fields")))
+    if "statusline_fields" in root:
+        return TuiSettings(statusline=_str_tuple(root.get("statusline_fields")))
+    legacy_statusline = root.get("statusline")
+    if legacy_statusline is False:
+        return TuiSettings(statusline=())
+    return TuiSettings()
 
 
 def _str_tuple(value: object) -> tuple[str, ...]:

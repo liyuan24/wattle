@@ -94,7 +94,12 @@ from wattle.session import (
     resolve_session_path,
     save_session,
 )
-from wattle.settings import load_settings, update_settings
+from wattle.settings import (
+    DEFAULT_TUI_STATUSLINE_FIELDS,
+    TuiSettings,
+    load_settings,
+    update_settings,
+)
 from wattle.skills import (
     expand_skill_invocation,
     load_available_skills,
@@ -139,7 +144,7 @@ SLASH_COMMAND_HINTS: tuple[tuple[str, str], ...] = (
     ("/resume", "switch to a saved session"),
     ("/session", "show persistence and saved session path"),
     ("/status", "show session and status details"),
-    ("/statusline", "toggle status snapshots in the prompt"),
+    ("/statusline", "configure the bottom statusline"),
 )
 BUILTIN_SLASH_COMMANDS = frozenset(command for command, _description in SLASH_COMMAND_HINTS)
 LOGIN_PROVIDER_CHOICES: tuple[tuple[str, str], ...] = (
@@ -212,6 +217,22 @@ QUIET_SUCCESS_TOOL_NAMES = frozenset({"wait_agent", "send_input", "close_agent"}
 DIFF_ADD_STYLE = "\x1b[48;5;22;38;5;231m"
 DIFF_DELETE_STYLE = "\x1b[48;5;52;38;5;231m"
 DIFF_META_STYLE = "\x1b[38;5;245m"
+DIFF_ADD_LINE_NUMBER_STYLE = "\x1b[48;5;22;38;5;108m"
+DIFF_DELETE_LINE_NUMBER_STYLE = "\x1b[48;5;52;38;5;131m"
+DIFF_ADD_MARKER_STYLE = "\x1b[48;5;22;38;5;82;1m"
+DIFF_DELETE_MARKER_STYLE = "\x1b[48;5;52;38;5;203;1m"
+DIFF_ADD_CODE_STYLE = "\x1b[48;5;22;38;5;254m"
+DIFF_DELETE_CODE_STYLE = "\x1b[48;5;52;38;5;248m"
+SYNTAX_KEYWORD_STYLE = "\x1b[38;5;177;1m"
+SYNTAX_STRING_STYLE = "\x1b[38;5;216m"
+SYNTAX_NAME_STYLE = "\x1b[38;5;75;1m"
+SYNTAX_CONSTANT_STYLE = "\x1b[38;5;222m"
+COMMAND_EXEC_STYLE = "\x1b[38;5;75;1m"
+COMMAND_ARG_STYLE = "\x1b[38;5;189;1m"
+COMMAND_OPTION_STYLE = "\x1b[38;5;211m"
+COMMAND_PATH_STYLE = "\x1b[38;5;159;1m"
+COMMAND_OPERATOR_STYLE = "\x1b[38;5;80;1m"
+COMMAND_STRING_STYLE = "\x1b[38;5;120m"
 SEPARATOR_STYLE = "\x1b[38;5;240m"
 ERROR_TEXT_STYLE = "\x1b[38;5;203;1m"
 WELCOME_BORDER_STYLE = "\x1b[38;5;244m"
@@ -392,17 +413,147 @@ def _tool_running_title(block: ToolUseBlock) -> str:
 
 def _tool_edit_title(block: ToolUseBlock, *, path: str, added: int, deleted: int) -> str:
     if block.name == "edit":
-        verb = "edited"
+        verb = "Edited"
     elif deleted == 0:
-        verb = "added"
+        verb = "Added"
     else:
-        verb = "wrote"
-    return f"{block.name} ok - {verb} {path} (+{added} -{deleted})"
+        verb = "Wrote"
+    return f"{verb} {path} (+{added} -{deleted})"
 
 
 def _tool_arg(block: ToolUseBlock, name: str, default: str) -> str:
     value = block.input.get(name, default)
     return _one_line(value)
+
+
+_SHELL_TOKEN_RE = re.compile(r"""'[^']*'|"[^"]*"|\|\||&&|[|;&()<>]|[^\s|;&()<>]+""")
+_PYTHON_KEYWORDS = frozenset(
+    {
+        "and",
+        "as",
+        "assert",
+        "break",
+        "class",
+        "continue",
+        "def",
+        "elif",
+        "else",
+        "except",
+        "finally",
+        "for",
+        "from",
+        "if",
+        "import",
+        "in",
+        "is",
+        "lambda",
+        "not",
+        "or",
+        "pass",
+        "return",
+        "try",
+        "while",
+        "with",
+        "yield",
+    }
+)
+_PYTHON_CONSTANTS = frozenset({"False", "None", "True"})
+_PYTHON_TOKEN_RE = re.compile(
+    r"""('[^']*'|"[^"]*"|\b[A-Za-z_][A-Za-z0-9_]*\b|\d+(?:\.\d+)?)"""
+)
+
+
+def _shell_tokens(command: str) -> list[str]:
+    return _SHELL_TOKEN_RE.findall(command)
+
+
+def _is_shell_operator(token: str) -> bool:
+    return token in {"|", "||", "&&", ";", "&", "(", ")", "<", ">", ">>", "2>", "2>&1"}
+
+
+def _is_shell_path(token: str) -> bool:
+    stripped = token.strip("'\"")
+    return (
+        "/" in stripped
+        or stripped.startswith((".", "~"))
+        or bool(re.search(r"\.[A-Za-z0-9]{1,8}$", stripped))
+    )
+
+
+def _render_shell_command(command: str) -> str:
+    tokens = _shell_tokens(command)
+    if not tokens:
+        return ""
+    rendered: list[str] = []
+    expect_command = True
+    for token in tokens:
+        if _is_shell_operator(token):
+            style = COMMAND_OPERATOR_STYLE
+            expect_command = token in {"|", "||", "&&", ";"}
+        elif expect_command:
+            style = COMMAND_EXEC_STYLE
+            expect_command = False
+        elif token.startswith("-"):
+            style = COMMAND_OPTION_STYLE
+        elif token.startswith(("'", '"')):
+            style = COMMAND_STRING_STYLE
+        elif _is_shell_path(token):
+            style = COMMAND_PATH_STYLE
+        else:
+            style = COMMAND_ARG_STYLE
+        rendered.append(f"{style}{token}{RESET}")
+    return " ".join(rendered)
+
+
+def _render_python_syntax(text: str, *, base_style: str) -> str:
+    parts: list[str] = []
+    position = 0
+    for match in _PYTHON_TOKEN_RE.finditer(text):
+        if match.start() > position:
+            parts.append(f"{base_style}{text[position:match.start()]}")
+        token = match.group(0)
+        if token.startswith(("'", '"')):
+            syntax_style = SYNTAX_STRING_STYLE
+        elif token in _PYTHON_KEYWORDS:
+            syntax_style = SYNTAX_KEYWORD_STYLE
+        elif token in _PYTHON_CONSTANTS:
+            syntax_style = SYNTAX_CONSTANT_STYLE
+        elif re.fullmatch(r"\d+(?:\.\d+)?", token):
+            syntax_style = SYNTAX_CONSTANT_STYLE
+        else:
+            syntax_style = SYNTAX_NAME_STYLE
+        parts.append(f"{base_style}{syntax_style}{token}")
+        position = match.end()
+    if position < len(text):
+        parts.append(f"{base_style}{text[position:]}")
+    return "".join(parts)
+
+
+def _render_diff_row(kind: str, line: str, *, width: int) -> str:
+    clipped = line if len(line) <= width else line[: width - 3] + "..."
+    if kind not in {"add", "delete"}:
+        return f"{DIFF_META_STYLE}{clipped}{RESET}"
+
+    if kind == "add":
+        line_number_style = DIFF_ADD_LINE_NUMBER_STYLE
+        marker_style = DIFF_ADD_MARKER_STYLE
+        code_style = DIFF_ADD_CODE_STYLE
+    else:
+        line_number_style = DIFF_DELETE_LINE_NUMBER_STYLE
+        marker_style = DIFF_DELETE_MARKER_STYLE
+        code_style = DIFF_DELETE_CODE_STYLE
+
+    match = re.match(r"(\s*\d+\s+)([+-])(.*)", clipped)
+    if match is None:
+        return _styled_terminal_line(clipped, code_style, width)
+
+    line_number, marker, code = match.groups()
+    rendered = (
+        f"{line_number_style}{line_number}"
+        f"{marker_style}{marker}"
+        f"{_render_python_syntax(code, base_style=code_style)}"
+    )
+    return _filled_terminal_line(rendered, code_style, width)
 
 
 def _suppress_successful_tool_result(
@@ -530,6 +681,60 @@ def _format_tokens(tokens: int) -> str:
     return f"{tokens} tok"
 
 
+DEFAULT_STATUSLINE_FIELDS = DEFAULT_TUI_STATUSLINE_FIELDS
+
+STATUSLINE_FIELD_DESCRIPTIONS = (
+    ("model", "Current model"),
+    ("thinking", "Thinking level / effort"),
+    ("context_used", "Context tokens used"),
+    ("context_remaining", "Context tokens remaining"),
+    ("context_size", "Total input token limit"),
+    ("input_tokens", "Current input tokens"),
+    ("output_tokens", "Output tokens"),
+    ("cached_tokens", "Cached input tokens"),
+    ("cwd", "Current working directory"),
+    ("quota_5h", "5 hour quota limit"),
+    ("quota_1w", "1 week subscription limit"),
+)
+
+STATUSLINE_FIELDS = tuple(field for field, _description in STATUSLINE_FIELD_DESCRIPTIONS)
+
+_STATUSLINE_FIELD_ALIASES = {
+    "context": "context_used",
+    "context_usage": "context_used",
+    "context_remaining": "context_remaining",
+    "context_left": "context_remaining",
+    "context_size": "context_size",
+    "context_window": "context_size",
+    "total_input_token_limit": "context_size",
+    "current_input_tokens": "input_tokens",
+    "input": "input_tokens",
+    "cached": "cached_tokens",
+    "output": "output_tokens",
+    "working_directory": "cwd",
+    "current_working_directory": "cwd",
+    "5_hour_quota_limit": "quota_5h",
+    "5_hour_limit": "quota_5h",
+    "five_hour_quota_limit": "quota_5h",
+    "1_week_limit": "quota_1w",
+    "one_week_limit": "quota_1w",
+    "weekly_limit": "quota_1w",
+    "thinking_level": "thinking",
+}
+
+
+def _normalize_statusline_fields(fields: tuple[str, ...] | list[str] | None) -> tuple[str, ...]:
+    if fields is None:
+        return DEFAULT_STATUSLINE_FIELDS
+    normalized: list[str] = []
+    for field in fields:
+        key = field.strip().lower().replace("-", "_").replace(" ", "_")
+        key = _STATUSLINE_FIELD_ALIASES.get(key, key)
+        if key and key not in normalized:
+            normalized.append(key)
+    return tuple(normalized)
+
+
 def _render_statusline(
     *,
     model: str,
@@ -539,25 +744,52 @@ def _render_statusline(
     cached_tokens: int,
     output_tokens: int,
     cwd: str,
+    thinking: bool = False,
+    effort: str | None = None,
+    fields: tuple[str, ...] | list[str] | None = None,
 ) -> str:
-    prefix = f"{model} | Context"
-    if context_tokens is None:
-        context_tokens = 0
+    context_tokens = context_tokens or 0
+    status_fields = _normalize_statusline_fields(fields)
+    default_shape = status_fields == DEFAULT_STATUSLINE_FIELDS
+
     if context_window is None:
-        usage = f"{prefix} unknown ({_format_tokens(context_tokens)}) | window: unknown"
+        context_segment = "Context unknown"
+        context_size_segment = "window: unknown"
+        context_remaining_segment = "remaining: unknown"
     else:
         percent = (context_tokens / context_window) * 100 if context_window else 0
-        usage = (
-            f"{prefix} {percent:.1f}% used ({_format_tokens(context_tokens)}) | "
-            f"window: {_format_tokens(context_window)}"
-        )
-    if input_tokens > 0 or output_tokens > 0:
-        usage = (
-            f"{usage} | input: {_format_tokens(input_tokens)} | "
-            f"cached total: {_format_tokens(cached_tokens)} | "
-            f"output: {_format_tokens(output_tokens)}"
-        )
-    return f"{usage} | cwd: {cwd}"
+        remaining = max(context_window - context_tokens, 0)
+        context_segment = f"Context {percent:.1f}% used"
+        context_size_segment = f"window: {_format_tokens(context_window)}"
+        context_remaining_segment = f"remaining: {_format_tokens(remaining)}"
+
+    values: dict[str, str | None] = {
+        "model": model,
+        "thinking": f"thinking: {effort}" if thinking and effort else None,
+        "context_used": context_segment,
+        "context_remaining": context_remaining_segment,
+        "context_size": context_size_segment,
+        "input_tokens": f"input: {_format_tokens(input_tokens)}",
+        "cached_tokens": f"cached total: {_format_tokens(cached_tokens)}",
+        "output_tokens": f"output: {_format_tokens(output_tokens)}",
+        "cwd": cwd,
+        "quota_5h": "5h quota: unknown",
+        "quota_1w": "1w limit: unknown",
+    }
+
+    parts: list[str] = []
+    for field in status_fields:
+        if (
+            default_shape
+            and field in {"input_tokens", "cached_tokens", "output_tokens"}
+            and input_tokens <= 0
+            and output_tokens <= 0
+        ):
+            continue
+        value = values.get(field)
+        if value is not None:
+            parts.append(value)
+    return " | ".join(parts)
 
 
 def _cached_tokens_from_usage(usage: dict[str, int]) -> int:
@@ -734,6 +966,47 @@ def _render_model_picker_rows(
         else:
             rows.append(line)
     return rows
+
+
+def _render_statusline_selector_rows(
+    *,
+    selected_fields: set[str],
+    selected_index: int,
+    width: int,
+    styles_enabled: bool,
+) -> list[str]:
+    inner_width = max(1, width - 2)
+    title = " Configure statusline "
+    top = f"╭─{title}{'─' * max(0, inner_width - len(title) - 1)}╮"[:width].ljust(width)
+    bottom = f"╰{'─' * inner_width}╯"[:width].ljust(width)
+    content_rows = [
+        "Use ↑/↓ to move, x to select/deselect, Enter to save, Esc to cancel",
+        "",
+    ]
+    field_width = max(len(field) for field in STATUSLINE_FIELDS)
+    field_rows: list[str] = []
+    for index, (field, description) in enumerate(STATUSLINE_FIELD_DESCRIPTIONS):
+        marker = ">" if index == selected_index else " "
+        checked = "x" if field in selected_fields else " "
+        field_rows.append(f" {marker} [{checked}] {field:<{field_width}}  {description}")
+
+    def boxed(row: str) -> str:
+        return f"│ {row[: max(0, inner_width - 2)].ljust(max(0, inner_width - 2))} │"[
+            :width
+        ].ljust(width)
+
+    rows = [top, *(boxed(row) for row in content_rows), *(boxed(row) for row in field_rows), bottom]
+    rendered: list[str] = []
+    for index, line in enumerate(rows):
+        field_index = index - 3
+        is_selected = field_index == selected_index
+        if styles_enabled and is_selected:
+            rendered.append(f"{SELECTED_ROW_STYLE}{line}{RESET}")
+        elif styles_enabled:
+            rendered.append(f"{STATUS_STYLE}{line}{RESET}")
+        else:
+            rendered.append(line)
+    return rendered
 
 
 def _render_login_picker_rows(
@@ -1451,7 +1724,10 @@ class WattleApp:
             permission_mode=self.permission_mode,
         )
 
-        self._statusline_enabled = bool(getattr(args, "statusline", True))
+        self._statusline_fields = _normalize_statusline_fields(
+            cast(tuple[str, ...] | list[str] | None, getattr(args, "statusline_fields", None))
+        )
+        self._statusline_enabled = bool(self._statusline_fields)
         self._last_context_tokens: int | None = None
         self._total_input_tokens = 0
         self._total_cached_tokens = 0
@@ -1664,6 +1940,7 @@ class WattleApp:
             "messages": list(self.messages),
             "compaction_state": self._compaction_state,
             "statusline_enabled": self._statusline_enabled,
+            "statusline_fields": self._statusline_fields,
             "last_context_tokens": self._last_context_tokens,
             "total_input_tokens": self._total_input_tokens,
             "total_cached_tokens": self._total_cached_tokens,
@@ -1707,6 +1984,13 @@ class WattleApp:
         self._statusline_enabled = bool(
             state.get("statusline_enabled", self._statusline_enabled)
         )
+        self._statusline_fields = _normalize_statusline_fields(
+            cast(
+                tuple[str, ...] | list[str] | None,
+                state.get("statusline_fields", self._statusline_fields),
+            )
+        )
+        self._statusline_enabled = bool(self._statusline_fields) and self._statusline_enabled
         raw_context_tokens = state.get("last_context_tokens", self._last_context_tokens)
         self._last_context_tokens = (
             int(cast(Any, raw_context_tokens)) if raw_context_tokens is not None else None
@@ -2046,7 +2330,14 @@ class WattleApp:
                 self._write_line(line)
             return
 
-        self._write(f"{TOOL_MARKER_STYLE}{TOOL_MARKER}{RESET} {TOOL_TITLE_STYLE}{title}{RESET}\n")
+        verb_path = title.rsplit(" (", 1)[0]
+        self._write(
+            f"{TOOL_MARKER_STYLE}{TOOL_MARKER}{RESET} "
+            f"{TOOL_TITLE_STYLE}{verb_path} ({RESET}"
+            f"{DIFF_ADD_STYLE}+{added}{RESET} "
+            f"{DIFF_DELETE_STYLE}-{deleted}{RESET}"
+            f"{TOOL_TITLE_STYLE}){RESET}\n"
+        )
         width = self._terminal_width()
         for kind, line in rows:
             if kind == "add":
@@ -2096,13 +2387,17 @@ class WattleApp:
             return False
         if cmd == "/statusline":
             if rest == "off":
-                self._statusline_enabled = False
-                self._persist_user_settings(statusline=False)
-                self._write_panel("system", "Status snapshots disabled.", STATUS_STYLE)
+                self._set_statusline_fields(())
+                self._write_statusline_update()
+            elif rest == "on":
+                self._set_statusline_fields(DEFAULT_STATUSLINE_FIELDS)
+                self._write_statusline_update()
             else:
-                self._statusline_enabled = True
-                self._persist_user_settings(statusline=True)
-                self._write_status_snapshot(force=True)
+                self._write_panel(
+                    "statusline",
+                    "Interactive statusline configuration is available in the live TUI.",
+                    STATUS_STYLE,
+                )
             return False
         if cmd == "/model":
             self._handle_model(rest)
@@ -2450,6 +2745,21 @@ class WattleApp:
     def _persist_user_settings(self, **changes: Any) -> None:
         self._settings = update_settings(**changes)
 
+    def _set_statusline_fields(self, fields: tuple[str, ...]) -> None:
+        self._statusline_fields = _normalize_statusline_fields(list(fields))
+        self._statusline_enabled = bool(self._statusline_fields)
+        self._persist_user_settings(tui=TuiSettings(statusline=self._statusline_fields))
+
+    def _write_statusline_update(self) -> None:
+        if self._statusline_enabled:
+            self._write_panel(
+                "statusline",
+                "Statusline updated: " + " | ".join(self._statusline_fields),
+                STATUS_STYLE,
+            )
+        else:
+            self._write_panel("statusline", "Statusline disabled.", STATUS_STYLE)
+
     def _print_help(self) -> None:
         self._write_line("Commands:")
         self._write_line("  /branch           Copy conversation into a new session branch.")
@@ -2463,7 +2773,7 @@ class WattleApp:
         self._write_line("  /permissions [mode] Switch tool permission mode.")
         self._write_line("  /resume SESSION    Switch to a saved session.")
         self._write_line("  /session, /status  Show persistence and session status.")
-        self._write_line("  /statusline [on|off] Toggle status snapshots.")
+        self._write_line("  /statusline          Configure the bottom statusline.")
         self._write_line("")
         self._write_line("Settings:")
         self._write_line(f"  provider:      {self.current_provider_name}")
@@ -2562,6 +2872,9 @@ class WattleApp:
             cached_tokens=self._total_cached_tokens,
             output_tokens=self._total_output_tokens,
             cwd=_display_cwd(),
+            thinking=self.thinking,
+            effort=self.effort,
+            fields=self._statusline_fields,
         )
 
     def _write_status_snapshot(self, *, force: bool = False) -> None:
@@ -2876,6 +3189,7 @@ class _LiveTerminal:
         self._last_compaction_frame_at = 0.0
         self._last_running_frame_at = 0.0
         self.working_started_at: float | None = None
+        self.last_worked_duration_text: str | None = None
         self.prompt_lines = 0
         self.prompt_width = 0
         self.prompt_cursor_line_index = 0
@@ -2898,6 +3212,9 @@ class _LiveTerminal:
         self.model_picker_choices: list[ModelChoice] | None = None
         self.model_picker_selected = 0
         self.login_picker_selected = 0
+        self.statusline_selector_active = False
+        self.statusline_selector_selected = 0
+        self.statusline_selector_fields: set[str] = set()
         self.input_hint_rows: list[str] | None = None
         self.input_hint_source = ""
         self.input_hint_selected = 0
@@ -3034,10 +3351,16 @@ class _LiveTerminal:
                 continue
             ch = data[index]
             index += 1
+            if self.statusline_selector_active:
+                index = self._handle_statusline_selector_input(ch, data, index)
+                self._draw_prompt()
+                continue
             if ch in ("\r", "\n"):
                 self._submit_buffer()
             elif ch == "\t":
-                if not self._complete_selected_hint():
+                if self.streaming:
+                    self._queue_buffer_for_end_of_turn()
+                elif not self._complete_selected_hint():
                     self._insert_text(ch)
                 self._draw_prompt()
             elif ch == "\x03" or (ch == "\x04" and not self.buffer):
@@ -3137,6 +3460,52 @@ class _LiveTerminal:
         self.pending_escape_sequence = None
         if pending == "\x1b" and self.streaming:
             self._interrupt_with_buffer_if_possible()
+
+    def _open_statusline_selector(self) -> None:
+        self.statusline_selector_active = True
+        self.statusline_selector_selected = 0
+        self.statusline_selector_fields = set(self.app._statusline_fields)
+        self.buffer = ""
+        self.cursor = 0
+        self.pasted_ranges = []
+
+    def _handle_statusline_selector_input(self, ch: str, data: str, index: int) -> int:
+        if ch in ("\r", "\n"):
+            selected = tuple(
+                field for field in STATUSLINE_FIELDS if field in self.statusline_selector_fields
+            )
+            self.statusline_selector_active = False
+            self._clear_prompt()
+            self.app._set_statusline_fields(selected)
+            self.app._write_statusline_update()
+            return index
+        if ch in {"x", "X"}:
+            field = STATUSLINE_FIELDS[self.statusline_selector_selected]
+            if field in self.statusline_selector_fields:
+                self.statusline_selector_fields.remove(field)
+            else:
+                self.statusline_selector_fields.add(field)
+            return index
+        if ch == "\x1b":
+            if data.startswith("[A", index) or data.startswith("OA", index):
+                self._move_statusline_selector(-1)
+                return index + 2
+            if data.startswith("[B", index) or data.startswith("OB", index):
+                self._move_statusline_selector(1)
+                return index + 2
+            self.statusline_selector_active = False
+            self._clear_prompt()
+            self.app._write_panel("statusline", "Statusline unchanged.", STATUS_STYLE)
+            while index < len(data) and not data[index].isalpha():
+                index += 1
+            return index + 1 if index < len(data) else index
+        return index
+
+    def _move_statusline_selector(self, delta: int) -> None:
+        self.statusline_selector_selected = max(
+            0,
+            min(len(STATUSLINE_FIELDS) - 1, self.statusline_selector_selected + delta),
+        )
 
     def _insert_text(self, text: str) -> None:
         self.buffer = self.buffer[: self.cursor] + text + self.buffer[self.cursor :]
@@ -3357,6 +3726,10 @@ class _LiveTerminal:
             return
         self._record_input_history(text)
         expanded_text = self.app._expand_skill_text(text)
+        if expanded_text is None and text == "/statusline":
+            self._open_statusline_selector()
+            self._draw_prompt()
+            return
         if expanded_text is None and _should_route_slash_command(text):
             if self._handle_live_queue_command(text):
                 return
@@ -3382,6 +3755,7 @@ class _LiveTerminal:
             self.app._write_panel("error", str(exc), ERROR_STYLE)
             self._draw_prompt()
             return
+        self.last_worked_duration_text = None
         self.app._cleared_empty_screen_active = False
         self.app._write_block(
             self.app._user_display_text(
@@ -3405,6 +3779,16 @@ class _LiveTerminal:
         self.app._persist_session()
         self._start_worker()
         self._draw_prompt()
+
+    def _queue_buffer_for_end_of_turn(self) -> None:
+        text = self.buffer.strip()
+        self.buffer = ""
+        self.cursor = 0
+        self.pasted_ranges = []
+        if not text:
+            return
+        self._record_input_history(text)
+        self.turn_followup_user_inputs.append(text)
 
     def _redraw_cleared_session_screen(self) -> None:
         self.app._write_cleared_session_screen()
@@ -3724,8 +4108,7 @@ class _LiveTerminal:
                 self._clear_prompt()
                 self._flush_stream_buffer()
                 self.app._write_turn_error(cast(BaseException, payload))
-                if self.turn_started_at is not None:
-                    self.app._write_worked_duration(self.turn_started_at)
+                self._remember_worked_duration()
                 self.streaming = False
                 self.compacting = False
                 self.worker = None
@@ -3802,9 +4185,7 @@ class _LiveTerminal:
         if not self.streaming:
             if has_tool_uses and tool_results:
                 self.app._append_followup_user(list(tool_results))
-            if self.turn_started_at is not None:
-                self.app._write_worked_duration(self.turn_started_at)
-                self.turn_started_at = None
+            self._remember_worked_duration()
             return
         pending_monitor_texts = self.pending_monitor_inputs
         if has_tool_uses:
@@ -3857,9 +4238,13 @@ class _LiveTerminal:
             self.streaming = False
             self.working_started_at = None
             self.app._write_status_snapshot()
-            if self.turn_started_at is not None:
-                self.app._write_worked_duration(self.turn_started_at)
-                self.turn_started_at = None
+            self._remember_worked_duration()
+
+    def _remember_worked_duration(self) -> None:
+        if self.turn_started_at is None:
+            return
+        self.last_worked_duration_text = _worked_duration_text(self.turn_started_at)
+        self.turn_started_at = None
 
     def _dispatch_tools_with_prompt(
         self,
@@ -3985,6 +4370,21 @@ class _LiveTerminal:
         preview = rendered_input.text
         cursor = min(len(preview), rendered_input.cursor)
         active_subagents = self._active_subagent_snapshots()
+        if self.statusline_selector_active:
+            rows.extend(
+                _render_statusline_selector_rows(
+                    selected_fields=self.statusline_selector_fields,
+                    selected_index=self.statusline_selector_selected,
+                    width=line_width,
+                    styles_enabled=self.app._styles_enabled(),
+                )
+            )
+            return _PromptFrame(
+                rows=rows,
+                width=line_width,
+                cursor_line_index=0,
+                cursor_column=0,
+            )
         if self.compacting:
             frame = COMPACTION_FRAMES[int(time.monotonic() * 8) % len(COMPACTION_FRAMES)]
             line = f" {frame} Auto-compacting..."
@@ -4043,6 +4443,12 @@ class _LiveTerminal:
                 )
                 line = f"  ↳ {_strip_control(pending_preview)}"
                 rows.append(_styled_terminal_line(line, STATUS_STYLE, width))
+        if self.last_worked_duration_text is not None and not self.streaming:
+            text = self.last_worked_duration_text[:line_width].ljust(line_width)
+            if self.app._styles_enabled():
+                rows.append(f"{WORKED_DURATION_STYLE}{text}{RESET}")
+            else:
+                rows.append(text)
         prefix = " > "
         continuation_prefix = " " * len(prefix)
         first_input_width = max(1, line_width - len(prefix))
@@ -4066,7 +4472,11 @@ class _LiveTerminal:
         for line_index, line in enumerate(input_lines):
             display = f"{prefix}{line}" if line_index == 0 else f"{continuation_prefix}{line}"
             rows.append(_styled_terminal_line(display, PROMPT_STYLE, width))
-        rows.append(_styled_terminal_line("", PROMPT_STYLE, width))
+        if self.streaming and preview.strip():
+            hint = " press Enter to queue after next tool call; Tab for next turn"
+            rows.append(_styled_terminal_line(hint, PROMPT_STYLE, width))
+        else:
+            rows.append(_styled_terminal_line("", PROMPT_STYLE, width))
         model_picker_choices = self._ensure_model_picker()
         if model_picker_choices is not None:
             picker_rows = _render_model_picker_rows(

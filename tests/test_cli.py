@@ -14,7 +14,7 @@ from wattle import cli
 from wattle.auth import AuthCredential
 from wattle.permissions import PermissionMode
 from wattle.providers import CompletionResponse, TextBlock
-from wattle.settings import WattleSettings
+from wattle.settings import TuiSettings, WattleSettings
 
 
 def test_build_parser_defaults_to_tui_settings() -> None:
@@ -50,6 +50,7 @@ def test_apply_settings_defaults_when_cli_flags_are_absent(
             effort="high",
             permission_mode=PermissionMode.READ_ONLY,
             statusline=False,
+            tui=TuiSettings(statusline=()),
             enabled_models=("gpt-5.4",),
             compaction_keep_recent_tokens=5000,
         ),
@@ -62,6 +63,7 @@ def test_apply_settings_defaults_when_cli_flags_are_absent(
     assert args.effort == "high"
     assert args.permission_mode == PermissionMode.READ_ONLY
     assert args.statusline is False
+    assert args.statusline_fields == ()
     assert args.enabled_models == ("gpt-5.4",)
     assert args.compaction_keep_recent_tokens == 5000
 

@@ -290,7 +290,8 @@ def _apply_settings_defaults(
         for flag in ("--yolo", "--read-only", "--ask-for-permission")
     ):
         args.permission_mode = settings.permission_mode
-    args.statusline = settings.statusline
+    args.statusline_fields = settings.tui.statusline_fields
+    args.statusline = bool(args.statusline_fields)
     args.enabled_models = settings.enabled_models
     args.compaction_keep_recent_tokens = settings.compaction_keep_recent_tokens
 
