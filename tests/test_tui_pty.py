@@ -70,6 +70,64 @@ def _slow_wattle_child_code(
     )
 
 
+def _clear_wattle_child_code() -> str:
+    return textwrap.dedent(
+        """
+        import argparse
+
+        from wattle.permissions import PermissionMode
+        from wattle.providers import (
+            CompletionResponse,
+            Provider,
+            StreamComplete,
+            TextBlock,
+            TextDelta,
+        )
+        from wattle.tui import WattleApp
+
+
+        class ClearProvider(Provider):
+            def __init__(self):
+                self.calls = 0
+
+            def complete(self, request):
+                self.calls += 1
+                return CompletionResponse(
+                    content=[TextBlock(text=f"done {self.calls}")],
+                    stop_reason="end_turn",
+                    usage={"input_tokens": 10 * self.calls, "output_tokens": self.calls},
+                )
+
+            def stream(self, request):
+                self.calls += 1
+                yield TextDelta(text=f"done {self.calls}")
+                yield StreamComplete(
+                    CompletionResponse(
+                        content=[TextBlock(text=f"done {self.calls}")],
+                        stop_reason="end_turn",
+                        usage={
+                            "input_tokens": 10 * self.calls,
+                            "output_tokens": self.calls,
+                        },
+                    )
+                )
+
+
+        args = argparse.Namespace(
+            provider="openai_responses",
+            model="gpt-5.5",
+            max_tokens=4096,
+            thinking=False,
+            effort=None,
+            prompt=None,
+            persist_session=False,
+            permission_mode=PermissionMode.YOLO,
+        )
+        raise SystemExit(WattleApp(args, ClearProvider()).run())
+        """
+    )
+
+
 def _subagent_wait_child_code() -> str:
     return textwrap.dedent(
         """
@@ -194,6 +252,111 @@ def _subagent_wait_child_code() -> str:
         raise SystemExit(WattleApp(args, ParentProvider()).run())
         """
     )
+
+
+def _research_child_code() -> str:
+    return textwrap.dedent(
+        """
+        import argparse
+
+        from wattle.permissions import PermissionMode
+        from wattle.providers import (
+            CompletionResponse,
+            Provider,
+            StreamComplete,
+            TextBlock,
+            TextDelta,
+            ToolUseBlock,
+            ToolUseDelta,
+        )
+        from wattle.tui import WattleApp
+
+
+        class ResearchProvider(Provider):
+            def __init__(self):
+                self.calls = 0
+
+            def complete(self, request):
+                return CompletionResponse(
+                    content=[TextBlock(text="done")],
+                    stop_reason="end_turn",
+                    usage={},
+                )
+
+            def stream(self, request):
+                self.calls += 1
+                if self.calls == 1:
+                    yield ToolUseDelta(id="read_1", name="read", partial_json=None)
+                    yield ToolUseDelta(id="read_2", name="read", partial_json=None)
+                    yield ToolUseDelta(id="read_3", name="read", partial_json=None)
+                    yield StreamComplete(
+                        CompletionResponse(
+                            content=[
+                                ToolUseBlock(
+                                    id="read_1",
+                                    name="read",
+                                    input={"path": "notes.txt"},
+                                ),
+                                ToolUseBlock(
+                                    id="read_2",
+                                    name="read",
+                                    input={"path": "other.txt"},
+                                ),
+                                ToolUseBlock(
+                                    id="read_3",
+                                    name="read",
+                                    input={"path": "third.txt"},
+                                ),
+                            ],
+                            stop_reason="tool_use",
+                            usage={},
+                        )
+                    )
+                    return
+                yield TextDelta(text="done")
+                yield StreamComplete(
+                    CompletionResponse(
+                        content=[TextBlock(text="done")],
+                        stop_reason="end_turn",
+                        usage={},
+                    )
+                )
+
+
+        args = argparse.Namespace(
+            provider="openai_responses",
+            model="gpt-5.5",
+            max_tokens=4096,
+            thinking=False,
+            effort=None,
+            prompt="research",
+            persist_session=False,
+            permission_mode=PermissionMode.YOLO,
+        )
+        raise SystemExit(WattleApp(args, ResearchProvider()).run())
+        """
+    )
+
+
+def test_pty_research_tool_calls_render_aggregate(tmp_path: Path) -> None:
+    (tmp_path / "notes.txt").write_text("needle\n", encoding="utf-8")
+    (tmp_path / "other.txt").write_text("more\n", encoding="utf-8")
+    (tmp_path / "third.txt").write_text("final\n", encoding="utf-8")
+
+    with PtySession.spawn_python(
+        _research_child_code(),
+        cwd=tmp_path,
+        cols=100,
+        rows=30,
+    ) as session:
+        session.read_until("Researched", timeout=4)
+        session.read_until("done", timeout=4)
+
+        screen_text = session.screen.text()
+        assert "Read notes.txt" in screen_text
+        assert "Read other.txt" in screen_text
+        assert "Read third.txt" in screen_text
+        assert "read ok - notes.txt" not in screen_text
 
 
 def test_pty_subagent_waiting_and_completion_notifications(tmp_path: Path) -> None:
@@ -412,6 +575,33 @@ def test_pty_idle_screen_preserves_core_visual_contract(tmp_path: Path) -> None:
                 for background in session.screen.row_backgrounds(row)
             )
         assert all(background is None for background in session.screen.row_backgrounds(status_row))
+
+
+def test_pty_clear_redraws_clean_session_screen(tmp_path: Path) -> None:
+    with PtySession.spawn_python(
+        _clear_wattle_child_code(),
+        cwd=tmp_path,
+        cols=96,
+        rows=36,
+    ) as session:
+        session.read_until(">", timeout=3)
+        session.write("first\n")
+        session.read_until("done 1", timeout=3)
+        session.read_until("Worked for", timeout=3)
+
+        session.write("/clear\n")
+        session.read_until("Last session usage", timeout=3)
+
+        screen_text = session.screen.text()
+        assert "Wattle Agent" in screen_text
+        assert "Last session usage: last context: 10 tok" in screen_text
+        assert "first" not in screen_text
+        assert "done 1" not in screen_text
+        assert "Conversation cleared." not in screen_text
+
+        session.write("second\n")
+        session.read_until("done 2", timeout=3)
+        assert "done 2" in session.screen.text()
 
 
 def test_pty_height_shrink_keeps_prompt_near_transcript(tmp_path: Path) -> None:

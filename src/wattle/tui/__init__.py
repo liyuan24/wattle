@@ -34,6 +34,12 @@ from typing import Any, TextIO, cast
 from urllib.parse import unquote, urlparse
 
 from wattle.auth import login_openai_codex
+from wattle.command_summary import (
+    CommandSummary,
+    is_research_summary,
+    render_summary_action,
+    summarize_tool_call,
+)
 from wattle.compaction import RuntimeCompaction
 from wattle.loop import dispatch_tool_blocks_async
 from wattle.message_history import (
@@ -146,6 +152,7 @@ SUPPORTED_IMAGE_MEDIA_TYPES = frozenset(
 ESCAPE_SEQUENCE_TIMEOUT_SECONDS = 0.05
 KEYBOARD_ENHANCEMENT_ENABLE = "\x1b[>1u\x1b[>4;2m"
 KEYBOARD_ENHANCEMENT_DISABLE = "\x1b[<u\x1b[>4m"
+VISIBLE_SCREEN_CLEAR = "\x1b[H\x1b[2J\x1b[H"
 SHIFT_ENTER_SEQUENCES = (
     "\x1b[13;2u",
     "\x1b[13;2~",
@@ -348,6 +355,9 @@ def _tool_action_title(block: ToolUseBlock, *, is_error: bool = False) -> str:
         if block.name in {"read", "write", "edit"}:
             return f"{block.name} error - {_tool_arg(block, 'path', '<missing path>')}"
         return f"{block.name} error"
+    summary = summarize_tool_call(block.name, block.input)
+    if is_research_summary(summary):
+        return render_summary_action(summary)
     if block.name == "bash":
         return f"Ran {_tool_arg(block, 'command', '<missing command>')}"
     if block.name == "read":
@@ -367,6 +377,9 @@ def _tool_action_title(block: ToolUseBlock, *, is_error: bool = False) -> str:
 
 
 def _tool_running_title(block: ToolUseBlock) -> str:
+    summary = summarize_tool_call(block.name, block.input)
+    if is_research_summary(summary):
+        return render_summary_action(summary)
     if block.name == "bash":
         return f"running bash - {_tool_arg(block, 'command', '<missing command>')}"
     if block.name in {"read", "write", "edit"}:
@@ -410,6 +423,22 @@ def _first_tool_result(
         content=f"Tool returned no textual result: {block.name!r}",
         is_error=True,
     )
+
+
+def _research_summary_for_success(
+    block: ToolUseBlock,
+    result: ToolResultBlock,
+) -> CommandSummary | None:
+    if result.is_error:
+        return None
+    summary = summarize_tool_call(block.name, block.input)
+    if not is_research_summary(summary):
+        return None
+    return summary
+
+
+def _research_lines(summaries: list[CommandSummary]) -> list[str]:
+    return [render_summary_action(summary) for summary in summaries]
 
 
 def _diff_counts(diff_lines: list[str]) -> tuple[int, int]:
@@ -1873,6 +1902,13 @@ class WattleApp:
 
     async def _adispatch_tools(self, response: CompletionResponse) -> list[ContentBlock]:
         results: list[ContentBlock] = []
+        pending_research: list[CommandSummary] = []
+
+        def flush_research() -> None:
+            if pending_research:
+                self._write_research_result(pending_research)
+                pending_research.clear()
+
         for block in response.content:
             if not isinstance(block, ToolUseBlock):
                 continue
@@ -1881,8 +1917,15 @@ class WattleApp:
                 TOOLS_BY_NAME,
                 self.permission_gate,
             )
-            self._write_tool_result(block, _first_tool_result(block, blocks))
+            result = _first_tool_result(block, blocks)
+            summary = _research_summary_for_success(block, result)
+            if summary is not None:
+                pending_research.append(summary)
+            else:
+                flush_research()
+                self._write_tool_result(block, result)
             results.extend(blocks)
+        flush_research()
         return results
 
     def _ask_tool_permission(self, block: ToolUseBlock) -> PermissionAnswer:
@@ -1906,6 +1949,26 @@ class WattleApp:
             return os.read(sys.stdin.fileno(), 1).decode(errors="ignore")
         except (AttributeError, OSError):
             return ""
+
+    def _write_research_result(self, summaries: list[CommandSummary]) -> None:
+        if not summaries:
+            return
+        self._last_transcript_was_separator = False
+        lines = _research_lines(summaries)
+        if not self._styles_enabled():
+            self._write_line(f"{TOOL_MARKER} Researched")
+            self._write_line(f"  └ {lines[0]}")
+            for line in lines[1:]:
+                self._write_line(f"    {line}")
+            return
+
+        self._write(
+            f"{TOOL_MARKER_STYLE}{TOOL_MARKER}{RESET} "
+            f"{TOOL_TITLE_STYLE}Researched{RESET}\n"
+        )
+        self._write(f"{TOOL_PREVIEW_STYLE}  └ {lines[0]}{RESET}\n")
+        for line in lines[1:]:
+            self._write(f"{TOOL_PREVIEW_STYLE}    {line}{RESET}\n")
 
     def _write_tool_result(
         self,
@@ -2010,15 +2073,7 @@ class WattleApp:
         if cmd in ("/exit", "/quit"):
             return True
         if cmd == "/clear":
-            self.messages = []
-            self._compaction_state = None
-            self._last_context_tokens = None
-            self._total_input_tokens = 0
-            self._total_cached_tokens = 0
-            self._total_output_tokens = 0
-            self._clear_compaction_records()
-            self._write_panel("system", "Conversation cleared.", STATUS_STYLE)
-            self._persist_session()
+            self._handle_clear()
             return False
         if cmd == "/help":
             self._print_help()
@@ -2445,6 +2500,48 @@ class WattleApp:
         self._total_cached_tokens += cached_tokens
         self._total_output_tokens += output_tokens
         self._last_context_tokens = input_tokens if input_tokens > 0 else None
+
+    def _handle_clear(self) -> None:
+        previous_usage = self._previous_session_usage_text()
+        self._persist_session()
+        self.messages = []
+        self._compaction_state = None
+        self._resume_history_pending = False
+        self._last_transcript_was_separator = False
+        self._last_context_tokens = None
+        self._total_input_tokens = 0
+        self._total_cached_tokens = 0
+        self._total_output_tokens = 0
+        self.provider.reset_conversation()
+
+        if self._session_record is not None:
+            self._session_record = new_session(
+                provider=self.current_provider_name,
+                model=self.current_model,
+                system=self.system,
+                max_tokens=self.max_tokens,
+                thinking=self.thinking,
+                effort=cast(Any, self.effort),
+            )
+            self._session_path = default_session_path(self._session_record.metadata.id)
+            self._persist_session()
+
+        self._write(VISIBLE_SCREEN_CLEAR)
+        self._write_welcome_card()
+        if previous_usage is not None:
+            self._write_panel("previous session", previous_usage, STATUS_STYLE)
+
+    def _previous_session_usage_text(self) -> str | None:
+        if self._total_input_tokens <= 0 and self._total_output_tokens <= 0:
+            return None
+        parts = [
+            f"input: {_format_tokens(self._total_input_tokens)}",
+            f"cached total: {_format_tokens(self._total_cached_tokens)}",
+            f"output: {_format_tokens(self._total_output_tokens)}",
+        ]
+        if self._last_context_tokens is not None:
+            parts.insert(0, f"last context: {_format_tokens(self._last_context_tokens)}")
+        return "Last session usage: " + " | ".join(parts)
 
     def _status_text(self) -> str:
         return _render_statusline(
@@ -3250,6 +3347,10 @@ class _LiveTerminal:
             if should_exit:
                 self.running = False
                 return
+            if text.partition(" ")[0] == "/clear":
+                self.input_history = _input_history_from_messages(self.app.messages)
+                self.input_history_index = None
+                self.input_history_draft = ""
             self._draw_prompt()
             return
         if self.streaming:
@@ -3699,13 +3800,26 @@ class _LiveTerminal:
         response: CompletionResponse,
     ) -> list[ContentBlock]:
         results: list[ContentBlock] = []
+        pending_research: list[CommandSummary] = []
+
+        def flush_research() -> None:
+            if pending_research:
+                self.app._write_research_result(pending_research)
+                pending_research.clear()
+
         for block in response.content:
             if not isinstance(block, ToolUseBlock):
                 continue
             blocks = self._dispatch_tool_with_animated_prompt(block)
             result = _first_tool_result(block, blocks)
-            self.app._write_tool_result(block, result)
+            summary = _research_summary_for_success(block, result)
+            if summary is not None:
+                pending_research.append(summary)
+            else:
+                flush_research()
+                self.app._write_tool_result(block, result)
             results.extend(blocks)
+        flush_research()
         return results
 
     def _dispatch_tool_with_animated_prompt(self, block: ToolUseBlock) -> list[ContentBlock]:

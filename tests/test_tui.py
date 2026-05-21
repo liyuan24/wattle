@@ -3050,6 +3050,58 @@ def test_terminal_ask_permission_allows_tool(monkeypatch: pytest.MonkeyPatch) ->
     assert "| echo ok" in out
 
 
+def test_research_tool_results_aggregate_consecutive_passive_calls() -> None:
+    tool_use_response = CompletionResponse(
+        content=[
+            ToolUseBlock(id="call_1", name="bash", input={"command": "rg Wattle README.md"}),
+            ToolUseBlock(id="call_2", name="bash", input={"command": "ls src/wattle"}),
+            ToolUseBlock(id="call_3", name="read", input={"path": "pyproject.toml", "limit": 2}),
+        ],
+        stop_reason="tool_use",
+    )
+    end_response = CompletionResponse(content=[TextBlock(text="done")], stop_reason="end_turn")
+    provider = _ScriptedStreamProvider(
+        [
+            [StreamComplete(response=tool_use_response)],
+            [TextDelta(text="done"), StreamComplete(response=end_response)],
+        ]
+    )
+
+    out, _app = _drive(provider, ["inspect", "/exit"])
+    rendered = _strip_ansi(out)
+
+    assert "| Researched" in rendered
+    assert "└ Search Wattle" in rendered
+    assert "List src/wattle" in rendered
+    assert "Read pyproject.toml" in rendered
+    assert "| Ran rg Wattle README.md" not in rendered
+    assert "read ok - pyproject.toml" not in rendered
+
+
+def test_research_aggregate_flushes_before_unknown_command() -> None:
+    tool_use_response = CompletionResponse(
+        content=[
+            ToolUseBlock(id="call_1", name="bash", input={"command": "ls src/wattle"}),
+            ToolUseBlock(id="call_2", name="bash", input={"command": "python --version"}),
+        ],
+        stop_reason="tool_use",
+    )
+    end_response = CompletionResponse(content=[TextBlock(text="done")], stop_reason="end_turn")
+    provider = _ScriptedStreamProvider(
+        [
+            [StreamComplete(response=tool_use_response)],
+            [TextDelta(text="done"), StreamComplete(response=end_response)],
+        ]
+    )
+
+    out, _app = _drive(provider, ["inspect", "/exit"])
+    rendered = _strip_ansi(out)
+
+    assert "| Researched" in rendered
+    assert "List src/wattle" in rendered
+    assert "| Ran python --version" in rendered
+
+
 def test_terminal_bash_tool_renders_command_and_concise_output() -> None:
     tool_use_response = CompletionResponse(
         content=[
@@ -3827,7 +3879,46 @@ def _message_text(message: Message) -> str:
     )
 
 
-def test_terminal_clear_is_append_only_and_resets_history() -> None:
+def test_terminal_clear_redraws_card_and_resets_history() -> None:
+    end1 = CompletionResponse(
+        content=[TextBlock(text="first done")],
+        stop_reason="end_turn",
+        usage={"input_tokens": 12, "cached_tokens": 3, "output_tokens": 4},
+    )
+    end2 = CompletionResponse(
+        content=[TextBlock(text="second done")],
+        stop_reason="end_turn",
+        usage={"input_tokens": 2, "output_tokens": 1},
+    )
+    provider = _ScriptedStreamProvider(
+        [
+            [TextDelta(text="first done"), StreamComplete(response=end1)],
+            [TextDelta(text="second done"), StreamComplete(response=end2)],
+        ]
+    )
+
+    out, app = _drive(provider, ["first", "/clear", "second", "/exit"])
+
+    assert "first done" in out
+    assert tui.VISIBLE_SCREEN_CLEAR in out
+    assert "Last session usage: last context: 12 tok | input: 12 tok" in out
+    assert "Conversation cleared." not in out
+    assert "second done" in out
+    assert len(provider.requests) == 2
+    assert len(provider.requests[1].messages) == 1
+    block = provider.requests[1].messages[0].content[0]
+    assert isinstance(block, TextBlock)
+    assert block.text == "second"
+    assert app._total_input_tokens == 2
+    assert app._total_cached_tokens == 0
+    assert app._total_output_tokens == 1
+
+
+def test_terminal_clear_starts_new_persisted_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(session.SESSION_DIR_ENV, str(tmp_path / "sessions"))
     end1 = CompletionResponse(content=[TextBlock(text="first done")], stop_reason="end_turn")
     end2 = CompletionResponse(content=[TextBlock(text="second done")], stop_reason="end_turn")
     provider = _ScriptedStreamProvider(
@@ -3837,16 +3928,24 @@ def test_terminal_clear_is_append_only_and_resets_history() -> None:
         ]
     )
 
-    out, _app = _drive(provider, ["first", "/clear", "second", "/exit"])
+    _out, app = _drive(
+        provider,
+        ["first", "/clear", "second", "/exit"],
+        args=_make_args(persist_session=True),
+    )
 
-    assert "first done" in out
-    assert "Conversation cleared." in out
-    assert "second done" in out
-    assert len(provider.requests) == 2
-    assert len(provider.requests[1].messages) == 1
-    block = provider.requests[1].messages[0].content[0]
-    assert isinstance(block, TextBlock)
-    assert block.text == "second"
+    session_paths = sorted((tmp_path / "sessions").glob("*.jsonl"))
+    assert len(session_paths) == 2
+    records = [session.load_session(path) for path in session_paths]
+    histories = [[_message_text(message) for message in record.messages] for record in records]
+    assert ["first", "first done"] in histories
+    assert ["second", "second done"] in histories
+    assert app._session_path in session_paths
+    active_record = session.load_session(app._session_path)
+    assert [_message_text(message) for message in active_record.messages] == [
+        "second",
+        "second done",
+    ]
 
 
 def test_terminal_model_command_lists_models_inline(monkeypatch: pytest.MonkeyPatch) -> None:
