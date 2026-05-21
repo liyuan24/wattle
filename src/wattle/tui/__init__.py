@@ -55,6 +55,7 @@ from wattle.permissions import (
     tool_permission_summary,
 )
 from wattle.providers import (
+    CompletionRequest,
     CompletionResponse,
     ContentBlock,
     ImageBlock,
@@ -87,6 +88,7 @@ from wattle.session import (
     resolve_session_path,
     save_session,
 )
+from wattle.settings import load_settings, update_settings
 from wattle.skills import (
     expand_skill_invocation,
     load_available_skills,
@@ -99,7 +101,7 @@ from wattle.tui import terminal as terminal_rendering
 from wattle.tui_flowers import Flower, flower_for_elapsed
 from wattle.turns import append_turn_step, build_turn_step
 
-_black_terminal_line = terminal_rendering.black_terminal_line
+_default_terminal_line = terminal_rendering.default_terminal_line
 _filled_terminal_line = terminal_rendering.filled_terminal_line
 _running_terminal_line = terminal_rendering.running_terminal_line
 _styled_terminal_line = terminal_rendering.styled_terminal_line
@@ -119,10 +121,13 @@ with contextlib.suppress(ImportError):
 SLASH_COMMAND_HINTS: tuple[tuple[str, str], ...] = (
     ("/branch", "copy this conversation into a new session branch"),
     ("/clear", "reset conversation history"),
+    ("/compact", "compact conversation history now"),
+    ("/effort", "choose reasoning effort"),
     ("/exit", "exit the TUI"),
     ("/help", "show commands and settings"),
     ("/login", "authenticate OpenAI Codex with OAuth"),
     ("/model", "choose what model to use"),
+    ("/permissions", "switch tool permission mode"),
     ("/quit", "exit the TUI"),
     ("/resume", "switch to a saved session"),
     ("/session", "show persistence and saved session path"),
@@ -170,12 +175,24 @@ KNOWN_ESCAPE_SEQUENCES = (
     "\x1b[4~",
 )
 
+
+class _UnavailableProvider(Provider):
+    def __init__(self, message: str) -> None:
+        self.message = message
+
+    def complete(self, request: CompletionRequest) -> CompletionResponse:
+        raise RuntimeError(self.message)
+
+    def stream(self, request: CompletionRequest) -> Iterator[StreamComplete]:
+        raise RuntimeError(self.message)
+        yield  # pragma: no cover
+
 RESET = "\x1b[0m"
 DIM = "\x1b[2m"
 BOLD = "\x1b[1m"
 USER_STYLE = "\x1b[48;5;235;38;5;231m"
 MESSAGE_BLOCK_VERTICAL_PADDING = 1
-ASSISTANT_STYLE = "\x1b[40;38;5;255m"
+ASSISTANT_STYLE = "\x1b[38;5;255m"
 THINKING_STYLE = "\x1b[38;5;245;3m"
 WORKED_DURATION_STYLE = "\x1b[38;5;240m"
 TOOL_STYLE = "\x1b[48;5;58;38;5;230m"
@@ -198,6 +215,9 @@ STATUS_STYLE = "\x1b[48;5;236;38;5;248m"
 SUBAGENT_WAIT_TITLE_STYLE = "\x1b[48;5;236;38;5;255m"
 STATUS_MODEL_STYLE = "\x1b[48;5;236;38;5;82m"
 STATUS_TOKEN_STYLE = "\x1b[48;5;236;38;5;203m"
+STATUSLINE_STYLE = "\x1b[38;5;248m"
+STATUSLINE_MODEL_STYLE = "\x1b[38;5;82m"
+STATUSLINE_TOKEN_STYLE = "\x1b[38;5;203m"
 COMPACTION_STYLE = "\x1b[48;5;54;38;5;231;1m"
 PROMPT_STYLE = "\x1b[48;5;235;38;5;231m"
 ERROR_STYLE = "\x1b[48;5;52;38;5;231m"
@@ -524,7 +544,7 @@ def _style_statusline_text(text: str) -> str:
     first_sep = text.find(separator)
     if first_sep > 0:
         text = (
-            f"{STATUS_MODEL_STYLE}{text[:first_sep]}{STATUS_STYLE}"
+            f"{STATUSLINE_MODEL_STYLE}{text[:first_sep]}{STATUSLINE_STYLE}"
             f"{text[first_sep:]}"
         )
 
@@ -538,7 +558,7 @@ def _style_statusline_text(text: str) -> str:
 
     return (
         f"{text[:context_start]}"
-        f"{STATUS_TOKEN_STYLE}{text[context_start:cwd_start]}{STATUS_STYLE}"
+        f"{STATUSLINE_TOKEN_STYLE}{text[context_start:cwd_start]}{STATUSLINE_STYLE}"
         f"{text[cwd_start:]}"
     )
 
@@ -1370,12 +1390,19 @@ class WattleApp:
         self.inline_mode = inline_mode
         self.input_func = input_func or input
         self.out = out or sys.stdout
+        self._settings = load_settings()
 
         self.current_provider_name: str = args.provider
         self.current_model: str = args.model
         self.max_tokens: int = args.max_tokens
         self.thinking: bool = bool(getattr(args, "thinking", False))
         self.effort: str | None = cast(str | None, getattr(args, "effort", None))
+        self.enabled_models: tuple[str, ...] = tuple(
+            cast(tuple[str, ...], getattr(args, "enabled_models", ()))
+        )
+        self.compaction_keep_recent_tokens: int = int(
+            getattr(args, "compaction_keep_recent_tokens", 20_000)
+        )
         self.messages: list[Message] = []
         self.runtime = DEFAULT_RUNTIME
         self.tool_specs = [tool.spec() for tool in TOOLS_BY_NAME.values()]
@@ -1394,7 +1421,7 @@ class WattleApp:
             permission_mode=self.permission_mode,
         )
 
-        self._statusline_enabled = True
+        self._statusline_enabled = bool(getattr(args, "statusline", True))
         self._last_context_tokens: int | None = None
         self._total_input_tokens = 0
         self._total_cached_tokens = 0
@@ -1599,6 +1626,8 @@ class WattleApp:
             "thinking": self.thinking,
             "effort": self.effort,
             "permission_mode": self.permission_mode,
+            "enabled_models": self.enabled_models,
+            "compaction_keep_recent_tokens": self.compaction_keep_recent_tokens,
             "messages": list(self.messages),
             "compaction_state": self._compaction_state,
             "statusline_enabled": self._statusline_enabled,
@@ -1620,6 +1649,18 @@ class WattleApp:
         self.permission_mode = cast(
             PermissionMode,
             state.get("permission_mode", self.permission_mode),
+        )
+        self.enabled_models = tuple(
+            cast(tuple[str, ...], state.get("enabled_models", self.enabled_models))
+        )
+        self.compaction_keep_recent_tokens = int(
+            cast(
+                Any,
+                state.get(
+                    "compaction_keep_recent_tokens",
+                    self.compaction_keep_recent_tokens,
+                ),
+            )
         )
         self.permission_gate = PermissionGate(
             self.permission_mode,
@@ -1733,6 +1774,7 @@ class WattleApp:
             ),
             on_compaction_end=on_compaction_end,
             on_compaction_record=self._record_compaction_checkpoint,
+            compaction_keep_recent_tokens=self.compaction_keep_recent_tokens,
         )
 
     def _configure_subagents(self, *, provider: Provider | None = None) -> None:
@@ -1996,13 +2038,24 @@ class WattleApp:
         if cmd == "/statusline":
             if rest == "off":
                 self._statusline_enabled = False
+                self._persist_user_settings(statusline=False)
                 self._write_panel("system", "Status snapshots disabled.", STATUS_STYLE)
             else:
                 self._statusline_enabled = True
+                self._persist_user_settings(statusline=True)
                 self._write_status_snapshot(force=True)
             return False
         if cmd == "/model":
             self._handle_model(rest)
+            return False
+        if cmd == "/effort":
+            self._handle_effort(rest)
+            return False
+        if cmd == "/permissions":
+            self._handle_permissions(rest)
+            return False
+        if cmd == "/compact":
+            self._handle_compact(rest)
             return False
         self._write_panel("error", f"Unknown command: {cmd}", ERROR_STYLE)
         return False
@@ -2137,6 +2190,19 @@ class WattleApp:
             f"OpenAI Codex OAuth saved to {credential.source}.\nExpires: {expires}",
             STATUS_STYLE,
         )
+        from wattle.cli import _build_provider
+
+        try:
+            self.current_provider_name = "openai_codex"
+            self.provider = _build_provider(self.current_provider_name)
+            self._configure_subagents(provider=self.provider)
+            self._persist_user_settings(
+                provider=self.current_provider_name,
+                model=self.current_model,
+            )
+            self._persist_session()
+        except Exception as exc:  # noqa: BLE001
+            self._write_panel("error", f"OpenAI Codex provider reload failed: {exc}", ERROR_STYLE)
 
     def _expand_skill_text(self, text: str) -> str | None:
         command = text.strip().split(maxsplit=1)[0]
@@ -2145,7 +2211,18 @@ class WattleApp:
         return expand_skill_invocation(text, Path.cwd())
 
     def _handle_model(self, rest: str) -> None:
-        choices = available_model_choices()
+        choices = self._selectable_model_choices()
+        verb, _, arg = rest.partition(" ")
+        if verb == "next":
+            self._cycle_model()
+            return
+        if verb == "enabled":
+            text = "\n".join(self.enabled_models) if self.enabled_models else "(all available)"
+            self._write_panel("model", f"Enabled models:\n{text}", STATUS_STYLE)
+            return
+        if verb in {"enable", "disable"}:
+            self._handle_enabled_model_change(verb, arg.strip())
+            return
         if not rest:
             self._write(render_model_choices(choices, current_model=self.current_model))
             self._write_line("")
@@ -2155,6 +2232,10 @@ class WattleApp:
         if choice is None:
             self.current_model = rest
             self._write_panel("model", f"Model set to {self.current_model!r}.", STATUS_STYLE)
+            self._persist_user_settings(
+                provider=self.current_provider_name,
+                model=self.current_model,
+            )
             self._persist_session()
             return
         self._apply_model_choice(choice)
@@ -2166,6 +2247,10 @@ class WattleApp:
 
             self.provider = _build_provider(choice.provider)
             self.current_provider_name = choice.provider
+        self._persist_user_settings(
+            provider=self.current_provider_name,
+            model=self.current_model,
+        )
         self._write_panel(
             "model",
             f"Model set to {self.current_model!r} "
@@ -2174,14 +2259,149 @@ class WattleApp:
         )
         self._persist_session()
 
+    def _selectable_model_choices(self) -> list[ModelChoice]:
+        choices = available_model_choices()
+        if not self.enabled_models:
+            return choices
+        enabled = set(self.enabled_models)
+        return [choice for choice in choices if choice.model in enabled]
+
+    def _cycle_model(self) -> None:
+        choices = self._selectable_model_choices()
+        if not choices:
+            self._write_panel("error", "No enabled models are available.", ERROR_STYLE)
+            return
+        models = [choice.model for choice in choices]
+        try:
+            index = models.index(self.current_model)
+        except ValueError:
+            index = -1
+        self._apply_model_choice(choices[(index + 1) % len(choices)])
+
+    def _handle_enabled_model_change(self, verb: str, selector: str) -> None:
+        if not selector:
+            self._write_panel("error", f"Usage: /model {verb} MODEL_OR_NUMBER", ERROR_STYLE)
+            return
+        all_choices = available_model_choices()
+        choice = find_model_choice(selector, all_choices)
+        model = choice.model if choice is not None else selector
+        enabled = list(self.enabled_models)
+        if verb == "enable":
+            if model not in enabled:
+                enabled.append(model)
+            message = f"Enabled model {model!r}."
+        else:
+            enabled = [item for item in enabled if item != model]
+            message = f"Disabled model {model!r}."
+        self.enabled_models = tuple(enabled)
+        self._persist_user_settings(enabled_models=self.enabled_models)
+        self._write_panel("model", message, STATUS_STYLE)
+
+    def _handle_effort(self, rest: str) -> None:
+        effort = rest.strip()
+        if not effort:
+            current = self.effort or "(provider default)"
+            self._write_panel(
+                "effort",
+                f"Current effort: {current}\nChoices: low, medium, high, xhigh, max, off",
+                STATUS_STYLE,
+            )
+            return
+        if effort == "off":
+            self.thinking = False
+            self.effort = None
+        elif effort in {"low", "medium", "high", "xhigh", "max"}:
+            self.thinking = True
+            self.effort = effort
+        else:
+            self._write_panel(
+                "error",
+                "Usage: /effort low|medium|high|xhigh|max|off",
+                ERROR_STYLE,
+            )
+            return
+        self._persist_user_settings(thinking=self.thinking, effort=self.effort)
+        self._persist_session()
+        self._write_panel(
+            "effort",
+            f"Effort set to {self.effort or '(provider default)'}.",
+            STATUS_STYLE,
+        )
+
+    def _handle_permissions(self, rest: str) -> None:
+        value = rest.strip()
+        aliases = {
+            "ask": PermissionMode.ASK,
+            "ask_for_permission": PermissionMode.ASK,
+            "read-only": PermissionMode.READ_ONLY,
+            "read_only": PermissionMode.READ_ONLY,
+            "yolo": PermissionMode.YOLO,
+        }
+        if not value:
+            self._write_panel(
+                "permissions",
+                "Current mode: "
+                f"{self.permission_mode.value}\nChoices: yolo, read_only, ask",
+                STATUS_STYLE,
+            )
+            return
+        mode = aliases.get(value)
+        if mode is None:
+            self._write_panel(
+                "error",
+                "Usage: /permissions yolo|read_only|ask",
+                ERROR_STYLE,
+            )
+            return
+        self.permission_mode = mode
+        self.permission_gate = PermissionGate(mode, prompt=self._ask_tool_permission)
+        self.system = build_system_prompt(
+            tools_by_name=TOOLS_BY_NAME,
+            skills=load_available_skills(Path.cwd()),
+            permission_mode=self.permission_mode,
+        )
+        self._persist_user_settings(permission_mode=mode)
+        self._persist_session()
+        self._write_panel("permissions", f"Permission mode set to {mode.value}.", STATUS_STYLE)
+
+    def _handle_compact(self, rest: str) -> None:
+        if not self.messages:
+            self._write_panel("compact", "No conversation history to compact.", STATUS_STYLE)
+            return
+        preparer = self._request_preparer(
+            on_compaction_start=lambda: self._write_panel(
+                "compact",
+                "Compacting...",
+                STATUS_STYLE,
+            )
+        )
+        prepared = preparer.prepare(
+            self.messages,
+            force_compaction=True,
+            reset_provider=False,
+            compaction_instructions=rest or None,
+        )
+        self._compaction_state = preparer.state
+        self._write_panel(
+            "compact",
+            f"Compacted request projection to {prepared.context_tokens} token estimate.",
+            STATUS_STYLE,
+        )
+
+    def _persist_user_settings(self, **changes: Any) -> None:
+        self._settings = update_settings(**changes)
+
     def _print_help(self) -> None:
         self._write_line("Commands:")
         self._write_line("  /branch           Copy conversation into a new session branch.")
+        self._write_line("  /compact [notes]  Compact conversation history now.")
+        self._write_line("  /effort [level]   Set reasoning effort.")
         self._write_line("  /exit, /quit       Exit Wattle.")
         self._write_line("  /clear             Reset conversation history.")
         self._write_line("  /help              Show this message.")
         self._write_line("  /login [openai-codex] Authenticate OpenAI Codex.")
-        self._write_line("  /model [name|#]    List or switch models.")
+        self._write_line("  /model [name|#|next] List or switch models.")
+        self._write_line("  /permissions [mode] Switch tool permission mode.")
         self._write_line("  /resume SESSION    Switch to a saved session.")
         self._write_line("  /session, /status  Show persistence and session status.")
         self._write_line("  /statusline [on|off] Toggle status snapshots.")
@@ -2427,6 +2647,8 @@ class WattleApp:
             reason=reason,
             tokens_before=tokens_before,
             tokens_after=tokens_after,
+            read_files=list(state.read_files),
+            modified_files=list(state.modified_files),
         )
         self._session_record = replace(
             self._session_record,
@@ -2493,8 +2715,16 @@ class WattleApp:
             return
 
         width = self._terminal_width()
+        if style == ASSISTANT_STYLE:
+            self._write("\r")
+            self._write("\n" * MESSAGE_BLOCK_VERTICAL_PADDING)
+            for row in _render_markdown_text(text, width=width):
+                self._write(f"\r{row.style} {row.text}{RESET}\n")
+            self._write("\n" * MESSAGE_BLOCK_VERTICAL_PADDING)
+            return
+
         self._write("\r")
-        should_pad = style in {USER_STYLE, ASSISTANT_STYLE}
+        should_pad = style == USER_STYLE
         if should_pad:
             blank = f"{_styled_terminal_line('', style, width)}\n"
             self._write(blank * MESSAGE_BLOCK_VERTICAL_PADDING)
@@ -3580,9 +3810,9 @@ class _LiveTerminal:
             line = f" {frame} Auto-compacting..."
             rows.append(_styled_terminal_line(line, COMPACTION_STYLE, width))
         elif self.streaming and not self._suppress_running_status_line(active_subagents):
-            rows.append(_black_terminal_line("", width))
+            rows.append(_default_terminal_line("", width))
             rows.append(self._running_status_line(width))
-            rows.append(_black_terminal_line("", width))
+            rows.append(_default_terminal_line("", width))
         if active_subagents:
             count = len(active_subagents)
             noun = "subagent" if count == 1 else "subagents"
@@ -3674,8 +3904,8 @@ class _LiveTerminal:
                 rows.extend(_filled_terminal_line(row, STATUS_STYLE, width) for row in hint_rows)
             elif self.app._statusline_enabled:
                 line = f" {status}"[:line_width].ljust(line_width)
-                statusline = f"{STATUS_STYLE}{_style_statusline_text(line)}{RESET}"
-                rows.append(_filled_terminal_line(statusline, STATUS_STYLE, width))
+                statusline = f"{STATUSLINE_STYLE}{_style_statusline_text(line)}{RESET}"
+                rows.append(_filled_terminal_line(statusline, STATUSLINE_STYLE, width))
         return _PromptFrame(
             rows=rows,
             width=line_width,
@@ -3740,7 +3970,7 @@ class _LiveTerminal:
         running_text, _flower = self._working_status_text()
         if self.active_tool_status is not None:
             running_text = self.active_tool_status
-        return _black_terminal_line(f" {running_text}", width)
+        return _default_terminal_line(f" {running_text}", width)
 
     def _working_status_text(self) -> tuple[str, Flower]:
         started_at = self.working_started_at or time.monotonic()
@@ -3848,6 +4078,8 @@ def _runtime_compaction_from_session(record: SessionRecord) -> RuntimeCompaction
         summary=compaction.summary,
         summarized_until=compaction.summarized_until_message_index,
         first_kept_index=compaction.first_kept_message_index,
+        read_files=tuple(compaction.read_files),
+        modified_files=tuple(compaction.modified_files),
     )
 
 
@@ -3956,7 +4188,10 @@ def run_tui(args: argparse.Namespace) -> int:
         sys.stderr.flush()
         return 1
 
-    provider = _build_provider(args.provider)
+    try:
+        provider = _build_provider(args.provider)
+    except Exception as exc:  # noqa: BLE001
+        provider = _UnavailableProvider(str(exc))
     args.persist_session = True
     app = WattleApp(args, provider, inline_mode=True, state=state)
     return app.run() or 0

@@ -351,7 +351,7 @@ def test_pty_exit_command_works_while_assistant_is_working(tmp_path: Path) -> No
         assert session.process.wait(timeout=3) == 0
 
 
-def test_pty_idle_resize_refills_statusline_to_new_width(tmp_path: Path) -> None:
+def test_pty_idle_resize_keeps_statusline_on_terminal_background(tmp_path: Path) -> None:
     with PtySession.spawn_python(
         _slow_wattle_child_code(first_delay=0.1, later_delay=0.1),
         cwd=tmp_path,
@@ -366,7 +366,7 @@ def test_pty_idle_resize_refills_statusline_to_new_width(tmp_path: Path) -> None
         text = session.screen.row_text(row)
         assert text.startswith(" gpt-5.5")
         backgrounds = session.screen.row_backgrounds(row)
-        assert all(background == "ansi-236" for background in backgrounds)
+        assert all(background is None for background in backgrounds)
 
 
 def test_pty_idle_screen_preserves_core_visual_contract(tmp_path: Path) -> None:
@@ -403,7 +403,7 @@ def test_pty_idle_screen_preserves_core_visual_contract(tmp_path: Path) -> None:
             )
         for row in (assistant_row - 1, assistant_row, assistant_row + 1):
             assert all(
-                background == "black"
+                background is None
                 for background in session.screen.row_backgrounds(row)
             )
         for row in prompt_rows:
@@ -411,10 +411,7 @@ def test_pty_idle_screen_preserves_core_visual_contract(tmp_path: Path) -> None:
                 background == "ansi-235"
                 for background in session.screen.row_backgrounds(row)
             )
-        assert all(
-            background == "ansi-236"
-            for background in session.screen.row_backgrounds(status_row)
-        )
+        assert all(background is None for background in session.screen.row_backgrounds(status_row))
 
 
 def test_pty_height_shrink_keeps_prompt_near_transcript(tmp_path: Path) -> None:
@@ -504,6 +501,6 @@ def test_pty_transcript_rows_do_not_store_zoom_reflow_fill_spaces(
             text = session.screen.row_text(row)
             visible_columns = [index for index, char in enumerate(text) if char != " "]
             assert visible_columns
-            expected_background = "ansi-235" if row == user_row else "black"
+            expected_background = "ansi-235" if row == user_row else None
             assert all(backgrounds[index] == expected_background for index in visible_columns)
             assert all(background == expected_background for background in backgrounds)

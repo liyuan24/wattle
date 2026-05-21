@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from wattle.auth import get_credential
+from wattle.auth import get_credential, get_openai_codex_credential
 
 
 @dataclass(frozen=True)
@@ -120,12 +120,21 @@ def has_vendor_auth(vendor: str) -> bool:
     return True
 
 
+def has_model_auth(choice: ModelChoice) -> bool:
+    """Return whether auth can run this model's provider."""
+    try:
+        if choice.provider == "openai_codex":
+            get_openai_codex_credential()
+        else:
+            get_credential(choice.vendor)
+    except (FileNotFoundError, KeyError, ValueError):
+        return False
+    return True
+
+
 def available_model_choices() -> list[ModelChoice]:
     """Return catalog entries whose vendors are configured in auth."""
-    available_vendors = {
-        choice.vendor for choice in MODEL_CATALOG if has_vendor_auth(choice.vendor)
-    }
-    return [choice for choice in MODEL_CATALOG if choice.vendor in available_vendors]
+    return [choice for choice in MODEL_CATALOG if has_model_auth(choice)]
 
 
 def find_model_choice(selector: str, choices: list[ModelChoice]) -> ModelChoice | None:

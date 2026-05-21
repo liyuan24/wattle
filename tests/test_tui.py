@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 
-from wattle import auth, session, tui
+from wattle import auth, session, settings, tui
 from wattle.models import ModelChoice
 from wattle.providers import (
     CompletionRequest,
@@ -756,13 +756,16 @@ def test_styled_statusline_colors_model_and_context_usage() -> None:
         "input: 1 tok | cached total: 0 tok | output: 2 tok | cwd: ~/repos/wattle"
     )
 
-    assert f"{tui.STATUS_MODEL_STYLE}gpt-5.5{tui.STATUS_STYLE}" in rendered
-    assert ";1m" not in tui.STATUS_MODEL_STYLE
-    assert ";1m" not in tui.STATUS_TOKEN_STYLE
+    assert f"{tui.STATUSLINE_MODEL_STYLE}gpt-5.5{tui.STATUSLINE_STYLE}" in rendered
+    assert ";1m" not in tui.STATUSLINE_MODEL_STYLE
+    assert ";1m" not in tui.STATUSLINE_TOKEN_STYLE
+    assert "48;5" not in tui.STATUSLINE_STYLE
+    assert "48;5" not in tui.STATUSLINE_MODEL_STYLE
+    assert "48;5" not in tui.STATUSLINE_TOKEN_STYLE
     assert (
-        f"{tui.STATUS_TOKEN_STYLE}Context 0.0% used (3 tok) | window: 1.1M tok | "
+        f"{tui.STATUSLINE_TOKEN_STYLE}Context 0.0% used (3 tok) | window: 1.1M tok | "
         f"input: 1 tok | cached total: 0 tok | output: 2 tok"
-        f"{tui.STATUS_STYLE}"
+        f"{tui.STATUSLINE_STYLE}"
     ) in rendered
     assert "cwd: ~/repos/wattle" in rendered
 
@@ -970,6 +973,7 @@ def test_transcript_user_text_keeps_distinct_prompt_background() -> None:
     assert tui.ASSISTANT_STYLE in rendered
     assert tui.TOOL_STYLE in rendered
     assert "48;5;235" in tui.USER_STYLE
+    assert "48;5" not in tui.ASSISTANT_STYLE
     assert "48;5" not in tui.THINKING_STYLE
     assert "48;5" in tui.PROMPT_STYLE
     assert tui.USER_STYLE == tui.PROMPT_STYLE
@@ -978,7 +982,7 @@ def test_transcript_user_text_keeps_distinct_prompt_background() -> None:
     assert rendered.count(tui.RESET) >= 3
 
 
-def test_chat_text_blocks_keep_three_row_shape_without_trailing_fill_spaces() -> None:
+def test_chat_text_blocks_keep_three_row_shape_without_assistant_fill() -> None:
     out = _TTYBuffer()
     app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
@@ -1013,7 +1017,7 @@ def test_user_history_block_clears_full_terminal_rows() -> None:
     assert rendered.count("\x1b[?7h") == 3
 
 
-def test_styled_transcript_block_returns_to_column_zero_before_painting() -> None:
+def test_assistant_transcript_block_does_not_clear_terminal_background() -> None:
     out = _TTYBuffer()
     app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
@@ -1024,7 +1028,11 @@ def test_styled_transcript_block_returns_to_column_zero_before_painting() -> Non
 
     rendered = out.getvalue()
     assert "stale cursor column\r" in rendered
-    assert f"\r\r\x1b[?7l\x1b[0m\x1b[2K{tui.ASSISTANT_STYLE}" in rendered
+    assistant_start = rendered.index("stale cursor column") + len("stale cursor column")
+    assistant_render = rendered[assistant_start:]
+    assert f"\r{tui.ASSISTANT_STYLE} hello{tui.RESET}\n" in assistant_render
+    assert "\x1b[2K" not in assistant_render
+    assert "\x1b[K" not in assistant_render
 
 
 def test_styled_terminal_line_clears_then_fills_styled_background() -> None:
@@ -1155,9 +1163,9 @@ def test_running_terminal_line_animates_without_changing_text() -> None:
     bright = tui._running_terminal_line(" running bash - pytest", 28, frame=4)
 
     assert first != second
-    assert "\x1b[40;" in first
-    assert "\x1b[40;38;5;51;1m" in bright
-    assert "\x1b[40;38;5;255m" in first
+    assert "\x1b[40;" not in first
+    assert "\x1b[38;5;51;1m" in bright
+    assert "\x1b[38;5;255m" in first
     assert tui.STATUS_STYLE not in first
     assert _strip_ansi(first) == " running bash - pytest      "
     assert _strip_ansi(second) == " running bash - pytest      "
@@ -1170,7 +1178,7 @@ def test_flower_working_status_renders_shape_with_gradient() -> None:
 
     assert flower.name == "wattle"
     assert text == "✿ wattling..."
-    assert "\x1b[40;38;5;227;1m✿" in rendered
+    assert "\x1b[38;5;227;1m✿" in rendered
     assert _strip_ansi(rendered) == " ✿ wattling...                "
 
 
@@ -1239,7 +1247,7 @@ def test_live_prompt_box_shows_working_when_streaming_without_input(
 
     rendered = out.getvalue()
     assert tui.PROMPT_STYLE in rendered
-    assert "\x1b[40;" in rendered
+    assert "\x1b[40;" not in rendered[: rendered.index(tui.PROMPT_STYLE)]
     assert tui.STATUS_STYLE not in rendered[: rendered.index(tui.PROMPT_STYLE)]
     visible = _strip_ansi(rendered)
     assert "irising... (12s, press esc to interrupt)" in visible
@@ -1768,7 +1776,7 @@ def test_live_input_hint_enter_executes_selected_command() -> None:
 
     rendered = out.getvalue()
     assert "Commands:" in rendered
-    assert "/model [name|#]" in rendered
+    assert "/model [name|#|next]" in rendered
     assert app.messages == []
 
 
@@ -3527,7 +3535,11 @@ def test_terminal_status_command_shows_disabled_persistence() -> None:
 
 
 def test_terminal_login_openai_codex(monkeypatch: pytest.MonkeyPatch) -> None:
+    from wattle import cli
+
     calls: list[dict[str, object]] = []
+    provider_names: list[str] = []
+    reloaded_provider = _ScriptedStreamProvider([])
 
     def fake_login(**kwargs: object) -> auth.AuthCredential:
         calls.append(kwargs)
@@ -3542,14 +3554,22 @@ def test_terminal_login_openai_codex(monkeypatch: pytest.MonkeyPatch) -> None:
         )
 
     monkeypatch.setattr(tui, "login_openai_codex", fake_login)
+    def fake_build_provider(provider: str) -> _ScriptedStreamProvider:
+        provider_names.append(provider)
+        return reloaded_provider
 
-    out, _app = _drive(_ScriptedStreamProvider([]), ["/login", "/exit"])
+    monkeypatch.setattr(cli, "_build_provider", fake_build_provider)
+
+    out, app = _drive(_ScriptedStreamProvider([]), ["/login", "/exit"])
 
     assert len(calls) == 1
     assert calls[0]["originator"] == "wattle"
     assert "Open this URL to authenticate OpenAI Codex" in out
     assert "https://auth.example/login" in out
     assert "OpenAI Codex OAuth saved to /tmp/auth.json openai.oauth" in out
+    assert provider_names == ["openai_codex"]
+    assert app.current_provider_name == "openai_codex"
+    assert app.provider is reloaded_provider
 
 
 def test_terminal_compaction_uses_projection_but_persists_full_history(
@@ -3597,8 +3617,8 @@ def test_terminal_compaction_uses_projection_but_persists_full_history(
     assert len(provider.requests) == 2
     compacted_request = provider.requests[1]
     assert "middle summary" in _message_text(compacted_request.messages[0])
-    assert compacted_request.messages[1:] == app.messages[15:25]
-    assert len(compacted_request.messages) == 11
+    assert compacted_request.messages[1:] == app.messages[24:25]
+    assert len(compacted_request.messages) == 2
     assert provider.reset_count >= 3
     assert len(app.messages) == 26
     assert all("middle summary" not in _message_text(message) for message in app.messages)
@@ -3606,8 +3626,8 @@ def test_terminal_compaction_uses_projection_but_persists_full_history(
     saved = session.load_session(app._session_path)
     assert saved.messages == app.messages
     assert len(saved.compactions) == 1
-    assert saved.compactions[0].first_kept_message_index == 15
-    assert saved.compactions[0].summarized_until_message_index == 15
+    assert saved.compactions[0].first_kept_message_index == 24
+    assert saved.compactions[0].summarized_until_message_index == 24
     assert saved.compactions[0].created_after_message_index == 25
 
 
@@ -3902,3 +3922,25 @@ def test_terminal_statusline_can_be_disabled() -> None:
     assert "Status snapshots disabled." in out
     assert "[status]" not in out
     assert app._statusline_enabled is False
+
+
+def test_terminal_effort_and_permissions_update_settings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(settings.SETTINGS_PATH_ENV, str(tmp_path / "settings.json"))
+
+    out, app = _drive(
+        _ScriptedStreamProvider([]),
+        ["/effort high", "/permissions read_only", "/exit"],
+    )
+
+    saved = settings.load_settings()
+    assert app.thinking is True
+    assert app.effort == "high"
+    assert app.permission_mode == tui.PermissionMode.READ_ONLY
+    assert saved.thinking is True
+    assert saved.effort == "high"
+    assert saved.permission_mode == tui.PermissionMode.READ_ONLY
+    assert "Effort set to high" in out
+    assert "Permission mode set to read_only" in out

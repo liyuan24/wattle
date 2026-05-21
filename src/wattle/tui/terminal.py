@@ -55,22 +55,22 @@ def running_terminal_line(
     line = text[:visible_width].ljust(visible_width)
     highlight = frame % (visible_width + 8) - 4
     flower_index = line.find(flower.shape) if flower is not None else -1
-    parts = ["\r\x1b[?7l\x1b[40;38;5;255m\x1b[2K"]
+    parts = ["\r\x1b[?7l\x1b[38;5;255m\x1b[2K"]
     for index, char in enumerate(line):
         if index == flower_index:
             style = gradient_style(flower, frame=frame)
         else:
             distance = abs(index - highlight)
             if distance == 0:
-                style = "\x1b[40;38;5;51;1m"
+                style = "\x1b[38;5;51;1m"
             elif distance == 1:
-                style = "\x1b[40;38;5;87;1m"
+                style = "\x1b[38;5;87;1m"
             elif distance <= 3:
-                style = "\x1b[40;38;5;159m"
+                style = "\x1b[38;5;159m"
             elif distance <= 5:
-                style = "\x1b[40;38;5;251m"
+                style = "\x1b[38;5;251m"
             else:
-                style = "\x1b[40;38;5;255m"
+                style = "\x1b[38;5;255m"
         parts.append(f"{style}{char}")
     parts.append(f"{RESET}\x1b[?7h")
     return "".join(parts)
@@ -80,3 +80,9 @@ def black_terminal_line(text: str, width: int) -> str:
     visible_width = terminal_line_width(width)
     line = text[:visible_width].ljust(visible_width)
     return f"\r\x1b[?7l\x1b[40;38;5;255m\x1b[2K{line}{RESET}\x1b[?7h"
+
+
+def default_terminal_line(text: str, width: int) -> str:
+    visible_width = terminal_line_width(width)
+    line = text[:visible_width].ljust(visible_width)
+    return f"\r\x1b[?7l\x1b[0m\x1b[2K\x1b[38;5;255m{line}{RESET}\x1b[?7h"

@@ -21,7 +21,7 @@ import anthropic
 import openai
 
 from wattle.agent import _ProviderSpec, run_agent
-from wattle.auth import get_credential
+from wattle.auth import get_api_key_credential, get_credential, get_openai_codex_credential
 from wattle.permissions import PermissionMode
 from wattle.providers import (
     AnthropicProvider,
@@ -31,6 +31,7 @@ from wattle.providers import (
     Provider,
     TextBlock,
 )
+from wattle.settings import WattleSettings, load_settings
 
 # ---------------------------------------------------------------------------
 # Provider construction
@@ -101,8 +102,29 @@ def _build_provider(provider_name: str) -> Provider:
             f"Unknown provider: {provider_name!r}. "
             f"Choices: {sorted(_PROVIDER_DISPATCH)}"
         )
-    credential = get_credential(spec.vendor)
+    if provider_name == "openai_codex":
+        credential = get_openai_codex_credential()
+    elif provider_name in {"openai_completions", "openai_responses"}:
+        credential = get_api_key_credential(spec.vendor)
+    else:
+        credential = get_credential(spec.vendor)
     return spec.build(credential.bearer_token)
+
+
+def _provider_auth_available(provider_name: str) -> bool:
+    spec = _PROVIDER_DISPATCH.get(provider_name)
+    if spec is None:
+        return False
+    try:
+        if provider_name == "openai_codex":
+            get_openai_codex_credential()
+        elif provider_name in {"openai_completions", "openai_responses"}:
+            get_api_key_credential(spec.vendor)
+        else:
+            get_credential(spec.vendor)
+    except (FileNotFoundError, KeyError, ValueError):
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -243,9 +265,45 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _apply_settings_defaults(
+    args: argparse.Namespace,
+    argv: list[str],
+    settings: WattleSettings,
+) -> None:
+    if (
+        not _has_flag(argv, "--provider")
+        and settings.provider in _PROVIDER_DISPATCH
+        and _provider_auth_available(settings.provider)
+    ):
+        args.provider = settings.provider
+    if not _has_flag(argv, "--model"):
+        args.model = settings.model
+    if not _has_flag(argv, "--max-tokens"):
+        args.max_tokens = settings.max_tokens
+    if not _has_flag(argv, "--thinking") and not _has_flag(argv, "--effort"):
+        args.thinking = settings.thinking
+        args.effort = settings.effort
+    elif not _has_flag(argv, "--effort") and getattr(args, "effort", None) is None:
+        args.effort = settings.effort if args.thinking else None
+    if not any(
+        _has_flag(argv, flag)
+        for flag in ("--yolo", "--read-only", "--ask-for-permission")
+    ):
+        args.permission_mode = settings.permission_mode
+    args.statusline = settings.statusline
+    args.enabled_models = settings.enabled_models
+    args.compaction_keep_recent_tokens = settings.compaction_keep_recent_tokens
+
+
+def _has_flag(argv: list[str], flag: str) -> bool:
+    return any(item == flag or item.startswith(f"{flag}=") for item in argv)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
-    args = parser.parse_args(argv)
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    args = parser.parse_args(raw_argv)
+    _apply_settings_defaults(args, raw_argv, load_settings())
     if args.print_prompt is not None and args.prompt is not None:
         parser.error("positional prompt cannot be used with -p/--print")
     if args.effort is not None:

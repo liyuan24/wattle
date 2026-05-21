@@ -70,6 +70,7 @@ class RequestPreparer:
         on_compaction_record: (
             Callable[[RuntimeCompaction, str, int, int], None] | None
         ) = None,
+        compaction_keep_recent_tokens: int = 20_000,
     ) -> None:
         self.provider = provider
         self.model = model
@@ -85,6 +86,7 @@ class RequestPreparer:
         self.on_compaction_start = on_compaction_start
         self.on_compaction_end = on_compaction_end
         self.on_compaction_record = on_compaction_record
+        self.compaction_keep_recent_tokens = compaction_keep_recent_tokens
 
     def prepare(
         self,
@@ -92,6 +94,7 @@ class RequestPreparer:
         *,
         force_compaction: bool = False,
         reset_provider: bool = True,
+        compaction_instructions: str | None = None,
     ) -> PreparedRequest:
         previous_state = self.state
         raw_context_tokens = estimate_request_context_tokens(
@@ -111,6 +114,8 @@ class RequestPreparer:
             on_start=self.on_compaction_start,
             on_end=self.on_compaction_end,
             force=force_compaction,
+            keep_recent_tokens=self.compaction_keep_recent_tokens,
+            compaction_instructions=compaction_instructions,
         )
         self.state = state
         compacted = state is not None
@@ -156,6 +161,7 @@ class RequestPreparer:
         messages: list[Message],
         *,
         force_compaction: bool = False,
+        compaction_instructions: str | None = None,
     ) -> PreparedRequest:
         previous_state = self.state
         raw_context_tokens = estimate_request_context_tokens(
@@ -175,6 +181,8 @@ class RequestPreparer:
             on_start=self.on_compaction_start,
             on_end=self.on_compaction_end,
             force=force_compaction,
+            keep_recent_tokens=self.compaction_keep_recent_tokens,
+            compaction_instructions=compaction_instructions,
         )
         self.state = state
         compacted = state is not None

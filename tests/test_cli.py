@@ -12,7 +12,9 @@ import pytest
 
 from wattle import cli
 from wattle.auth import AuthCredential
+from wattle.permissions import PermissionMode
 from wattle.providers import CompletionResponse, TextBlock
+from wattle.settings import WattleSettings
 
 
 def test_build_parser_defaults_to_tui_settings() -> None:
@@ -28,6 +30,57 @@ def test_build_parser_defaults_to_tui_settings() -> None:
     assert args.print_prompt is None
     assert args.resume is None
     assert args.permission_mode == cli.PermissionMode.YOLO
+
+
+def test_apply_settings_defaults_when_cli_flags_are_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parser = cli._build_parser()
+    args = parser.parse_args([])
+    monkeypatch.setattr(cli, "_provider_auth_available", lambda _provider: True)
+
+    cli._apply_settings_defaults(
+        args,
+        [],
+        WattleSettings(
+            provider="openai_responses",
+            model="gpt-5.4",
+            max_tokens=1234,
+            thinking=True,
+            effort="high",
+            permission_mode=PermissionMode.READ_ONLY,
+            statusline=False,
+            enabled_models=("gpt-5.4",),
+            compaction_keep_recent_tokens=5000,
+        ),
+    )
+
+    assert args.provider == "openai_responses"
+    assert args.model == "gpt-5.4"
+    assert args.max_tokens == 1234
+    assert args.thinking is True
+    assert args.effort == "high"
+    assert args.permission_mode == PermissionMode.READ_ONLY
+    assert args.statusline is False
+    assert args.enabled_models == ("gpt-5.4",)
+    assert args.compaction_keep_recent_tokens == 5000
+
+
+def test_apply_settings_defaults_ignores_saved_provider_without_auth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parser = cli._build_parser()
+    args = parser.parse_args([])
+    monkeypatch.setattr(cli, "_provider_auth_available", lambda _provider: False)
+
+    cli._apply_settings_defaults(
+        args,
+        [],
+        WattleSettings(provider="openai_responses", model="gpt-5.4"),
+    )
+
+    assert args.provider == "openai_codex"
+    assert args.model == "gpt-5.4"
 
 
 def test_build_parser_print_mode_accepts_prompt_and_shared_flags() -> None:
@@ -187,6 +240,61 @@ def test_build_provider_wires_openai_compatible_base_url(
         api_key=f"fake-{vendor}-key",
         base_url=base_url,
     )
+    provider_factory.assert_called_once_with(async_client=fake_client)
+    assert provider is fake_provider
+
+
+def test_build_provider_wires_openai_codex_credential() -> None:
+    fake_provider = object()
+
+    with (
+        patch.object(
+            cli,
+            "get_openai_codex_credential",
+            return_value=AuthCredential(
+                kind="oauth",
+                bearer_token="fake-codex-token",
+                source="test",
+            ),
+        ) as gc,
+        patch.object(cli, "get_credential") as generic_gc,
+        patch.object(
+            cli, "OpenAICodexResponsesProvider", return_value=fake_provider
+        ) as provider_factory,
+    ):
+        provider = cli._build_provider("openai_codex")
+
+    gc.assert_called_once_with()
+    generic_gc.assert_not_called()
+    provider_factory.assert_called_once_with(bearer_token="fake-codex-token")
+    assert provider is fake_provider
+
+
+def test_build_provider_wires_openai_responses_api_key() -> None:
+    fake_client = object()
+    fake_provider = object()
+
+    with (
+        patch.object(
+            cli,
+            "get_api_key_credential",
+            return_value=AuthCredential(
+                kind="api_key",
+                bearer_token="fake-openai-key",
+                source="test",
+            ),
+        ) as gc,
+        patch.object(cli, "get_credential") as generic_gc,
+        patch.object(cli.openai, "AsyncOpenAI", return_value=fake_client) as oa,
+        patch.object(
+            cli, "OpenAIResponsesProvider", return_value=fake_provider
+        ) as provider_factory,
+    ):
+        provider = cli._build_provider("openai_responses")
+
+    gc.assert_called_once_with("openai")
+    generic_gc.assert_not_called()
+    oa.assert_called_once_with(api_key="fake-openai-key")
     provider_factory.assert_called_once_with(async_client=fake_client)
     assert provider is fake_provider
 

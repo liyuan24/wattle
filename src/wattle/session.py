@@ -70,6 +70,8 @@ class SessionCompaction:
     reason: str = "threshold"
     tokens_before: int = 0
     tokens_after: int = 0
+    read_files: list[str] = field(default_factory=list)
+    modified_files: list[str] = field(default_factory=list)
     created_at: str = field(default_factory=lambda: _utc_now_iso())
 
 
@@ -354,7 +356,7 @@ def settings_from_dict(data: dict[str, Any]) -> SessionSettings:
 
 
 def compaction_to_dict(compaction: SessionCompaction) -> dict[str, Any]:
-    return {
+    data = {
         "summary": compaction.summary,
         "first_kept_message_index": compaction.first_kept_message_index,
         "summarized_until_message_index": compaction.summarized_until_message_index,
@@ -364,6 +366,11 @@ def compaction_to_dict(compaction: SessionCompaction) -> dict[str, Any]:
         "tokens_after": compaction.tokens_after,
         "created_at": compaction.created_at,
     }
+    if compaction.read_files:
+        data["read_files"] = compaction.read_files
+    if compaction.modified_files:
+        data["modified_files"] = compaction.modified_files
+    return data
 
 
 def compaction_from_dict(data: dict[str, Any]) -> SessionCompaction:
@@ -378,6 +385,8 @@ def compaction_from_dict(data: dict[str, Any]) -> SessionCompaction:
         reason=_optional_str(data, "reason") or "threshold",
         tokens_before=_optional_int(data, "tokens_before", default=0),
         tokens_after=_optional_int(data, "tokens_after", default=0),
+        read_files=_optional_str_list(data, "read_files"),
+        modified_files=_optional_str_list(data, "modified_files"),
         created_at=_optional_str(data, "created_at") or _utc_now_iso(),
     )
 
@@ -569,6 +578,13 @@ def _optional_int(data: dict[str, Any], key: str, *, default: int) -> int:
     if not isinstance(value, int) or isinstance(value, bool):
         raise ValueError(f"{key!r} must be an integer")
     return value
+
+
+def _optional_str_list(data: dict[str, Any], key: str) -> list[str]:
+    value = data.get(key, [])
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ValueError(f"{key!r} must be a list of strings")
+    return list(value)
 
 
 def _fsync_dir(path: Path) -> None:

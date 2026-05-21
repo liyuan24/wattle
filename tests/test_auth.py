@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import json
 from pathlib import Path
+from urllib import parse
 
 import pytest
 
@@ -20,7 +21,6 @@ def auth_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Point wattle.auth.AUTH_PATH at tmp_path/auth.json and return the path."""
     path = tmp_path / "auth.json"
     monkeypatch.setattr(auth, "AUTH_PATH", path)
-    monkeypatch.setattr(auth, "CODEX_AUTH_PATH", tmp_path / "codex-auth.json")
     return path
 
 
@@ -45,7 +45,6 @@ def test_auth_path_default_is_home_dotwattle_auth_json() -> None:
     """The unpatched constants must resolve to documented auth paths."""
     # Re-import to be safe; the module attribute should equal the documented path.
     assert Path.home() / ".wattle" / "auth.json" == auth.AUTH_PATH
-    assert Path.home() / ".codex" / "auth.json" == auth.CODEX_AUTH_PATH
 
 
 def test_auth_path_is_monkeypatchable(
@@ -132,6 +131,36 @@ def test_get_credential_uses_oauth_by_default_when_both_methods_exist(
     assert credential.source == f"{auth_file} example.oauth"
 
 
+def test_get_api_key_credential_uses_api_key_when_oauth_also_exists(
+    auth_file: Path,
+) -> None:
+    token = _jwt_with_exp(2_000_000_000)
+    auth_file.write_text(
+        json.dumps(
+            {
+                "openai": {
+                    "api_key": {"api_key": "sk-openai-existing"},
+                    "oauth": {"access_token": token},
+                }
+            }
+        )
+    )
+
+    credential = auth.get_api_key_credential("openai")
+
+    assert credential.kind == "api_key"
+    assert credential.bearer_token == "sk-openai-existing"
+    assert credential.source == f"{auth_file} openai.api_key"
+
+
+def test_get_api_key_credential_rejects_oauth_only_vendor(auth_file: Path) -> None:
+    token = _jwt_with_exp(2_000_000_000)
+    auth_file.write_text(json.dumps({"openai": {"oauth": {"access_token": token}}}))
+
+    with pytest.raises(KeyError, match="api_key.*required"):
+        auth.get_api_key_credential("openai")
+
+
 def test_get_credential_accepts_legacy_explicit_oauth_over_api_key(
     auth_file: Path,
 ) -> None:
@@ -163,31 +192,44 @@ def test_get_api_key_returns_oauth_access_token_for_compatibility(auth_file: Pat
     assert auth.get_api_key("openai") == token
 
 
-def test_get_credential_falls_back_to_codex_oauth_when_wattle_missing(
+def test_get_openai_codex_credential_requires_wattle_scoped_oauth(
     auth_file: Path,
 ) -> None:
-    token = _jwt_with_exp(2_000_000_000)
-    auth.CODEX_AUTH_PATH.write_text(json.dumps({"tokens": {"access_token": token}}))
+    token = _jwt_with_payload(
+        {
+            "exp": 2_000_000_000,
+            "scp": [
+                "openid",
+                "profile",
+                "email",
+                "offline_access",
+                "api.connectors.read",
+                "api.connectors.invoke",
+            ],
+        }
+    )
+    auth_file.write_text(json.dumps({"openai": {"oauth": {"access_token": token}}}))
 
-    credential = auth.get_credential("openai")
+    credential = auth.get_openai_codex_credential()
 
     assert credential.kind == "oauth"
     assert credential.bearer_token == token
-    assert credential.source == f"{auth.CODEX_AUTH_PATH} tokens"
-    assert credential.expires_at == 2_000_000_000
+    assert credential.source == f"{auth_file} openai.oauth"
 
 
-def test_get_credential_falls_back_to_codex_oauth_when_openai_missing(
+def test_get_openai_codex_credential_rejects_under_scoped_wattle_oauth(
     auth_file: Path,
 ) -> None:
-    token = _jwt_with_exp(2_000_000_000)
-    auth_file.write_text(json.dumps({"anthropic": {"api_key": "sk-ant-abc"}}))
-    auth.CODEX_AUTH_PATH.write_text(json.dumps({"tokens": {"access_token": token}}))
+    token = _jwt_with_payload(
+        {
+            "exp": 2_000_000_000,
+            "scp": ["openid", "profile", "email", "offline_access"],
+        }
+    )
+    auth_file.write_text(json.dumps({"openai": {"oauth": {"access_token": token}}}))
 
-    credential = auth.get_credential("openai")
-
-    assert credential.kind == "oauth"
-    assert credential.bearer_token == token
+    with pytest.raises(ValueError, match="missing required Codex scopes"):
+        auth.get_openai_codex_credential()
 
 
 def test_get_credential_rejects_expired_oauth_token(auth_file: Path) -> None:
@@ -251,6 +293,41 @@ def test_get_credential_refreshes_expired_oauth_for_any_provider(
             "scope": None,
         }
     ]
+
+
+def test_get_credential_passes_generic_oauth_refresh_scope(
+    auth_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    old_token = _jwt_with_exp(1)
+    new_token = _jwt_with_exp(2_000_000_000)
+    seen: dict[str, object] = {}
+
+    def fake_refresh(**kwargs: object) -> dict[str, object]:
+        seen.update(kwargs)
+        return {"access_token": new_token}
+
+    monkeypatch.setattr(auth, "_request_oauth_refresh", fake_refresh)
+    auth_file.write_text(
+        json.dumps(
+            {
+                "example": {
+                    "oauth": {
+                        "access_token": old_token,
+                        "refresh_token": "refresh-existing",
+                        "token_url": "https://provider.example/oauth/token",
+                        "client_id": "example-client",
+                        "scope": "example.read",
+                    }
+                }
+            }
+        )
+    )
+
+    credential = auth.get_credential("example")
+
+    assert credential.bearer_token == new_token
+    assert seen["scope"] == "example.read"
 
 
 def test_get_credential_refreshes_near_expiry_oauth(
@@ -318,6 +395,7 @@ def test_get_credential_refreshes_openai_with_provider_defaults(
         return {"access_token": new_token}
 
     monkeypatch.setattr(auth, "_request_oauth_refresh", fake_refresh)
+    codex_scope = "openid profile email offline_access api.connectors.read api.connectors.invoke"
     auth_file.write_text(
         json.dumps(
             {
@@ -325,6 +403,7 @@ def test_get_credential_refreshes_openai_with_provider_defaults(
                     "oauth": {
                         "access_token": old_token,
                         "refresh_token": "refresh-existing",
+                        "scope": codex_scope,
                     }
                 }
             }
@@ -336,6 +415,7 @@ def test_get_credential_refreshes_openai_with_provider_defaults(
     assert credential.bearer_token == new_token
     assert seen["token_url"] == "https://auth.openai.com/oauth/token"
     assert seen["client_id"] == "app_EMoamEEZ73f0CkXaXp7hrann"
+    assert seen["scope"] is None
 
 
 def test_login_openai_codex_persists_openai_oauth(
@@ -384,13 +464,83 @@ def test_login_openai_codex_persists_openai_oauth(
     assert oauth["refresh_token"] == "refresh-token"
     assert oauth["token_url"] == "https://auth.openai.com/oauth/token"
     assert oauth["client_id"] == "app_EMoamEEZ73f0CkXaXp7hrann"
-    assert oauth["scope"] == "openid profile email offline_access"
+    assert (
+        oauth["scope"]
+        == "openid profile email offline_access api.connectors.read api.connectors.invoke"
+    )
     assert oauth["account_id"] == "acct_123"
     assert seen_exchange == {"code": "auth-code", "verifier": "verifier"}
     assert len(seen_urls) == 1
     assert opened_urls == seen_urls
     assert "code_challenge=challenge" in seen_urls[0]
     assert "state=state_123" in seen_urls[0]
+    query = parse.parse_qs(parse.urlparse(seen_urls[0]).query)
+    assert query["scope"] == [
+        "openid profile email offline_access api.connectors.read api.connectors.invoke"
+    ]
+
+
+def test_login_openai_codex_replaces_existing_openai_oauth(
+    auth_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    auth_file.write_text(
+        json.dumps(
+            {
+                "openai": {
+                    "api_key": {"value": "keep-api-key"},
+                    "oauth": {
+                        "access_token": "old-access-token",
+                        "refresh_token": "old-refresh-token",
+                        "scope": "openid profile email offline_access",
+                        "stale_field": "remove-me",
+                    },
+                },
+                "anthropic": {"api_key": {"value": "keep-anthropic-key"}},
+            }
+        )
+    )
+    monkeypatch.setattr(auth, "_generate_pkce", lambda: ("verifier", "challenge"))
+    monkeypatch.setattr(auth.secrets, "token_hex", lambda _n: "state_123")
+    monkeypatch.setattr(
+        auth,
+        "_start_openai_codex_callback_server",
+        lambda *, state: None,
+    )
+    monkeypatch.setattr(
+        auth,
+        "_request_openai_codex_token",
+        lambda **_kwargs: {
+            "access_token": _jwt_with_payload(
+                {
+                    "exp": 2_000_000_000,
+                    "https://api.openai.com/auth": {
+                        "chatgpt_account_id": "acct_123",
+                    },
+                }
+            ),
+            "refresh_token": "new-refresh-token",
+            "expires_in": 3600,
+        },
+    )
+
+    credential = auth.login_openai_codex(
+        prompt=lambda _message: "code=auth-code&state=state_123",
+        open_browser=None,
+    )
+
+    saved = json.loads(auth_file.read_text())
+    oauth = saved["openai"]["oauth"]
+    assert credential.bearer_token == oauth["access_token"]
+    assert oauth["access_token"] != "old-access-token"
+    assert oauth["refresh_token"] == "new-refresh-token"
+    assert (
+        oauth["scope"]
+        == "openid profile email offline_access api.connectors.read api.connectors.invoke"
+    )
+    assert "stale_field" not in oauth
+    assert saved["openai"]["api_key"] == {"value": "keep-api-key"}
+    assert saved["anthropic"] == {"api_key": {"value": "keep-anthropic-key"}}
 
 
 def test_auth_credential_repr_hides_bearer_token() -> None:

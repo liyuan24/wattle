@@ -36,6 +36,8 @@ def test_build_system_prompt_uses_wattle_default_without_pi_docs(tmp_path: Path)
     assert "When investigating a failure, prioritize reproducing and explaining" in prompt
     assert "keep multiple hypotheses alive until one explains the symptom end to end" in prompt
     assert "prefer using `rg` or `rg --files`" in prompt
+    assert "why or how current-project behavior works, differs, or regressed" in prompt
+    assert "inspect relevant repository files before giving a concrete answer" in prompt
     assert "Use tty=true only for commands that require an interactive terminal" in prompt
     assert "try `uv run pytest` before using `python -m compileall`" in prompt
     assert "prefer conventional entrypoint names and process shapes" in prompt

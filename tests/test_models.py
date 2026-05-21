@@ -7,7 +7,11 @@ def test_available_model_choices_includes_openai_compatible_vendors(
     monkeypatch,
 ) -> None:
     configured = {"deepseek", "kimi", "minimax"}
-    monkeypatch.setattr(models, "has_vendor_auth", lambda vendor: vendor in configured)
+    monkeypatch.setattr(
+        models,
+        "has_model_auth",
+        lambda choice: choice.vendor in configured,
+    )
 
     choices = models.available_model_choices()
     by_model = {choice.model: choice for choice in choices}

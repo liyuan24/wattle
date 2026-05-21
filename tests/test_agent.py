@@ -31,6 +31,18 @@ if "wattle.auth" not in sys.modules:
                 source="stub",
                 expires_at=None,
             ),
+            get_api_key_credential=lambda vendor: SimpleNamespace(
+                kind="api_key",
+                bearer_token=f"fake-{vendor}-key",
+                source="stub",
+                expires_at=None,
+            ),
+            get_openai_codex_credential=lambda: SimpleNamespace(
+                kind="oauth",
+                bearer_token="fake-openai-codex-token",
+                source="stub",
+                expires_at=None,
+            ),
         )
 
 import pytest
@@ -123,7 +135,7 @@ def test_openai_codex_provider_wires_openai_oauth_bearer(
     with (
         patch.object(
             agent,
-            "get_credential",
+            "get_openai_codex_credential",
             return_value=AuthCredential(
                 kind="oauth",
                 bearer_token="fake-openai-bearer",
@@ -141,7 +153,7 @@ def test_openai_codex_provider_wires_openai_oauth_bearer(
     ):
         result = run_agent("openai_codex", model="gpt-y", user_input="yo")
 
-    gc.assert_called_once_with("openai")
+    gc.assert_called_once_with()
     anth.assert_not_called()
     oa.assert_not_called()
     ap.assert_not_called()
@@ -161,13 +173,14 @@ def test_openai_completions_provider_wires_openai_vendor_key(
     with (
         patch.object(
             agent,
-            "get_credential",
+            "get_api_key_credential",
             return_value=AuthCredential(
-                kind="oauth",
+                kind="api_key",
                 bearer_token="fake-openai-bearer",
                 source="test",
             ),
         ) as gc,
+        patch.object(agent, "get_credential") as generic_gc,
         patch.object(agent.anthropic, "AsyncAnthropic") as anth,
         patch.object(agent.openai, "AsyncOpenAI", return_value=fake_client) as oa,
         patch.object(agent, "AnthropicProvider") as ap,
@@ -178,6 +191,7 @@ def test_openai_completions_provider_wires_openai_vendor_key(
         result = run_agent("openai_completions", model="gpt-x", user_input="hello")
 
     gc.assert_called_once_with("openai")
+    generic_gc.assert_not_called()
     oa.assert_called_once_with(api_key="fake-openai-bearer")
     anth.assert_not_called()
     xp.assert_not_called()
@@ -257,13 +271,14 @@ def test_openai_responses_provider_wires_openai_vendor_key(
     with (
         patch.object(
             agent,
-            "get_credential",
+            "get_api_key_credential",
             return_value=AuthCredential(
-                kind="oauth",
+                kind="api_key",
                 bearer_token="fake-openai-bearer",
                 source="test",
             ),
         ) as gc,
+        patch.object(agent, "get_credential") as generic_gc,
         patch.object(agent.anthropic, "AsyncAnthropic") as anth,
         patch.object(agent.openai, "AsyncOpenAI", return_value=fake_client) as oa,
         patch.object(agent, "AnthropicProvider") as ap,
@@ -274,6 +289,7 @@ def test_openai_responses_provider_wires_openai_vendor_key(
         result = run_agent("openai_responses", model="gpt-y", user_input="yo")
 
     gc.assert_called_once_with("openai")
+    generic_gc.assert_not_called()
     oa.assert_called_once_with(api_key="fake-openai-bearer")
     anth.assert_not_called()
     xp.assert_not_called()
@@ -323,7 +339,7 @@ def test_auth_filenotfounderror_propagates(loop_run_sentinel: MagicMock) -> None
     with (
         patch.object(
             agent,
-            "get_credential",
+            "get_api_key_credential",
             side_effect=FileNotFoundError("missing auth.json"),
         ),
         patch.object(agent.openai, "AsyncOpenAI") as oa,

@@ -127,6 +127,11 @@ def _guidelines(
             "If the rg command is not found, use alternatives."
         )
         guidelines.append(
+            "When the user asks why or how current-project behavior works, differs, "
+            "or regressed, inspect relevant repository files before giving a "
+            "concrete answer."
+        )
+        guidelines.append(
             "For bash commands, keep tty=false for normal scripts, tests, installs, "
             "and service launches. Use tty=true only for commands that require an "
             "interactive terminal, such as shells, REPLs, prompts, or full-screen tools."

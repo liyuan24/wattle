@@ -18,7 +18,7 @@ import anthropic
 import openai
 
 from wattle import loop
-from wattle.auth import get_credential
+from wattle.auth import get_api_key_credential, get_credential, get_openai_codex_credential
 from wattle.permissions import PermissionGate, PermissionMode
 from wattle.providers import (
     AnthropicProvider,
@@ -159,7 +159,12 @@ def run_agent(
             f"Choices: {sorted(PROVIDER_TO_VENDOR)}"
         )
 
-    credential = get_credential(spec.vendor)
+    if provider_name == "openai_codex":
+        credential = get_openai_codex_credential()
+    elif provider_name in {"openai_completions", "openai_responses"}:
+        credential = get_api_key_credential(spec.vendor)
+    else:
+        credential = get_credential(spec.vendor)
     provider = spec.build(credential.bearer_token)
     built_system = build_system_prompt(
         tools_by_name=TOOLS_BY_NAME,

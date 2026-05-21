@@ -1,8 +1,7 @@
 """Credential auth for Wattle.
 
 Reads vendor credentials from Wattle's canonical JSON file at
-``~/.wattle/auth.json``. OpenAI can also use a Codex OAuth access token from
-``~/.codex/auth.json`` when Wattle auth is missing or has no OpenAI entry.
+``~/.wattle/auth.json``.
 
 Canonical file format::
 
@@ -33,7 +32,9 @@ Canonical file format::
 The top-level keys are vendors (for example ``"anthropic"``, ``"deepseek"``,
 ``"kimi"``, ``"minimax"``, ``"openai"``). Each value is an object containing
 auth method objects: ``"api_key"`` or ``"oauth"``. If a vendor has both, OAuth
-is used by default. Legacy flat entries are still accepted for compatibility.
+is used by default for generic credential lookup. Callers that need a platform
+API key should request an API-key credential explicitly. Legacy flat entries are
+still accepted for compatibility.
 
 Both OpenAI providers (Chat Completions and Responses) share one OpenAI key,
 hence the vendor name ``"openai"`` rather than provider-specific names.
@@ -61,13 +62,13 @@ from urllib import error, parse, request
 # Module-level constant. Importable AND monkeypatchable: tests and alternate
 # entry points override this attribute to redirect reads.
 AUTH_PATH: Path = Path.home() / ".wattle" / "auth.json"
-CODEX_AUTH_PATH: Path = Path.home() / ".codex" / "auth.json"
 OAUTH_REFRESH_SKEW_SECONDS = 300
 OPENAI_CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 OPENAI_CODEX_AUTHORIZE_URL = "https://auth.openai.com/oauth/authorize"
 OPENAI_CODEX_TOKEN_URL = "https://auth.openai.com/oauth/token"
 OPENAI_CODEX_REDIRECT_URI = "http://localhost:1455/auth/callback"
-OPENAI_CODEX_SCOPE = "openid profile email offline_access"
+OPENAI_CODEX_SCOPE = "openid profile email offline_access api.connectors.read api.connectors.invoke"
+OPENAI_CODEX_REQUIRED_SCOPES = frozenset({"api.connectors.read", "api.connectors.invoke"})
 OPENAI_CODEX_AUTH_CLAIM_PATH = "https://api.openai.com/auth"
 
 _PROVIDER_OAUTH_DEFAULTS: dict[str, dict[str, str]] = {
@@ -670,7 +671,7 @@ def _refresh_oauth_token_map_if_needed(
     if not isinstance(client_secret, str):
         client_secret = None
     scope = token_map.get("scope")
-    if not isinstance(scope, str):
+    if vendor == "openai" or not isinstance(scope, str):
         scope = None
 
     response = _request_oauth_refresh(
@@ -711,6 +712,27 @@ def _oauth_credential_from_token_map(
         source=source,
         expires_at=expires_at,
     )
+
+
+def _scope_set(value: object) -> set[str]:
+    if isinstance(value, str):
+        return {scope for scope in value.split() if scope}
+    if isinstance(value, list):
+        return {scope for scope in value if isinstance(scope, str) and scope}
+    return set()
+
+
+def _oauth_token_scopes(token_map: dict) -> set[str]:
+    access_token = token_map.get("access_token")
+    if isinstance(access_token, str):
+        payload = _jwt_payload(access_token)
+        if payload is not None and "scp" in payload:
+            return _scope_set(payload.get("scp"))
+    return _scope_set(token_map.get("scope"))
+
+
+def _has_openai_codex_scopes(token_map: dict) -> bool:
+    return OPENAI_CODEX_REQUIRED_SCOPES <= _oauth_token_scopes(token_map)
 
 
 def _oauth_credential_from_vendor_entry(
@@ -782,29 +804,68 @@ def _api_key_credential_from_vendor_entry(
     )
 
 
-def _codex_oauth_credential() -> AuthCredential | None:
-    path = CODEX_AUTH_PATH
-    try:
-        data = _load_json_object(path, label="Codex")
-    except FileNotFoundError:
-        return None
+def get_openai_codex_credential() -> AuthCredential:
+    """Return an OAuth credential suitable for ChatGPT's Codex endpoint."""
+    path = AUTH_PATH
+    data = load_auth()
 
-    tokens = data.get("tokens")
-    if not isinstance(tokens, dict):
-        return None
+    entry = data.get("openai")
+    if isinstance(entry, dict):
+        oauth_entry = entry.get("oauth")
+        if isinstance(oauth_entry, dict):
+            _refresh_oauth_token_map_if_needed(
+                vendor="openai",
+                path=path,
+                token_map=oauth_entry,
+                root_data=data,
+            )
+            if _has_openai_codex_scopes(oauth_entry):
+                return _oauth_credential_from_token_map(
+                    vendor="openai",
+                    path=path,
+                    token_map=oauth_entry,
+                    source=f"{path} openai.oauth",
+                )
 
-    _refresh_oauth_token_map_if_needed(
-        vendor="openai",
-        path=path,
-        token_map=tokens,
-        root_data=data,
+    raise ValueError(
+        "OpenAI Codex OAuth token is missing required Codex scopes. "
+        "Run /login again with this Wattle build."
     )
 
-    return _oauth_credential_from_token_map(
-        vendor="openai",
+
+def get_api_key_credential(vendor: str) -> AuthCredential:
+    """Return an API-key credential for ``vendor``.
+
+    This is intentionally stricter than :func:`get_credential`: OAuth access
+    tokens, including the ChatGPT Codex OAuth token stored under
+    ``openai.oauth``, are not valid API keys for OpenAI-compatible platform
+    endpoints.
+    """
+    path = AUTH_PATH
+    data = load_auth()
+
+    if vendor not in data:
+        raise _missing_vendor_error(vendor, path)
+
+    entry = data[vendor]
+    if not isinstance(entry, dict):
+        raise KeyError(
+            f"Entry for vendor {vendor!r} in {path} must be an object with "
+            f"an 'api_key' method object, got {type(entry).__name__}."
+        )
+
+    credential = _api_key_credential_from_vendor_entry(
+        vendor=vendor,
         path=path,
-        token_map=tokens,
-        source=f"{path} tokens",
+        entry=entry,
+    )
+    if credential is not None:
+        return credential
+
+    raise KeyError(
+        f"Vendor {vendor!r} in Wattle auth file at {path} is missing the "
+        f"'api_key' method object required by this provider. Add it: "
+        f"{{{vendor!r}: {{'api_key': {{'api_key': '...'}}}}}}."
     )
 
 
@@ -820,13 +881,11 @@ def get_credential(vendor: str) -> AuthCredential:
     """Return a provider-ready credential for ``vendor``.
 
     Each vendor entry should contain method objects: ``api_key`` or ``oauth``.
-    If both are present, OAuth is used by default. OpenAI also falls back to
-    Codex's local OAuth login when Wattle has no OpenAI credential.
+    If both are present, OAuth is used by default.
 
     Raises:
         KeyError: If ``vendor`` is not configured, or its entry is malformed.
-        FileNotFoundError: If the Wattle auth file is missing and no supported
-            fallback credential is available.
+        FileNotFoundError: If the Wattle auth file is missing.
         ValueError: If a credential file is malformed JSON.
     """
     path = AUTH_PATH
@@ -834,17 +893,9 @@ def get_credential(vendor: str) -> AuthCredential:
     try:
         data = load_auth()
     except FileNotFoundError:
-        if vendor == "openai":
-            codex_credential = _codex_oauth_credential()
-            if codex_credential is not None:
-                return codex_credential
         raise
 
     if vendor not in data:
-        if vendor == "openai":
-            codex_credential = _codex_oauth_credential()
-            if codex_credential is not None:
-                return codex_credential
         raise _missing_vendor_error(vendor, path)
 
     entry = data[vendor]
@@ -927,8 +978,7 @@ def get_api_key(vendor: str) -> str:
 
     Raises:
         KeyError: If ``vendor`` is not configured, or its entry is malformed.
-        FileNotFoundError: If the Wattle auth file is missing and no supported
-            fallback credential is available.
+        FileNotFoundError: If the Wattle auth file is missing.
         ValueError: If a credential file is malformed JSON.
     """
     return get_credential(vendor).bearer_token

@@ -34,4 +34,4 @@ def flower_for_elapsed(elapsed_seconds: int) -> Flower:
 
 def gradient_style(flower: Flower, *, frame: int) -> str:
     color = flower.palette[(frame // 3) % len(flower.palette)]
-    return f"\x1b[40;38;5;{color};1m"
+    return f"\x1b[38;5;{color};1m"
