@@ -2093,6 +2093,33 @@ def test_live_prompt_shows_queued_messages_with_interrupt_hint() -> None:
     assert "↳ second" in rendered
 
 
+def test_live_prompt_shows_end_turn_queue_in_separate_panel(tmp_path: Path) -> None:
+    first = tmp_path / "first.png"
+    second = tmp_path / "second.png"
+    first.write_bytes(b"fake-png-first")
+    second.write_bytes(b"fake-png-second")
+    out = _TTYBuffer()
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+    live = tui._LiveTerminal(app)
+    live.streaming = True
+    live.pending_user_inputs = [f"after tool {first}"]
+    live.turn_followup_user_inputs = [f"after turn {second}"]
+
+    live._draw_prompt()
+
+    rendered = out.getvalue()
+    assert "Messages to be submitted after next tool call" in rendered
+    assert "Messages to be submitted after assistant turn completes" in rendered
+    assert rendered.index("Messages to be submitted after next tool call") < rendered.index(
+        "Messages to be submitted after assistant turn completes"
+    )
+    assert "↳ after tool [image#1]" in rendered
+    assert "↳ after turn [image#2]" in rendered
+    assert str(first) not in rendered
+    assert str(second) not in rendered
+
+
 def test_live_prompt_shows_active_subagent_waiting_status(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2203,7 +2230,7 @@ def test_live_prompt_hides_pending_monitor_events() -> None:
     rendered = out.getvalue()
     assert "Monitor event:" not in rendered
     assert "service ready" not in rendered
-    assert "Messages to be submitted after next tool call" not in rendered
+    assert "Messages to be submitted after assistant turn completes" not in rendered
 
 
 def test_live_queue_monitor_event_uses_hidden_queue() -> None:
@@ -2300,6 +2327,25 @@ def test_live_submit_while_streaming_shows_queue_only_in_prompt() -> None:
     assert "\n > queued followup" not in _strip_ansi(rendered)
 
 
+def test_live_queue_command_while_streaming_uses_end_turn_panel() -> None:
+    out = _TTYBuffer()
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+    live = tui._LiveTerminal(app)
+    live.streaming = True
+    live.buffer = "/queue after the full turn"
+    live.cursor = len(live.buffer)
+
+    live._submit_buffer()
+
+    rendered = out.getvalue()
+    assert live.pending_user_inputs == []
+    assert live.turn_followup_user_inputs == ["after the full turn"]
+    assert "Messages to be submitted after next tool call" not in rendered
+    assert "Messages to be submitted after assistant turn completes" in rendered
+    assert "↳ after the full turn" in rendered
+
+
 def test_live_queued_image_inputs_keep_placeholder_order(tmp_path: Path) -> None:
     first = tmp_path / "first.png"
     second = tmp_path / "second.png"
@@ -2355,6 +2401,57 @@ def test_live_finish_response_anchors_pending_image_input(tmp_path: Path) -> Non
         isinstance(block, ImageBlock) and block.filename == image.name
         for block in followup.content
     )
+
+
+def test_live_end_turn_queued_input_waits_for_assistant_turn_to_finish() -> None:
+    out = _TTYBuffer()
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+    live = tui._LiveTerminal(app)
+    live.streaming = True
+    live.turn_followup_user_inputs = ["after the full turn"]
+    starts: list[bool] = []
+
+    def fake_start_worker() -> None:
+        live.streaming = True
+        starts.append(True)
+
+    live._start_worker = fake_start_worker  # type: ignore[method-assign]
+    tool_use_response = CompletionResponse(
+        content=[ToolUseBlock(id="call_1", name="missing_tool", input={})],
+        stop_reason="tool_use",
+    )
+    final_response = CompletionResponse(
+        content=[TextBlock(text="done")],
+        stop_reason="end_turn",
+    )
+
+    live._finish_response(tool_use_response)
+
+    assert starts == [True]
+    assert live.pending_user_inputs == []
+    assert live.turn_followup_user_inputs == ["after the full turn"]
+    assert [message.role for message in app.messages] == ["assistant", "user"]
+    tool_followup = app.messages[1]
+    assert any(isinstance(block, ToolResultBlock) for block in tool_followup.content)
+    assert not any(
+        isinstance(block, TextBlock) and block.text == "after the full turn"
+        for block in tool_followup.content
+    )
+
+    live._finish_response(final_response)
+
+    assert starts == [True, True]
+    assert live.pending_user_inputs == []
+    assert live.turn_followup_user_inputs == []
+    assert [message.role for message in app.messages] == [
+        "assistant",
+        "user",
+        "assistant",
+        "user",
+    ]
+    assert app.messages[3].content == [TextBlock(text="after the full turn")]
+    assert "after the full turn" in out.getvalue()
 
 
 def test_live_esc_interrupt_keeps_user_and_queued_messages_without_partial_assistant() -> None:

@@ -134,6 +134,7 @@ SLASH_COMMAND_HINTS: tuple[tuple[str, str], ...] = (
     ("/login", "authenticate OpenAI Codex with OAuth"),
     ("/model", "choose what model to use"),
     ("/permissions", "switch tool permission mode"),
+    ("/queue", "while streaming, send after the assistant turn completes"),
     ("/quit", "exit the TUI"),
     ("/resume", "switch to a saved session"),
     ("/session", "show persistence and saved session path"),
@@ -1461,6 +1462,8 @@ class WattleApp:
         self._last_transcript_was_separator = False
         self._resume_history_pending = False
         self._compaction_state: RuntimeCompaction | None = None
+        self._cleared_empty_screen_active = False
+        self._clear_screen_notice: str | None = None
 
         if state is not None:
             self._restore_state(state)
@@ -1538,6 +1541,7 @@ class WattleApp:
             self._write_panel("error", str(exc), ERROR_STYLE)
             return False
         if render:
+            self._cleared_empty_screen_active = False
             self._write_block(
                 self._user_display_text(
                     text,
@@ -2526,10 +2530,16 @@ class WattleApp:
             self._session_path = default_session_path(self._session_record.metadata.id)
             self._persist_session()
 
+        self._cleared_empty_screen_active = True
+        self._clear_screen_notice = previous_usage
+        self._write_cleared_session_screen()
+
+    def _write_cleared_session_screen(self) -> None:
+        self._last_transcript_was_separator = False
         self._write(VISIBLE_SCREEN_CLEAR)
         self._write_welcome_card()
-        if previous_usage is not None:
-            self._write_panel("previous session", previous_usage, STATUS_STYLE)
+        if self._clear_screen_notice is not None:
+            self._write_panel("previous session", self._clear_screen_notice, STATUS_STYLE)
 
     def _previous_session_usage_text(self) -> str | None:
         if self._total_input_tokens <= 0 and self._total_output_tokens <= 0:
@@ -2859,6 +2869,7 @@ class _LiveTerminal:
         self.streaming = False
         self.worker: threading.Thread | None = None
         self.pending_user_inputs: list[str] = []
+        self.turn_followup_user_inputs: list[str] = []
         self.pending_monitor_inputs: list[str] = []
         self.interrupted_user_inputs: list[str] = []
         self.compacting = False
@@ -2938,13 +2949,17 @@ class _LiveTerminal:
                         self._last_running_frame_at = time.monotonic()
                         self._redraw_running_status_line()
                     if self._prompt_needs_resize_repaint():
-                        self._draw_prompt(force_reflow_clear=self.resize_pending)
+                        if self.resize_pending and self.app._cleared_empty_screen_active:
+                            self._redraw_cleared_session_screen()
+                        else:
+                            self._draw_prompt(force_reflow_clear=self.resize_pending)
                         self.resize_pending = False
                 if (
                     not self.streaming
                     and self.worker is None
                     and (
                         self.pending_user_inputs
+                        or self.turn_followup_user_inputs
                         or self.pending_monitor_inputs
                         or self.interrupted_user_inputs
                     )
@@ -3343,6 +3358,8 @@ class _LiveTerminal:
         self._record_input_history(text)
         expanded_text = self.app._expand_skill_text(text)
         if expanded_text is None and _should_route_slash_command(text):
+            if self._handle_live_queue_command(text):
+                return
             should_exit = self.app._handle_slash(text)
             if should_exit:
                 self.running = False
@@ -3365,6 +3382,7 @@ class _LiveTerminal:
             self.app._write_panel("error", str(exc), ERROR_STYLE)
             self._draw_prompt()
             return
+        self.app._cleared_empty_screen_active = False
         self.app._write_block(
             self.app._user_display_text(
                 text,
@@ -3386,6 +3404,11 @@ class _LiveTerminal:
         self.app.messages.append(Message(role="user", content=content))
         self.app._persist_session()
         self._start_worker()
+        self._draw_prompt()
+
+    def _redraw_cleared_session_screen(self) -> None:
+        self.app._write_cleared_session_screen()
+        self._reset_prompt_state()
         self._draw_prompt()
 
     def _submit_input_hint_selection(self) -> bool:
@@ -3464,7 +3487,7 @@ class _LiveTerminal:
             self.cursor = 0
             self.pasted_ranges = []
             self.pending_user_inputs.append(text)
-        if self.pending_user_inputs:
+        if self.pending_user_inputs or self.turn_followup_user_inputs:
             self._interrupt_and_send_queued()
         else:
             self._interrupt_current_turn()
@@ -3500,10 +3523,11 @@ class _LiveTerminal:
 
     def _append_pending_user_message(self, *, render: bool) -> None:
         interrupted = self.interrupted_user_inputs
-        pending = self.pending_user_inputs
+        pending = [*self.pending_user_inputs, *self.turn_followup_user_inputs]
         monitor_pending = self.pending_monitor_inputs
         self.interrupted_user_inputs = []
         self.pending_user_inputs = []
+        self.turn_followup_user_inputs = []
         self.pending_monitor_inputs = []
         prepared_pending, attachment_blocks = self._prepare_pending_user_inputs(
             pending,
@@ -3524,7 +3548,10 @@ class _LiveTerminal:
         self.app._persist_session()
 
     def _interrupt_and_send_queued(self) -> None:
-        if not self.streaming or not self.pending_user_inputs:
+        if (
+            not self.streaming
+            or not (self.pending_user_inputs or self.turn_followup_user_inputs)
+        ):
             return
         self.active_turn_id += 1
         self._clear_stream_buffers()
@@ -3541,9 +3568,10 @@ class _LiveTerminal:
         self._draw_prompt()
 
     def _append_interrupted_user_message(self, *, render: bool) -> None:
-        pending = self.pending_user_inputs
+        pending = [*self.pending_user_inputs, *self.turn_followup_user_inputs]
         monitor_pending = self.pending_monitor_inputs
         self.pending_user_inputs = []
+        self.turn_followup_user_inputs = []
         self.pending_monitor_inputs = []
         interrupted = [*self.interrupted_user_inputs, *self._take_trailing_text_user_message()]
         self.interrupted_user_inputs = []
@@ -3591,6 +3619,31 @@ class _LiveTerminal:
             if render:
                 self.app._write_block(self.app._user_display_text(text, content), USER_STYLE)
         return prepared_pending, attachment_blocks
+
+    def _handle_live_queue_command(self, text: str) -> bool:
+        cmd, _, rest = text.partition(" ")
+        if cmd != "/queue":
+            return False
+        queued = rest.strip()
+        if not queued:
+            self.app._write_panel(
+                "error",
+                "Usage: /queue <message>",
+                ERROR_STYLE,
+            )
+            self._draw_prompt()
+            return True
+        if not self.streaming:
+            self.app._write_panel(
+                "error",
+                "/queue is only available while an assistant turn is streaming.",
+                ERROR_STYLE,
+            )
+            self._draw_prompt()
+            return True
+        self.turn_followup_user_inputs.append(queued)
+        self._draw_prompt()
+        return True
 
     def _take_trailing_text_user_message(self) -> list[str]:
         if not self.app.messages or self.app.messages[-1].role != "user":
@@ -3753,29 +3806,42 @@ class _LiveTerminal:
                 self.app._write_worked_duration(self.turn_started_at)
                 self.turn_started_at = None
             return
-        interrupted_texts = self.interrupted_user_inputs
-        pending_texts = self.pending_user_inputs
         pending_monitor_texts = self.pending_monitor_inputs
-        prepared_pending, attachment_blocks = self._prepare_pending_user_inputs(
-            pending_texts,
-            render=True,
-        )
-        if interrupted_texts:
-            user_blocks = interrupted_user_text_blocks(interrupted_texts, prepared_pending)
-        else:
-            user_blocks = queued_user_text_blocks(prepared_pending)
-        pending = [
-            *user_blocks,
-            *attachment_blocks,
-            *(TextBlock(text=text) for text in pending_monitor_texts),
-        ]
-        self.interrupted_user_inputs = []
-        self.pending_user_inputs = []
-        self.pending_monitor_inputs = []
         if has_tool_uses:
+            pending_texts = self.pending_user_inputs
+            prepared_pending, attachment_blocks = self._prepare_pending_user_inputs(
+                pending_texts,
+                render=True,
+            )
+            pending = [
+                *queued_user_text_blocks(prepared_pending),
+                *attachment_blocks,
+                *(TextBlock(text=text) for text in pending_monitor_texts),
+            ]
+            self.pending_user_inputs = []
+            self.pending_monitor_inputs = []
             followup_content = [*tool_results, *pending]
             continue_running = self.app._append_followup_user(followup_content)
         else:
+            interrupted_texts = self.interrupted_user_inputs
+            pending_texts = [*self.pending_user_inputs, *self.turn_followup_user_inputs]
+            prepared_pending, attachment_blocks = self._prepare_pending_user_inputs(
+                pending_texts,
+                render=True,
+            )
+            if interrupted_texts:
+                user_blocks = interrupted_user_text_blocks(interrupted_texts, prepared_pending)
+            else:
+                user_blocks = queued_user_text_blocks(prepared_pending)
+            pending = [
+                *user_blocks,
+                *attachment_blocks,
+                *(TextBlock(text=text) for text in pending_monitor_texts),
+            ]
+            self.interrupted_user_inputs = []
+            self.pending_user_inputs = []
+            self.turn_followup_user_inputs = []
+            self.pending_monitor_inputs = []
             step = build_turn_step(
                 response,
                 pending_user_blocks=pending,
@@ -3952,16 +4018,28 @@ class _LiveTerminal:
             for text in self.interrupted_user_inputs:
                 line = f"  ↳ {_strip_control(text)}"
                 rows.append(_styled_terminal_line(line, STATUS_STYLE, width))
+        queued_image_index = 1
         if self.pending_user_inputs:
             title = " Messages to be submitted after next tool call"
             hint = " (press esc to interrupt and send immediately)"
             rows.append(_styled_terminal_line(title, STATUS_STYLE, width))
             rows.append(_styled_terminal_line(hint, STATUS_STYLE, width))
-            image_index = 1
             for text in self.pending_user_inputs:
-                pending_preview, image_index = _image_placeholder_text(
+                pending_preview, queued_image_index = _image_placeholder_text(
                     text,
-                    image_index_start=image_index,
+                    image_index_start=queued_image_index,
+                )
+                line = f"  ↳ {_strip_control(pending_preview)}"
+                rows.append(_styled_terminal_line(line, STATUS_STYLE, width))
+        if self.turn_followup_user_inputs:
+            title = " Messages to be submitted after assistant turn completes"
+            hint = " (press esc to interrupt and send immediately)"
+            rows.append(_styled_terminal_line(title, STATUS_STYLE, width))
+            rows.append(_styled_terminal_line(hint, STATUS_STYLE, width))
+            for text in self.turn_followup_user_inputs:
+                pending_preview, queued_image_index = _image_placeholder_text(
+                    text,
+                    image_index_start=queued_image_index,
                 )
                 line = f"  ↳ {_strip_control(pending_preview)}"
                 rows.append(_styled_terminal_line(line, STATUS_STYLE, width))

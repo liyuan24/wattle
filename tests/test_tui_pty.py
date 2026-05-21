@@ -404,6 +404,26 @@ def test_pty_dragged_image_uses_anchor_while_queued_and_after_finish(tmp_path: P
         assert str(image) not in screen_text
 
 
+def test_pty_queue_command_renders_end_turn_followup_panel(tmp_path: Path) -> None:
+    with PtySession.spawn_python(
+        _slow_wattle_child_code(first_delay=1.5, later_delay=0.1),
+        cwd=tmp_path,
+        cols=100,
+        rows=30,
+    ) as session:
+        session.read_until("press esc to interrupt", timeout=3)
+        session.write("/queue after the full turn\n")
+        session.read_until(
+            "Messages to be submitted after assistant turn completes",
+            timeout=3,
+        )
+        session.read_until("after the full turn", timeout=3)
+
+        screen_text = session.screen.text()
+        assert "Messages to be submitted after next tool call" not in screen_text
+        assert "after the full turn" in screen_text
+
+
 def test_pty_dragged_image_uses_anchor_in_active_input(tmp_path: Path) -> None:
     image = tmp_path / "dragged image.png"
     image.write_bytes(b"fake-png")
@@ -599,6 +619,20 @@ def test_pty_clear_redraws_clean_session_screen(tmp_path: Path) -> None:
         assert "done 1" not in screen_text
         assert "Conversation cleared." not in screen_text
 
+        session.write("draft")
+        session.read_until("draft", timeout=3)
+        session.resize(cols=120, rows=42)
+        session.read_for(0.35)
+
+        resized_screen_text = session.screen.text()
+        assert "Wattle Agent" in resized_screen_text
+        assert "Last session usage: last context: 10 tok" in resized_screen_text
+        assert "draft" in resized_screen_text
+        assert "first" not in resized_screen_text
+        assert "done 1" not in resized_screen_text
+        assert session.raw_output.count("\x1b[H\x1b[2J\x1b[H") >= 2
+
+        session.write("\x15")
         session.write("second\n")
         session.read_until("done 2", timeout=3)
         assert "done 2" in session.screen.text()
