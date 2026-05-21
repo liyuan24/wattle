@@ -4052,7 +4052,10 @@ class _LiveTerminal:
                 parts.append(f"\x1b[{self.prompt_cursor_line_index}A")
             parts.append("\r")
         else:
-            parts.append(self._clear_prompt_sequence(force_reflow_clear=force_reflow_clear))
+            if force_reflow_clear:
+                self._redraw_visible_screen_after_resize()
+            else:
+                parts.append(self._clear_prompt_sequence())
             parts.append("\x1b[?25l")
         parts.append("\n".join(frame.rows))
         self.prompt_lines = len(frame.rows)
@@ -4135,6 +4138,16 @@ class _LiveTerminal:
             parts.append(f"\x1b[{column}C")
         parts.append("\x1b[?25h")
         return "".join(parts)
+
+    def _redraw_visible_screen_after_resize(self) -> None:
+        self._reset_prompt_state()
+        self.app._write(VISIBLE_SCREEN_CLEAR)
+        self.app._write_welcome_card()
+        for index, message in enumerate(self.app.messages):
+            if index:
+                self.app._write_separator()
+            self.app._write_history_message(message)
+        self.app._last_transcript_was_separator = False
 
     def _clear_prompt(self) -> None:
         sequence = self._clear_prompt_sequence()
