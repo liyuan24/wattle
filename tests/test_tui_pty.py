@@ -411,6 +411,7 @@ def _research_child_code() -> str:
                     yield ToolUseDelta(id="read_1", name="read", partial_json=None)
                     yield ToolUseDelta(id="read_2", name="read", partial_json=None)
                     yield ToolUseDelta(id="read_3", name="read", partial_json=None)
+                    yield ToolUseDelta(id="read_4", name="read", partial_json=None)
                     yield StreamComplete(
                         CompletionResponse(
                             content=[
@@ -428,6 +429,27 @@ def _research_child_code() -> str:
                                     id="read_3",
                                     name="read",
                                     input={"path": "third.txt"},
+                                ),
+                                ToolUseBlock(
+                                    id="read_4",
+                                    name="read",
+                                    input={"path": "notes.txt"},
+                                ),
+                            ],
+                            stop_reason="tool_use",
+                            usage={},
+                        )
+                    )
+                    return
+                if self.calls == 2:
+                    yield ToolUseDelta(id="read_5", name="read", partial_json=None)
+                    yield StreamComplete(
+                        CompletionResponse(
+                            content=[
+                                ToolUseBlock(
+                                    id="read_5",
+                                    name="read",
+                                    input={"path": "notes.txt"},
                                 ),
                             ],
                             stop_reason="tool_use",
@@ -475,6 +497,7 @@ def test_pty_research_tool_calls_render_aggregate(tmp_path: Path) -> None:
         session.read_until("done", timeout=4)
 
         screen_text = session.screen.text()
+        assert screen_text.count("Read notes.txt") == 1
         assert "Read notes.txt" in screen_text
         assert "Read other.txt" in screen_text
         assert "Read third.txt" in screen_text
@@ -723,6 +746,31 @@ def test_pty_idle_resize_keeps_statusline_on_terminal_background(tmp_path: Path)
         assert all(background is None for background in backgrounds)
 
 
+def test_pty_resize_does_not_replay_welcome_or_transcript(tmp_path: Path) -> None:
+    with PtySession.spawn_python(
+        _slow_wattle_child_code(first_delay=0.1, later_delay=0.1, prompt=None),
+        cwd=tmp_path,
+        cols=120,
+        rows=40,
+    ) as session:
+        session.read_until(">", timeout=3)
+        session.write("hello\n")
+        session.read_until("done 1", timeout=3)
+        session.read_until("Worked for", timeout=3)
+        session.read_until("gpt-5.5 |", timeout=3)
+        before_resize_output_length = len(session.raw_output)
+
+        session.resize(cols=80, rows=40)
+        session.read_for(0.35)
+
+        resize_output = session.raw_output[before_resize_output_length:]
+        assert "\x1b[H\x1b[2J\x1b[H" not in resize_output
+        assert "Wattle Agent" not in resize_output
+        assert "done 1" not in resize_output
+        assert session.screen.text().count("Wattle Agent") == 1
+        assert session.screen.text().count(" done 1") == 1
+
+
 def test_pty_clear_redraws_clean_session_screen(tmp_path: Path) -> None:
     with PtySession.spawn_python(
         _clear_wattle_child_code(),
@@ -737,6 +785,7 @@ def test_pty_clear_redraws_clean_session_screen(tmp_path: Path) -> None:
 
         session.write("/clear\n")
         session.read_until("Last session usage", timeout=3)
+        assert "\x1b[3J" in session.raw_output
 
         screen_text = session.screen.text()
         assert "Wattle Agent" in screen_text

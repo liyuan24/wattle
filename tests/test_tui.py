@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 
 from wattle import auth, cli, session, settings, tui
+from wattle.command_summary import CommandSummary, CommandSummaryKind
 from wattle.models import ModelChoice
 from wattle.providers import (
     CompletionRequest,
@@ -1461,6 +1462,10 @@ def test_live_prompt_box_switches_to_type_box_when_streaming_with_input() -> Non
     assert visible.index(" > queued text") < visible.index(
         "press Enter to queue after next tool call"
     )
+    assert visible.index("press Enter to queue after next tool call") > visible.index(
+        " > queued text"
+    )
+    assert "gpt-5.5 |" not in visible
 
 
 def test_live_prompt_cursor_overlays_character_without_shifting_text() -> None:
@@ -3245,6 +3250,39 @@ def test_research_tool_results_aggregate_consecutive_passive_calls() -> None:
     assert "read ok - pyproject.toml" not in rendered
 
 
+def test_research_results_dedupe_repeated_adjacent_summaries() -> None:
+    out = _TTYBuffer()
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+    summary = CommandSummary(CommandSummaryKind.READ_FILE, "src/wattle/tui/__init__.py")
+
+    app._write_research_result([summary])
+    app._write_research_result([summary])
+
+    rendered = _strip_ansi(out.getvalue())
+    assert rendered.count("Researched") == 1
+    assert rendered.count("Read src/wattle/tui/__init__.py") == 1
+
+
+def test_research_dedupe_resets_after_non_research_tool_result() -> None:
+    out = _TTYBuffer()
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+    summary = CommandSummary(CommandSummaryKind.READ_FILE, "src/wattle/tui/__init__.py")
+
+    app._write_research_result([summary])
+    app._write_tool_result(
+        ToolUseBlock(id="call_1", name="bash", input={"command": "python --version"}),
+        ToolResultBlock(tool_use_id="call_1", content="Python 3.12.11"),
+    )
+    app._write_research_result([summary])
+
+    rendered = _strip_ansi(out.getvalue())
+    assert rendered.count("Researched") == 2
+    assert rendered.count("Read src/wattle/tui/__init__.py") == 2
+    assert "Ran python --version" in rendered
+
+
 def test_research_aggregate_flushes_before_unknown_command() -> None:
     tool_use_response = CompletionResponse(
         content=[
@@ -4112,6 +4150,7 @@ def test_terminal_clear_redraws_card_and_resets_history() -> None:
 
     assert "first done" in out
     assert tui.VISIBLE_SCREEN_CLEAR in out
+    assert tui.TERMINAL_HISTORY_CLEAR in out
     assert "Last session usage: last context: 12 tok | input: 12 tok" in out
     assert "Conversation cleared." not in out
     assert "second done" in out

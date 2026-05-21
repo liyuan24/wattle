@@ -159,6 +159,7 @@ ESCAPE_SEQUENCE_TIMEOUT_SECONDS = 0.05
 KEYBOARD_ENHANCEMENT_ENABLE = "\x1b[>1u\x1b[>4;2m"
 KEYBOARD_ENHANCEMENT_DISABLE = "\x1b[<u\x1b[>4m"
 VISIBLE_SCREEN_CLEAR = "\x1b[H\x1b[2J\x1b[H"
+TERMINAL_HISTORY_CLEAR = "\x1b[3J"
 SHIFT_ENTER_SEQUENCES = (
     "\x1b[13;2u",
     "\x1b[13;2~",
@@ -1742,6 +1743,7 @@ class WattleApp:
         self._compaction_state: RuntimeCompaction | None = None
         self._cleared_empty_screen_active = False
         self._clear_screen_notice: str | None = None
+        self._research_run_seen: set[CommandSummary] = set()
 
         if state is not None:
             self._restore_state(state)
@@ -2241,10 +2243,16 @@ class WattleApp:
             return ""
 
     def _write_research_result(self, summaries: list[CommandSummary]) -> None:
-        if not summaries:
+        unique_summaries: list[CommandSummary] = []
+        for summary in summaries:
+            if summary in self._research_run_seen:
+                continue
+            self._research_run_seen.add(summary)
+            unique_summaries.append(summary)
+        if not unique_summaries:
             return
         self._last_transcript_was_separator = False
-        lines = _research_lines(summaries)
+        lines = _research_lines(unique_summaries)
         if not self._styles_enabled():
             self._write_line(f"{TOOL_MARKER} Researched")
             self._write_line(f"  └ {lines[0]}")
@@ -2265,6 +2273,7 @@ class WattleApp:
         block: ToolUseBlock,
         result: ToolResultBlock,
     ) -> None:
+        self._research_run_seen.clear()
         self._last_transcript_was_separator = False
         if result.is_error:
             return
@@ -2849,6 +2858,7 @@ class WattleApp:
     def _write_cleared_session_screen(self) -> None:
         self._last_transcript_was_separator = False
         self._write(VISIBLE_SCREEN_CLEAR)
+        self._write(TERMINAL_HISTORY_CLEAR)
         self._write_welcome_card()
         if self._clear_screen_notice is not None:
             self._write_panel("previous session", self._clear_screen_notice, STATUS_STYLE)
@@ -3127,6 +3137,7 @@ class WattleApp:
                     self._write(f"{_styled_terminal_line(content, style, width)}\n")
 
     def _write_block(self, text: str, style: str) -> None:
+        self._research_run_seen.clear()
         self._last_transcript_was_separator = False
         if not self._styles_enabled():
             if style == ASSISTANT_STYLE:
@@ -4474,11 +4485,7 @@ class _LiveTerminal:
         for line_index, line in enumerate(input_lines):
             display = f"{prefix}{line}" if line_index == 0 else f"{continuation_prefix}{line}"
             rows.append(_styled_terminal_line(display, PROMPT_STYLE, width))
-        if self.streaming and preview.strip():
-            hint = " press Enter to queue after next tool call; Tab for next turn"
-            rows.append(_styled_terminal_line(hint, PROMPT_STYLE, width))
-        else:
-            rows.append(_styled_terminal_line("", PROMPT_STYLE, width))
+        rows.append(_styled_terminal_line("", PROMPT_STYLE, width))
         model_picker_choices = self._ensure_model_picker()
         if model_picker_choices is not None:
             picker_rows = _render_model_picker_rows(
@@ -4507,7 +4514,12 @@ class _LiveTerminal:
                 )
                 rows.extend(_filled_terminal_line(row, STATUS_STYLE, width) for row in hint_rows)
             elif self.app._statusline_enabled:
-                line = f" {status}"[:line_width].ljust(line_width)
+                status_text = (
+                    "press Enter to queue after next tool call; Tab for next turn"
+                    if self.streaming and preview.strip()
+                    else status
+                )
+                line = f" {status_text}"[:line_width].ljust(line_width)
                 statusline = f"{STATUSLINE_STYLE}{_style_statusline_text(line)}{RESET}"
                 rows.append(_filled_terminal_line(statusline, STATUSLINE_STYLE, width))
         return _PromptFrame(
@@ -4542,10 +4554,10 @@ class _LiveTerminal:
                 parts.append(f"\x1b[{self.prompt_cursor_line_index}A")
             parts.append("\r")
         else:
-            if force_reflow_clear:
+            if force_reflow_clear and self.streaming:
                 self._redraw_visible_screen_after_resize()
             else:
-                parts.append(self._clear_prompt_sequence())
+                parts.append(self._clear_prompt_sequence(force_reflow_clear=force_reflow_clear))
             parts.append("\x1b[?25l")
         parts.append("\n".join(frame.rows))
         self.prompt_lines = len(frame.rows)
@@ -4632,6 +4644,7 @@ class _LiveTerminal:
     def _redraw_visible_screen_after_resize(self) -> None:
         self._reset_prompt_state()
         self.app._write(VISIBLE_SCREEN_CLEAR)
+        self.app._write(TERMINAL_HISTORY_CLEAR)
         self.app._write_welcome_card()
         for index, message in enumerate(self.app.messages):
             if index:
