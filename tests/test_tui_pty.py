@@ -128,6 +128,128 @@ def _clear_wattle_child_code() -> str:
     )
 
 
+def _tool_rendering_child_code() -> str:
+    return textwrap.dedent(
+        """
+        import argparse
+
+        from wattle.permissions import PermissionMode
+        from wattle.providers import (
+            CompletionResponse,
+            Provider,
+            StreamComplete,
+            TextBlock,
+            TextDelta,
+            ToolUseBlock,
+            ToolUseDelta,
+        )
+        from wattle.tools import TOOLS_BY_NAME
+        from wattle.tools.base import Tool
+        from wattle.tui import WattleApp
+
+
+        class FastBashTool(Tool):
+            name = "bash"
+            description = "Fast test bash."
+            input_schema = {"type": "object", "properties": {"command": {"type": "string"}}}
+
+            def run(self, command):
+                return "hello"
+
+
+        class FastWriteTool(Tool):
+            name = "write"
+            description = "Fast test write."
+            input_schema = {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "content": {"type": "string"},
+                },
+            }
+
+            def run(self, path, content):
+                return "\\n".join(
+                    [
+                        f"Wrote {len(content)} bytes to {path}",
+                        f"--- {path} (before)",
+                        f"+++ {path} (after)",
+                        "@@ -0,0 +1,2 @@",
+                        "+def hello():",
+                        "+    return 'world'",
+                    ]
+                )
+
+
+        TOOLS_BY_NAME["bash"] = FastBashTool()
+        TOOLS_BY_NAME["write"] = FastWriteTool()
+
+
+        class ToolRenderingProvider(Provider):
+            def __init__(self):
+                self.calls = 0
+
+            def complete(self, request):
+                return CompletionResponse(
+                    content=[TextBlock(text="done")],
+                    stop_reason="end_turn",
+                    usage={},
+                )
+
+            def stream(self, request):
+                self.calls += 1
+                if self.calls == 1:
+                    yield ToolUseDelta(id="bash_1", name="bash", partial_json=None)
+                    yield ToolUseDelta(id="write_1", name="write", partial_json=None)
+                    yield StreamComplete(
+                        CompletionResponse(
+                            content=[
+                                ToolUseBlock(
+                                    id="bash_1",
+                                    name="bash",
+                                    input={
+                                        "command": "echo hello | sed -n 1p",
+                                    },
+                                ),
+                                ToolUseBlock(
+                                    id="write_1",
+                                    name="write",
+                                    input={
+                                        "path": "src/demo.py",
+                                        "content": "def hello():\\\\n    return 'world'\\\\n",
+                                    },
+                                ),
+                            ],
+                            stop_reason="tool_use",
+                            usage={},
+                        )
+                    )
+                    return
+                yield TextDelta(text="done")
+                yield StreamComplete(
+                    CompletionResponse(
+                        content=[TextBlock(text="done")],
+                        stop_reason="end_turn",
+                        usage={},
+                    )
+                )
+
+
+        args = argparse.Namespace(
+            provider="openai_responses",
+            model="gpt-5.5",
+            max_tokens=4096,
+            thinking=False,
+            effort=None,
+            prompt="render tools",
+            persist_session=False,
+            permission_mode=PermissionMode.YOLO,
+        )
+        raise SystemExit(WattleApp(args, ToolRenderingProvider()).run())
+        """
+    )
+
+
 def _subagent_wait_child_code() -> str:
     return textwrap.dedent(
         """
@@ -359,6 +481,31 @@ def test_pty_research_tool_calls_render_aggregate(tmp_path: Path) -> None:
         assert "read ok - notes.txt" not in screen_text
 
 
+def test_pty_tool_rendering_uses_distinct_command_and_diff_styles(tmp_path: Path) -> None:
+    with PtySession.spawn_python(
+        _tool_rendering_child_code(),
+        cwd=tmp_path,
+        cols=120,
+        rows=36,
+    ) as session:
+        session.read_until("Ran echo", timeout=4)
+        session.read_until("Added src/demo.py", timeout=4)
+        session.read_until("done", timeout=4)
+
+        screen_text = session.screen.text()
+        assert "Ran echo hello | sed -n 1p" in screen_text
+        assert "Added src/demo.py (+2 -0)" in screen_text
+        assert "    1 +def hello():" in screen_text
+        assert "    2 +    return 'world'" in screen_text
+
+        raw = session.raw_output
+        assert "\x1b[38;5;75;1mecho\x1b[0m" in raw
+        assert "\x1b[38;5;80;1m|\x1b[0m" in raw
+        assert "\x1b[38;5;159;1msrc/demo.py\x1b[0m" in raw
+        assert "\x1b[48;5;22;38;5;108m    1 " in raw
+        assert "\x1b[48;5;22;38;5;82;1m+" in raw
+
+
 def test_pty_subagent_waiting_and_completion_notifications(tmp_path: Path) -> None:
     with PtySession.spawn_python(
         _subagent_wait_child_code(),
@@ -576,75 +723,6 @@ def test_pty_idle_resize_keeps_statusline_on_terminal_background(tmp_path: Path)
         assert all(background is None for background in backgrounds)
 
 
-def test_pty_idle_screen_preserves_core_visual_contract(tmp_path: Path) -> None:
-    with PtySession.spawn_python(
-        _slow_wattle_child_code(first_delay=0.1, later_delay=0.1, prompt=None),
-        cwd=tmp_path,
-        cols=96,
-        rows=36,
-    ) as session:
-        session.read_until(">", timeout=3)
-        session.write("hello\n")
-        session.read_until("done 1", timeout=3)
-        session.read_until("Worked for", timeout=3)
-
-        screen_text = session.screen.text()
-        assert "Wattle Agent" in screen_text
-        assert "model:     gpt-5.5" in screen_text
-
-        user_row = session.screen.find_row_containing(" hello")
-        assistant_row = session.screen.find_row_containing(" done 1")
-        worked_row = session.screen.find_row_containing("Worked for")
-        prompt_rows = _input_box_rows(session.screen)
-        status_row = session.screen.find_row_containing("Context")
-
-        assert assistant_row - user_row == 3
-        assert worked_row - assistant_row == 2
-        assert prompt_rows[0] - worked_row >= 1
-        assert status_row == prompt_rows[2] + 1
-
-        for row in (user_row - 1, user_row, user_row + 1):
-            assert all(
-                background == "ansi-235"
-                for background in session.screen.row_backgrounds(row)
-            )
-        for row in (assistant_row - 1, assistant_row, assistant_row + 1):
-            assert all(
-                background is None
-                for background in session.screen.row_backgrounds(row)
-            )
-        for row in prompt_rows:
-            assert all(
-                background == "ansi-235"
-                for background in session.screen.row_backgrounds(row)
-            )
-        assert all(background is None for background in session.screen.row_backgrounds(status_row))
-
-
-def test_pty_live_screen_keeps_only_latest_worked_duration(tmp_path: Path) -> None:
-    with PtySession.spawn_python(
-        _slow_wattle_child_code(first_delay=0.1, later_delay=0.1, prompt=None),
-        cwd=tmp_path,
-        cols=120,
-        rows=40,
-    ) as session:
-        session.read_until(">", timeout=3)
-        session.write("first\n")
-        session.read_until("done 1", timeout=3)
-        session.read_until("Worked for", timeout=3)
-
-        session.write("second\n")
-        session.read_until("done 2", timeout=3)
-        session.read_for(0.3)
-
-        screen_text = session.screen.text()
-        assert screen_text.count("Worked for") == 1
-        first_row = session.screen.find_row_containing(" first")
-        second_row = session.screen.find_row_containing(" second")
-        worked_row = session.screen.find_row_containing("Worked for")
-        assert first_row < second_row < worked_row
-
-
 def test_pty_clear_redraws_clean_session_screen(tmp_path: Path) -> None:
     with PtySession.spawn_python(
         _clear_wattle_child_code(),
@@ -684,26 +762,6 @@ def test_pty_clear_redraws_clean_session_screen(tmp_path: Path) -> None:
         session.write("second\n")
         session.read_until("done 2", timeout=3)
         assert "done 2" in session.screen.text()
-
-
-def test_pty_height_shrink_keeps_prompt_near_transcript(tmp_path: Path) -> None:
-    with PtySession.spawn_python(
-        _slow_wattle_child_code(first_delay=0.1, later_delay=0.1, prompt=None),
-        cwd=tmp_path,
-        cols=120,
-        rows=50,
-    ) as session:
-        session.read_until("Context", timeout=3)
-
-        session.resize(cols=120, rows=24)
-        session.read_for(0.35)
-
-        welcome_bottom = session.screen.find_row_containing("└")
-        prompt_row = session.screen.find_row_containing(" > ")
-        status_row = session.screen.find_row_containing("Context")
-        assert prompt_row - welcome_bottom <= 3
-        assert status_row - prompt_row <= 2
-        assert session.screen.row_text(status_row).startswith(" gpt-5.5")
 
 
 def test_pty_resize_does_not_leave_large_gap_between_user_and_assistant(

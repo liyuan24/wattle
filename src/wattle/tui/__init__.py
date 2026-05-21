@@ -216,6 +216,8 @@ TOOL_PREVIEW_STYLE = "\x1b[38;5;245m"
 QUIET_SUCCESS_TOOL_NAMES = frozenset({"wait_agent", "send_input", "close_agent"})
 DIFF_ADD_STYLE = "\x1b[48;5;22;38;5;231m"
 DIFF_DELETE_STYLE = "\x1b[48;5;52;38;5;231m"
+DIFF_ADD_COUNT_STYLE = "\x1b[38;5;82;1m"
+DIFF_DELETE_COUNT_STYLE = "\x1b[38;5;203;1m"
 DIFF_META_STYLE = "\x1b[38;5;245m"
 DIFF_ADD_LINE_NUMBER_STYLE = "\x1b[48;5;22;38;5;108m"
 DIFF_DELETE_LINE_NUMBER_STYLE = "\x1b[48;5;52;38;5;131m"
@@ -553,7 +555,7 @@ def _render_diff_row(kind: str, line: str, *, width: int) -> str:
         f"{marker_style}{marker}"
         f"{_render_python_syntax(code, base_style=code_style)}"
     )
-    return _filled_terminal_line(rendered, code_style, width)
+    return f"\r\x1b[?7l\x1b[0m\x1b[2K{rendered}{code_style}\x1b[K{RESET}\x1b[?7h"
 
 
 def _suppress_successful_tool_result(
@@ -2291,7 +2293,14 @@ class WattleApp:
 
         marker_style = ERROR_TEXT_STYLE if result.is_error else TOOL_MARKER_STYLE
         title_style = ERROR_TEXT_STYLE if result.is_error else TOOL_TITLE_STYLE
-        self._write(f"{marker_style}{TOOL_MARKER}{RESET} {title_style}{title}{RESET}\n")
+        if block.name == "bash":
+            command = _tool_arg(block, "command", "<missing command>")
+            rendered_title = (
+                f"{title_style}Ran{RESET} {_render_shell_command(command)}"
+            )
+        else:
+            rendered_title = f"{title_style}{title}{RESET}"
+        self._write(f"{marker_style}{TOOL_MARKER}{RESET} {rendered_title}\n")
         for line in preview:
             self._write(f"{TOOL_PREVIEW_STYLE}  {line}{RESET}\n")
 
@@ -2331,26 +2340,19 @@ class WattleApp:
             return
 
         verb_path = title.rsplit(" (", 1)[0]
+        verb, _, title_path = verb_path.partition(" ")
         self._write(
             f"{TOOL_MARKER_STYLE}{TOOL_MARKER}{RESET} "
-            f"{TOOL_TITLE_STYLE}{verb_path} ({RESET}"
-            f"{DIFF_ADD_STYLE}+{added}{RESET} "
-            f"{DIFF_DELETE_STYLE}-{deleted}{RESET}"
+            f"{TOOL_TITLE_STYLE}{verb} {RESET}"
+            f"{COMMAND_PATH_STYLE}{title_path}{RESET}"
+            f"{TOOL_TITLE_STYLE} ({RESET}"
+            f"{DIFF_ADD_COUNT_STYLE}+{added}{RESET} "
+            f"{DIFF_DELETE_COUNT_STYLE}-{deleted}{RESET}"
             f"{TOOL_TITLE_STYLE}){RESET}\n"
         )
         width = self._terminal_width()
         for kind, line in rows:
-            if kind == "add":
-                style = DIFF_ADD_STYLE
-            elif kind == "delete":
-                style = DIFF_DELETE_STYLE
-            else:
-                style = DIFF_META_STYLE
-            clipped = line if len(line) <= width else line[: width - 3] + "..."
-            if kind in {"add", "delete"}:
-                self._write(f"{_styled_terminal_line(clipped, style, width)}\n")
-            else:
-                self._write(f"{style}{clipped}{RESET}\n")
+            self._write(f"{_render_diff_row(kind, line, width=width)}\n")
 
     def _write_separator(self) -> None:
         if self._last_transcript_was_separator:

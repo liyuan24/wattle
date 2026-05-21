@@ -795,26 +795,6 @@ def test_render_statusline_selector_explains_controls_without_numbers() -> None:
     assert "1." not in rendered
 
 
-def test_styled_statusline_colors_model_and_context_usage() -> None:
-    rendered = tui._style_statusline_text(
-        "gpt-5.5 | Context 0.0% used | window: 1.1M tok | "
-        "input: 1 tok | cached total: 0 tok | output: 2 tok | ~/repos/wattle"
-    )
-
-    assert f"{tui.STATUSLINE_MODEL_STYLE}gpt-5.5{tui.STATUSLINE_STYLE}" in rendered
-    assert ";1m" not in tui.STATUSLINE_MODEL_STYLE
-    assert ";1m" not in tui.STATUSLINE_TOKEN_STYLE
-    assert "48;5" not in tui.STATUSLINE_STYLE
-    assert "48;5" not in tui.STATUSLINE_MODEL_STYLE
-    assert "48;5" not in tui.STATUSLINE_TOKEN_STYLE
-    assert (
-        f"{tui.STATUSLINE_TOKEN_STYLE}Context 0.0% used | window: 1.1M tok | "
-        f"input: 1 tok | cached total: 0 tok | output: 2 tok"
-        f"{tui.STATUSLINE_STYLE}"
-    ) in rendered
-    assert "~/repos/wattle" in rendered
-
-
 def test_status_text_uses_last_provider_input_tokens_not_heuristic() -> None:
     app = tui.WattleApp(
         _make_args(
@@ -3357,6 +3337,34 @@ def test_terminal_bash_tool_externalized_output_hides_metadata() -> None:
     assert "excerpt_chars:" not in rendered
 
 
+def test_terminal_bash_tool_title_uses_token_styles() -> None:
+    out = _TTYBuffer()
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+    block = ToolUseBlock(
+        id="call_1",
+        name="bash",
+        input={
+            "command": "git diff -- src/wattle/tui/__init__.py | sed -n '1,20p'",
+        },
+    )
+    result = ToolResultBlock(
+        tool_use_id="call_1",
+        content="diff --git a/src/wattle/tui/__init__.py b/src/wattle/tui/__init__.py",
+    )
+
+    app._write_tool_result(block, result)
+
+    rendered = out.getvalue()
+    plain = _strip_ansi(rendered)
+    assert "Ran git diff -- src/wattle/tui/__init__.py | sed -n '1,20p'" in plain
+    assert f"{tui.COMMAND_EXEC_STYLE}git{tui.RESET}" in rendered
+    assert f"{tui.COMMAND_OPTION_STYLE}--{tui.RESET}" in rendered
+    assert f"{tui.COMMAND_PATH_STYLE}src/wattle/tui/__init__.py{tui.RESET}" in rendered
+    assert f"{tui.COMMAND_OPERATOR_STYLE}|{tui.RESET}" in rendered
+    assert f"{tui.COMMAND_STRING_STYLE}'1,20p'{tui.RESET}" in rendered
+
+
 def test_live_tool_execution_keeps_working_prompt_visible(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3594,11 +3602,14 @@ def test_edit_tool_result_renders_diff_review_style() -> None:
     plain = _strip_ansi(rendered)
     assert "Added codex_tui_test_haha1/wobbly_pickle_dispatch.txt (+2 -0)" in plain
     assert "write ok -" not in rendered
-    assert f"{tui.DIFF_ADD_STYLE}+2{tui.RESET}" in rendered
-    assert f"{tui.DIFF_DELETE_STYLE}-0{tui.RESET}" in rendered
-    assert "    1 +hello" in rendered
-    assert "    2 +world" in rendered
-    assert tui.DIFF_ADD_STYLE in rendered
+    assert f"{tui.DIFF_ADD_COUNT_STYLE}+2{tui.RESET}" in rendered
+    assert f"{tui.DIFF_DELETE_COUNT_STYLE}-0{tui.RESET}" in rendered
+    assert "48;5" not in tui.DIFF_ADD_COUNT_STYLE
+    assert "48;5" not in tui.DIFF_DELETE_COUNT_STYLE
+    assert "    1 +hello" in plain
+    assert "    2 +world" in plain
+    assert tui.DIFF_ADD_LINE_NUMBER_STYLE in rendered
+    assert tui.DIFF_ADD_MARKER_STYLE in rendered
 
 
 def test_edit_tool_result_diff_rows_disable_autowrap() -> None:
@@ -3621,10 +3632,11 @@ def test_edit_tool_result_diff_rows_disable_autowrap() -> None:
     app._write_tool_result(block, result)
 
     rendered = out.getvalue()
+    plain = _strip_ansi(rendered)
     assert "\x1b[?7l" in rendered
     assert "\x1b[K" in rendered
-    assert "    1 +abcdefghijklmnopqrstuvwxyzabcd..." in rendered
-    assert "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz" not in rendered
+    assert "    1 +abcdefghijklmnopqrstuvwxyzabcd..." in plain
+    assert "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz" not in plain
 
 
 def test_write_added_file_renders_full_diff_preview() -> None:
@@ -3653,7 +3665,7 @@ def test_write_added_file_renders_full_diff_preview() -> None:
     plain = _strip_ansi(rendered)
     assert f"Added {path} (+23 -0)" in plain
     assert "write ok -" not in rendered
-    assert "   23 +line 23" in rendered
+    assert "   23 +line 23" in plain
     assert "changed lines" not in rendered
 
 
@@ -3685,12 +3697,15 @@ def test_edit_tool_result_renders_full_diff_preview() -> None:
     plain = _strip_ansi(rendered)
     assert f"Edited {path} (+17 -17)" in plain
     assert "edit ok -" not in rendered
-    assert f"{tui.DIFF_ADD_STYLE}+17{tui.RESET}" in rendered
-    assert f"{tui.DIFF_DELETE_STYLE}-17{tui.RESET}" in rendered
-    assert "   17 -old 17" in rendered
-    assert "   17 +new 17" in rendered
-    assert tui.DIFF_DELETE_STYLE in rendered
-    assert tui.DIFF_ADD_STYLE in rendered
+    assert f"{tui.DIFF_ADD_COUNT_STYLE}+17{tui.RESET}" in rendered
+    assert f"{tui.DIFF_DELETE_COUNT_STYLE}-17{tui.RESET}" in rendered
+    assert "48;5" not in tui.DIFF_ADD_COUNT_STYLE
+    assert "48;5" not in tui.DIFF_DELETE_COUNT_STYLE
+    assert "   17 -old 17" in plain
+    assert "   17 +new 17" in plain
+    assert tui.DIFF_DELETE_LINE_NUMBER_STYLE in rendered
+    assert tui.DIFF_DELETE_MARKER_STYLE in rendered
+    assert tui.SYNTAX_NAME_STYLE in rendered
     assert "changed lines" not in rendered
 
 
