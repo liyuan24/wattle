@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from datetime import date
 from pathlib import Path
 
@@ -50,6 +51,9 @@ def test_build_system_prompt_uses_wattle_default_without_pi_docs(tmp_path: Path)
     assert "first find the image path using available file-search tools" in prompt
     assert "Use update_plan for nontrivial multi-step work" in prompt
     assert "Keep exactly one item in_progress at a time" in prompt
+    assert "first identify and review the referenced content" in prompt
+    assert "whether it is in a file or earlier conversation" in prompt
+    assert "do not use update_plan as a substitute for reading or understanding the plan" in prompt
     assert "Each old_text must match exactly and uniquely" in prompt
     assert "send them together in one edit call with the edits array" in prompt
     assert "Merge nearby or overlapping changes into one replacement" in prompt
@@ -60,14 +64,15 @@ def test_build_system_prompt_uses_wattle_default_without_pi_docs(tmp_path: Path)
 def test_system_prompt_preserves_context_and_runtime_metadata(tmp_path: Path) -> None:
     prompt = build_system_prompt(
         tools_by_name={},
-        context_files=[ContextFile(path=tmp_path / "WATTLE.md", content="Project rules.")],
+        context_files=[ContextFile(path=tmp_path / "AGENTS.md", content="Project rules.")],
         cwd=tmp_path,
         current_date=date(2026, 5, 10),
     )
 
     assert prompt.startswith("I'm Wattle, an AI coding assistant.")
     assert "# Project Context" in prompt
-    assert "Project rules." in prompt
+    assert f"# AGENTS.md instructions for {tmp_path}" in prompt
+    assert "<INSTRUCTIONS>\nProject rules.\n</INSTRUCTIONS>" in prompt
     assert "Use update_plan for nontrivial multi-step work" not in prompt
     assert "Current date: 2026-05-10" in prompt
 
@@ -84,17 +89,193 @@ def test_read_only_mode_adds_read_only_guideline(tmp_path: Path) -> None:
     assert "Read-only mode is active" in prompt
 
 
-def test_load_context_files_reads_user_and_project_locations(
-    tmp_path: Path,
-) -> None:
+def _touch_git(path: Path) -> None:
+    (path / ".git").mkdir()
+
+
+def test_agents_md_in_project_root_is_loaded(tmp_path: Path) -> None:
     user_dir = tmp_path / "home" / ".wattle"
-    project = tmp_path / "repo" / "pkg"
+    repo = tmp_path / "repo"
+    app = repo / "pkg" / "app"
+    app.mkdir(parents=True)
+    _touch_git(repo)
+    (repo / "AGENTS.md").write_text("Root rules.")
+
+    files = load_context_files(cwd=app, user_dir=user_dir)
+
+    assert [(file.path, file.content) for file in files] == [(repo / "AGENTS.md", "Root rules.")]
+
+
+def test_agents_override_wins_over_same_directory_agents_md(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _touch_git(repo)
+    (repo / "AGENTS.md").write_text("Default rules.")
+    (repo / "AGENTS.override.md").write_text("Override rules.")
+
+    files = load_context_files(cwd=repo, user_dir=tmp_path / "missing")
+
+    assert [(file.path.name, file.content) for file in files] == [
+        ("AGENTS.override.md", "Override rules.")
+    ]
+
+
+def test_invalid_override_falls_back_to_agents_md(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _touch_git(repo)
+    (repo / "AGENTS.override.md").mkdir()
+    (repo / "AGENTS.md").write_text("Default rules.")
+
+    files = load_context_files(cwd=repo, user_dir=tmp_path / "missing")
+
+    assert [(file.path.name, file.content) for file in files] == [("AGENTS.md", "Default rules.")]
+
+
+def test_nested_docs_concatenate_root_first_child_second(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    child = repo / "lib"
+    child.mkdir(parents=True)
+    _touch_git(repo)
+    (repo / "AGENTS.md").write_text("Root rules.")
+    (child / "AGENTS.md").write_text("Child rules.")
+
+    files = load_context_files(cwd=child, user_dir=tmp_path / "missing")
+
+    assert [file.content for file in files] == ["Root rules.", "Child rules."]
+
+
+def test_child_override_does_not_suppress_parent_agents_md(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    child = repo / "lib"
+    child.mkdir(parents=True)
+    _touch_git(repo)
+    (repo / "AGENTS.md").write_text("Root rules.")
+    (child / "AGENTS.md").write_text("Child default rules.")
+    (child / "AGENTS.override.md").write_text("Child override rules.")
+
+    files = load_context_files(cwd=child, user_dir=tmp_path / "missing")
+
+    assert [(file.path.name, file.content) for file in files] == [
+        ("AGENTS.md", "Root rules."),
+        ("AGENTS.override.md", "Child override rules."),
+    ]
+
+
+def test_no_git_marker_only_checks_cwd(tmp_path: Path) -> None:
+    parent = tmp_path / "parent"
+    child = parent / "child"
+    child.mkdir(parents=True)
+    (parent / "AGENTS.md").write_text("Parent rules.")
+    (child / "AGENTS.md").write_text("Child rules.")
+
+    files = load_context_files(cwd=child, user_dir=tmp_path / "missing")
+
+    assert [(file.path, file.content) for file in files] == [(child / "AGENTS.md", "Child rules.")]
+
+
+def test_directories_special_files_and_empty_files_are_ignored(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    child = repo / "child"
+    child.mkdir(parents=True)
+    _touch_git(repo)
+    (repo / "AGENTS.md").mkdir()
+    (child / "AGENTS.md").write_text("   \n\t")
+
+    fifo_path = child / "AGENTS.override.md"
+    if hasattr(os, "mkfifo"):
+        os.mkfifo(fifo_path)
+
+    files = load_context_files(cwd=child, user_dir=tmp_path / "missing")
+
+    assert files == []
+
+
+def test_byte_cap_truncates_safely(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _touch_git(repo)
+    (repo / "AGENTS.md").write_text("abcdef")
+
+    files = load_context_files(cwd=repo, user_dir=tmp_path / "missing", byte_budget=3)
+
+    assert len(files) == 1
+    assert files[0].content.startswith("abc")
+    assert "truncated due to byte budget" in files[0].content
+
+
+def test_loaded_context_includes_source_path(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _touch_git(repo)
+    (repo / "AGENTS.md").write_text("Project rules.")
+
+    prompt = build_system_prompt(
+        tools_by_name={},
+        cwd=repo,
+        context_files=load_context_files(cwd=repo, user_dir=tmp_path / "missing"),
+        current_date=date(2026, 5, 10),
+    )
+
+    assert f"# AGENTS.md instructions for {repo}" in prompt
+    assert "<INSTRUCTIONS>" in prompt
+
+
+def test_project_codex_agents_md_is_not_loaded_by_default(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    codex = repo / ".codex"
+    codex.mkdir(parents=True)
+    _touch_git(repo)
+    (codex / "AGENTS.md").write_text("Codex subdir rules.")
+
+    files = load_context_files(cwd=repo, user_dir=tmp_path / "missing")
+
+    assert files == []
+
+
+def test_wattle_md_is_ignored_even_when_present(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _touch_git(repo)
+    (repo / "WATTLE.md").write_text("Wattle rules.")
+
+    files = load_context_files(cwd=repo, user_dir=tmp_path / "missing")
+
+    assert files == []
+
+
+def test_when_wattle_md_and_agents_md_exist_only_agents_md_appears(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _touch_git(repo)
+    (repo / "WATTLE.md").write_text("Wattle rules.")
+    (repo / "AGENTS.md").write_text("Agents rules.")
+
+    prompt = build_system_prompt(
+        tools_by_name={},
+        cwd=repo,
+        context_files=load_context_files(cwd=repo, user_dir=tmp_path / "missing"),
+        current_date=date(2026, 5, 10),
+    )
+
+    assert "Agents rules." in prompt
+    assert "Wattle rules." not in prompt
+    assert "WATTLE.md" not in prompt
+
+
+def test_global_agents_load_before_project_agents(tmp_path: Path) -> None:
+    user_dir = tmp_path / "home" / ".wattle"
+    repo = tmp_path / "repo"
     user_dir.mkdir(parents=True)
-    (user_dir / "WATTLE.md").write_text("User rules.")
-    (tmp_path / "repo" / ".wattle").mkdir(parents=True)
-    (tmp_path / "repo" / ".wattle" / "WATTLE.md").write_text("Project rules.")
-    project.mkdir(parents=True)
+    repo.mkdir()
+    _touch_git(repo)
+    (user_dir / "AGENTS.override.md").write_text("Global override rules.")
+    (user_dir / "AGENTS.md").write_text("Global default rules.")
+    (repo / "AGENTS.md").write_text("Project rules.")
 
-    files = load_context_files(cwd=project, user_dir=user_dir)
+    files = load_context_files(cwd=repo, user_dir=user_dir)
 
-    assert [file.content for file in files] == ["User rules.", "Project rules."]
+    assert [(file.path.name, file.content) for file in files] == [
+        ("AGENTS.override.md", "Global override rules."),
+        ("AGENTS.md", "Project rules."),
+    ]

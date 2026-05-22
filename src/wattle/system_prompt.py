@@ -23,55 +23,95 @@ DEFAULT_SYSTEM_PROMPT = (
     "commands, editing code, and writing new files."
 )
 
-CONTEXT_FILENAMES = ("WATTLE.md",)
+DEFAULT_AGENTS_MD_FILENAME = "AGENTS.md"
+LOCAL_AGENTS_MD_FILENAME = "AGENTS.override.md"
+PROJECT_ROOT_MARKERS = (".git",)
+DEFAULT_CONTEXT_BYTE_BUDGET = 64 * 1024
+_TRUNCATION_NOTE = "[Wattle note: AGENTS instructions truncated due to byte budget.]"
 
 
-def _load_first_context_file(directory: Path) -> ContextFile | None:
-    for filename in CONTEXT_FILENAMES:
+@dataclass(frozen=True, slots=True)
+class _ContextCandidate:
+    path: Path
+    content_bytes: bytes
+
+
+def _read_context_candidate(directory: Path) -> _ContextCandidate | None:
+    for filename in (LOCAL_AGENTS_MD_FILENAME, DEFAULT_AGENTS_MD_FILENAME):
         path = directory / filename
-        if not path.is_file():
-            continue
         try:
-            return ContextFile(path=path, content=path.read_text())
+            if not path.is_file():
+                continue
+            content_bytes = path.read_bytes()
         except OSError:
             continue
+        content = content_bytes.decode("utf-8", errors="replace")
+        if not content.strip():
+            continue
+        return _ContextCandidate(path=path, content_bytes=content_bytes)
     return None
 
 
-def _ancestor_dirs(cwd: Path) -> list[Path]:
+def _find_project_root(cwd: Path) -> Path | None:
     resolved = cwd.resolve()
-    return [*reversed(resolved.parents), resolved]
+    for directory in (resolved, *resolved.parents):
+        if any((directory / marker).exists() for marker in PROJECT_ROOT_MARKERS):
+            return directory
+    return None
+
+
+def _project_dirs(cwd: Path) -> list[Path]:
+    resolved = cwd.resolve()
+    root = _find_project_root(resolved)
+    if root is None:
+        return [resolved]
+
+    dirs = [resolved]
+    current = resolved
+    while current != root:
+        current = current.parent
+        dirs.append(current)
+    return list(reversed(dirs))
 
 
 def load_context_files(
     *,
     cwd: Path | None = None,
     user_dir: Path | None = None,
+    byte_budget: int = DEFAULT_CONTEXT_BYTE_BUDGET,
 ) -> list[ContextFile]:
-    """Load Wattle context files from user and project locations.
+    """Load Codex-compatible AGENTS instructions.
 
-    User context lives in ``~/.wattle``. Project context may live directly in an
-    ancestor directory or in that directory's ``.wattle`` folder. Wattle only
-    loads ``WATTLE.md``; it intentionally does not read other agents' files.
+    Global instructions may live in Wattle's config home (``~/.wattle`` by
+    default). Project instructions are discovered from the project root marker
+    (``.git``) down to the current working directory. Legacy project-context
+    filenames are not loaded.
     """
 
     resolved_cwd = (cwd or Path.cwd()).resolve()
     resolved_user_dir = user_dir or (Path.home() / ".wattle")
     files: list[ContextFile] = []
-    seen: set[Path] = set()
+    remaining_budget = max(0, byte_budget)
+    truncated = False
 
-    for directory in (resolved_user_dir,):
-        context = _load_first_context_file(directory)
-        if context is not None and context.path not in seen:
-            files.append(context)
-            seen.add(context.path)
-
-    for directory in _ancestor_dirs(resolved_cwd):
-        for candidate_dir in (directory, directory / ".wattle"):
-            context = _load_first_context_file(candidate_dir)
-            if context is not None and context.path not in seen:
-                files.append(context)
-                seen.add(context.path)
+    for directory in (resolved_user_dir, *_project_dirs(resolved_cwd)):
+        candidate = _read_context_candidate(directory)
+        if candidate is None:
+            continue
+        content_bytes = candidate.content_bytes
+        if len(content_bytes) > remaining_budget:
+            content_bytes = content_bytes[:remaining_budget]
+            truncated = True
+        content = content_bytes.decode("utf-8", errors="replace")
+        if content.strip():
+            if truncated:
+                content = f"{content.rstrip()}\n\n{_TRUNCATION_NOTE}"
+            files.append(ContextFile(path=candidate.path, content=content))
+        elif truncated:
+            files.append(ContextFile(path=candidate.path, content=_TRUNCATION_NOTE))
+        if truncated:
+            break
+        remaining_budget -= len(candidate.content_bytes)
 
     return files
 
@@ -79,9 +119,7 @@ def load_context_files(
 def _format_tools(tools_by_name: Mapping[str, Tool]) -> str:
     if not tools_by_name:
         return "(none)"
-    return "\n".join(
-        f"- {name}: {tool.description}" for name, tool in tools_by_name.items()
-    )
+    return "\n".join(f"- {name}: {tool.description}" for name, tool in tools_by_name.items())
 
 
 def _guidelines(
@@ -162,6 +200,14 @@ def _guidelines(
             "Update the plan as work completes or changes; do not use it for "
             "trivial one-step tasks."
         )
+        guidelines.append(
+            "When the user asks you to implement a plan, proposal, design doc, "
+            "or prior instructions, first identify and review the referenced "
+            "content, whether it is in a file or earlier conversation. Then use "
+            "update_plan only to track execution of concrete steps derived from "
+            "that content; do not use update_plan as a substitute for reading or "
+            "understanding the plan."
+        )
 
     if "read" in names and "edit" in names:
         guidelines.append("Use read to examine files before editing.")
@@ -233,8 +279,7 @@ def _guidelines(
 
     if permission_mode == PermissionMode.READ_ONLY:
         guidelines.append(
-            "Read-only mode is active. Do not attempt write, edit, or mutating "
-            "shell operations."
+            "Read-only mode is active. Do not attempt write, edit, or mutating shell operations."
         )
 
     guidelines.append("Be concise in your responses")
@@ -265,9 +310,11 @@ def _format_context_files(context_files: Sequence[ContextFile]) -> str:
         "",
     ]
     for context_file in context_files:
-        parts.append(f"## {context_file.path}")
+        parts.append(f"# {context_file.path.name} instructions for {context_file.path.parent}")
         parts.append("")
+        parts.append("<INSTRUCTIONS>")
         parts.append(context_file.content.rstrip())
+        parts.append("</INSTRUCTIONS>")
         parts.append("")
     return "\n".join(parts).rstrip()
 
@@ -315,9 +362,7 @@ def build_system_prompt(
     resolved_cwd = (cwd or Path.cwd()).resolve()
     today = current_date or date.today()
     loaded_context_files = (
-        list(context_files)
-        if context_files is not None
-        else load_context_files(cwd=resolved_cwd)
+        list(context_files) if context_files is not None else load_context_files(cwd=resolved_cwd)
     )
 
     sections = [
@@ -327,10 +372,7 @@ def build_system_prompt(
             "In addition to the tools above, you may have access to other custom "
             "tools depending on the project."
         ),
-        (
-            "Guidelines:\n"
-            f"{_format_guidelines(_guidelines(tools_by_name, permission_mode))}"
-        ),
+        (f"Guidelines:\n{_format_guidelines(_guidelines(tools_by_name, permission_mode))}"),
     ]
 
     context = _format_context_files(loaded_context_files)
