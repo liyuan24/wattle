@@ -23,6 +23,7 @@ from wattle.permissions import PermissionGate, PermissionMode
 from wattle.providers import (
     AnthropicProvider,
     CompletionResponse,
+    Message,
     OpenAICodexResponsesProvider,
     OpenAICompletionsProvider,
     OpenAIResponsesProvider,
@@ -125,6 +126,41 @@ _PROVIDER_DISPATCH: dict[str, _DispatchSpec] = {
 assert {name: spec.vendor for name, spec in _PROVIDER_DISPATCH.items()} == PROVIDER_TO_VENDOR
 
 
+@dataclass(frozen=True, slots=True)
+class AgentRunResult:
+    """Result of a headless agent run with its persisted transcript."""
+
+    response: CompletionResponse
+    messages: list[Message]
+    system: str | None
+
+
+def _build_provider_and_system(
+    provider_name: str,
+    permission_mode: PermissionMode,
+) -> tuple[Provider, str]:
+    spec = _PROVIDER_DISPATCH.get(provider_name)
+    if spec is None:
+        raise ValueError(
+            f"Unknown provider: {provider_name!r}. "
+            f"Choices: {sorted(PROVIDER_TO_VENDOR)}"
+        )
+
+    if provider_name == "openai_codex":
+        credential = get_openai_codex_credential()
+    elif provider_name in {"openai_completions", "openai_responses"}:
+        credential = get_api_key_credential(spec.vendor)
+    else:
+        credential = get_credential(spec.vendor)
+    provider = spec.build(credential.bearer_token)
+    built_system = build_system_prompt(
+        tools_by_name=TOOLS_BY_NAME,
+        skills=load_available_skills(Path.cwd()),
+        permission_mode=permission_mode,
+    )
+    return provider, built_system
+
+
 def run_agent(
     provider_name: str,
     model: str,
@@ -152,25 +188,7 @@ def run_agent(
         KeyError: If the vendor's entry is missing or malformed (from
             :mod:`wattle.auth`).
     """
-    spec = _PROVIDER_DISPATCH.get(provider_name)
-    if spec is None:
-        raise ValueError(
-            f"Unknown provider: {provider_name!r}. "
-            f"Choices: {sorted(PROVIDER_TO_VENDOR)}"
-        )
-
-    if provider_name == "openai_codex":
-        credential = get_openai_codex_credential()
-    elif provider_name in {"openai_completions", "openai_responses"}:
-        credential = get_api_key_credential(spec.vendor)
-    else:
-        credential = get_credential(spec.vendor)
-    provider = spec.build(credential.bearer_token)
-    built_system = build_system_prompt(
-        tools_by_name=TOOLS_BY_NAME,
-        skills=load_available_skills(Path.cwd()),
-        permission_mode=permission_mode,
-    )
+    provider, built_system = _build_provider_and_system(provider_name, permission_mode)
 
     if permission_mode == PermissionMode.YOLO:
         return loop.run(
@@ -195,3 +213,46 @@ def run_agent(
         thinking=thinking,
         effort=effort,
     )
+
+
+def run_agent_with_history(
+    provider_name: str,
+    model: str,
+    user_input: str,
+    *,
+    max_tokens: int = 4096,
+    permission_mode: PermissionMode = PermissionMode.YOLO,
+    thinking: bool = False,
+    effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None,
+) -> AgentRunResult:
+    """Run the headless agent and return the full transcript for persistence."""
+    provider, built_system = _build_provider_and_system(provider_name, permission_mode)
+    messages: list[Message] = []
+
+    if permission_mode == PermissionMode.YOLO:
+        response = loop.run(
+            provider,
+            TOOLS_BY_NAME,
+            built_system,
+            user_input,
+            model,
+            max_tokens,
+            thinking=thinking,
+            effort=effort,
+            messages_out=messages,
+        )
+    else:
+        response = loop.run(
+            provider,
+            TOOLS_BY_NAME,
+            built_system,
+            user_input,
+            model,
+            max_tokens,
+            permission_gate=PermissionGate(permission_mode),
+            thinking=thinking,
+            effort=effort,
+            messages_out=messages,
+        )
+
+    return AgentRunResult(response=response, messages=messages, system=built_system)

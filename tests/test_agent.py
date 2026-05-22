@@ -50,6 +50,7 @@ import pytest
 from wattle import agent
 from wattle.agent import PROVIDER_TO_VENDOR, run_agent
 from wattle.auth import AuthCredential
+from wattle.providers import Message, TextBlock
 
 
 @pytest.fixture
@@ -298,6 +299,44 @@ def test_openai_responses_provider_wires_openai_vendor_key(
     cp.assert_not_called()
 
     assert result is loop_run_sentinel.sentinel
+
+
+def test_run_agent_with_history_returns_response_messages_and_system() -> None:
+    response = object()
+    captured_messages = [Message(role="user", content=[TextBlock(text="hi")])]
+
+    def fake_loop_run(*args: object, **kwargs: object) -> object:
+        messages_out = kwargs["messages_out"]
+        messages_out[:] = captured_messages  # type: ignore[index]
+        return response
+
+    fake_provider = object()
+    with (
+        patch.object(
+            agent,
+            "get_credential",
+            return_value=AuthCredential(
+                kind="api_key",
+                bearer_token="fake-anthropic-key",
+                source="test",
+            ),
+        ),
+        patch.object(agent.anthropic, "AsyncAnthropic", return_value=object()),
+        patch.object(agent, "AnthropicProvider", return_value=fake_provider),
+        patch.object(agent, "build_system_prompt", return_value="built system"),
+        patch.object(agent.loop, "run", side_effect=fake_loop_run) as mock_run,
+    ):
+        result = agent.run_agent_with_history(
+            "anthropic",
+            model="claude-x",
+            user_input="hi",
+            max_tokens=512,
+        )
+
+    assert result.response is response
+    assert result.messages == captured_messages
+    assert result.system == "built system"
+    assert mock_run.call_args.kwargs["messages_out"] == captured_messages
 
 
 def test_unknown_provider_raises_valueerror_with_helpful_message() -> None:

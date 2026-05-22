@@ -13,7 +13,8 @@ import pytest
 from wattle import cli
 from wattle.auth import AuthCredential
 from wattle.permissions import PermissionMode
-from wattle.providers import CompletionResponse, TextBlock
+from wattle.providers import CompletionResponse, Message, TextBlock
+from wattle.session import load_session
 from wattle.settings import TuiSettings, WattleSettings
 
 
@@ -29,6 +30,7 @@ def test_build_parser_defaults_to_tui_settings() -> None:
     assert args.effort is None
     assert args.print_prompt is None
     assert args.resume is None
+    assert args.persist is False
     assert args.permission_mode == cli.PermissionMode.YOLO
 
 
@@ -99,6 +101,7 @@ def test_build_parser_print_mode_accepts_prompt_and_shared_flags() -> None:
             "--effort",
             "high",
             "--read-only",
+            "--persist",
             "-p",
             "follow the prompt",
         ]
@@ -112,6 +115,7 @@ def test_build_parser_print_mode_accepts_prompt_and_shared_flags() -> None:
     assert args.thinking is True
     assert args.effort == "high"
     assert args.permission_mode == cli.PermissionMode.READ_ONLY
+    assert args.persist is True
 
 
 def test_build_parser_resume_accepts_optional_session() -> None:
@@ -342,6 +346,78 @@ def test_headless_calls_run_agent_and_prints_final_text(
             },
         )
     ]
+
+
+def test_main_rejects_persist_without_print_prompt() -> None:
+    with pytest.raises(SystemExit):
+        cli.main(["--persist"])
+
+
+def test_headless_with_persist_saves_session_and_prints_final_text(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    response = CompletionResponse(
+        content=[TextBlock(text="saved response")],
+        stop_reason="end_turn",
+    )
+    messages = [
+        Message(role="user", content=[TextBlock(text="persist this")]),
+        Message(role="assistant", content=[TextBlock(text="saved response")]),
+    ]
+    calls: list[tuple[Any, ...]] = []
+
+    def fake_run_agent_with_history(*args: Any, **kwargs: Any) -> cli.AgentRunResult:
+        calls.append((args, kwargs))
+        return cli.AgentRunResult(response=response, messages=messages, system="system prompt")
+
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    monkeypatch.setenv("WATTLE_SESSION_DIR", str(tmp_path))
+    monkeypatch.setattr(cli, "run_agent", lambda *args, **kwargs: pytest.fail("run_agent called"))
+    monkeypatch.setattr(cli, "run_agent_with_history", fake_run_agent_with_history)
+    monkeypatch.setattr(sys, "stdout", stdout)
+    monkeypatch.setattr(sys, "stderr", stderr)
+
+    rc = cli._run_headless(
+        argparse.Namespace(
+            provider="anthropic",
+            model="claude-sonnet-4-6",
+            max_tokens=512,
+            permission_mode=cli.PermissionMode.READ_ONLY,
+            print_prompt="persist this",
+            prompt=None,
+            persist=True,
+            thinking=True,
+            effort="high",
+        )
+    )
+
+    assert rc == 0
+    assert stdout.getvalue() == "saved response\n"
+    assert "Saved session:" in stderr.getvalue()
+    assert calls == [
+        (
+            ("anthropic", "claude-sonnet-4-6", "persist this"),
+            {
+                "max_tokens": 512,
+                "permission_mode": cli.PermissionMode.READ_ONLY,
+                "thinking": True,
+                "effort": "high",
+            },
+        )
+    ]
+
+    session_files = list(tmp_path.glob("*.jsonl"))
+    assert len(session_files) == 1
+    record = load_session(session_files[0])
+    assert record.settings.provider == "anthropic"
+    assert record.settings.model == "claude-sonnet-4-6"
+    assert record.settings.system == "system prompt"
+    assert record.settings.max_tokens == 512
+    assert record.settings.thinking is True
+    assert record.settings.effort == "high"
+    assert [message.role for message in record.messages] == ["user", "assistant"]
 
 
 def test_headless_rejects_ask_for_permission(monkeypatch: pytest.MonkeyPatch) -> None:

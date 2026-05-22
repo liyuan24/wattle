@@ -10,6 +10,7 @@ from wattle.permissions import PermissionGate, PermissionMode
 from wattle.providers import (
     CompletionRequest,
     CompletionResponse,
+    Message,
     Provider,
     StreamComplete,
     StreamEvent,
@@ -52,6 +53,7 @@ def test_loop_runs_tool_and_terminates() -> None:
     ]
     provider = StubProvider(scripted)
 
+    messages_out: list[Message] = []
     result = run(
         provider=provider,
         tools_by_name=tools,
@@ -59,6 +61,7 @@ def test_loop_runs_tool_and_terminates() -> None:
         user_input="Run echo hello and tell me what it prints.",
         model="stub-model",
         max_tokens=1024,
+        messages_out=messages_out,
     )
 
     # Loop made exactly two provider calls.
@@ -89,6 +92,12 @@ def test_loop_runs_tool_and_terminates() -> None:
     assert result.stop_reason == "end_turn"
     assert isinstance(result.content[0], TextBlock)
     assert "hello" in result.content[0].text
+    assert [message.role for message in messages_out] == [
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+    ]
 
 
 def test_loop_retries_context_length_error_with_compacted_history() -> None:

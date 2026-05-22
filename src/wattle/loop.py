@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import itertools
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, MutableSequence
 from typing import Any, Literal, cast
 
 from .message_history import monitor_event_text_blocks
@@ -52,6 +52,7 @@ def run(
     context_window: int | None = None,
     thinking: bool = False,
     effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None,
+    messages_out: MutableSequence[Message] | None = None,
 ) -> CompletionResponse:
     """Run the agent loop until the model stops.
 
@@ -78,6 +79,7 @@ def run(
             context_window=context_window,
             thinking=thinking,
             effort=effort,
+            messages_out=messages_out,
         )
     )
 
@@ -93,6 +95,7 @@ async def arun(
     context_window: int | None = None,
     thinking: bool = False,
     effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None,
+    messages_out: MutableSequence[Message] | None = None,
 ) -> CompletionResponse:
     """Async version of :func:`run`."""
 
@@ -131,6 +134,8 @@ async def arun(
         if response.stop_reason != "tool_use":
             monitor_blocks = _drain_monitor_event_blocks(runtime)
             if not monitor_blocks:
+                if messages_out is not None:
+                    messages_out[:] = messages
                 return response
             messages.append(Message(role="user", content=monitor_blocks))
             continue
@@ -148,6 +153,8 @@ async def arun(
         # would be a provider bug; bail rather than spin.
         followup_blocks = [*tool_results, *monitor_blocks]
         if not followup_blocks:
+            if messages_out is not None:
+                messages_out[:] = messages
             return response
 
         messages.append(Message(role="user", content=followup_blocks))

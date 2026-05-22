@@ -16,11 +16,13 @@ from __future__ import annotations
 
 import argparse
 import sys
+from dataclasses import replace
+from pathlib import Path
 
 import anthropic
 import openai
 
-from wattle.agent import _ProviderSpec, run_agent
+from wattle.agent import AgentRunResult, _ProviderSpec, run_agent, run_agent_with_history
 from wattle.auth import get_api_key_credential, get_credential, get_openai_codex_credential
 from wattle.permissions import PermissionMode
 from wattle.providers import (
@@ -31,6 +33,7 @@ from wattle.providers import (
     Provider,
     TextBlock,
 )
+from wattle.session import new_session, save_session
 from wattle.settings import WattleSettings, load_settings
 
 # ---------------------------------------------------------------------------
@@ -143,15 +146,29 @@ def _run_headless(args: argparse.Namespace) -> int:
         sys.stderr.flush()
         return 2
 
-    response = run_agent(
-        args.provider,
-        args.model,
-        args.print_prompt,
-        max_tokens=args.max_tokens,
-        permission_mode=permission_mode,
-        thinking=bool(getattr(args, "thinking", False)),
-        effort=getattr(args, "effort", None),
-    )
+    if bool(getattr(args, "persist", False)):
+        result = run_agent_with_history(
+            args.provider,
+            args.model,
+            args.print_prompt,
+            max_tokens=args.max_tokens,
+            permission_mode=permission_mode,
+            thinking=bool(getattr(args, "thinking", False)),
+            effort=getattr(args, "effort", None),
+        )
+        response = result.response
+        session_path = _persist_headless_session(args, result)
+    else:
+        response = run_agent(
+            args.provider,
+            args.model,
+            args.print_prompt,
+            max_tokens=args.max_tokens,
+            permission_mode=permission_mode,
+            thinking=bool(getattr(args, "thinking", False)),
+            effort=getattr(args, "effort", None),
+        )
+        session_path = None
 
     text = "".join(
         block.text for block in response.content if isinstance(block, TextBlock)
@@ -161,7 +178,22 @@ def _run_headless(args: argparse.Namespace) -> int:
         if not text.endswith("\n"):
             sys.stdout.write("\n")
         sys.stdout.flush()
+    if session_path is not None:
+        sys.stderr.write(f"Saved session: {session_path}\n")
+        sys.stderr.flush()
     return 0
+
+
+def _persist_headless_session(args: argparse.Namespace, result: AgentRunResult) -> Path:
+    record = new_session(
+        provider=args.provider,
+        model=args.model,
+        system=result.system,
+        max_tokens=args.max_tokens,
+        thinking=bool(getattr(args, "thinking", False)),
+        effort=getattr(args, "effort", None),
+    )
+    return save_session(replace(record, messages=list(result.messages)))
 
 
 def _run_tui(args: argparse.Namespace) -> int:
@@ -214,6 +246,11 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="PROMPT",
         default=None,
         help="Run one prompt headlessly and print the final response.",
+    )
+    parser.add_argument(
+        "--persist",
+        action="store_true",
+        help="Save a headless -p session using the same session store as the TUI.",
     )
     parser.add_argument(
         "prompt",
@@ -307,6 +344,8 @@ def main(argv: list[str] | None = None) -> int:
     _apply_settings_defaults(args, raw_argv, load_settings())
     if args.print_prompt is not None and args.prompt is not None:
         parser.error("positional prompt cannot be used with -p/--print")
+    if args.persist and args.print_prompt is None:
+        parser.error("--persist can only be used with -p/--print")
     if args.effort is not None:
         args.thinking = True
     if args.print_prompt is not None:
