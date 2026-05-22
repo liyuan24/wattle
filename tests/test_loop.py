@@ -42,7 +42,7 @@ def test_loop_runs_tool_and_terminates() -> None:
                 ),
             ],
             stop_reason="tool_use",
-            usage={"input_tokens": 10, "output_tokens": 5},
+            usage={"input_tokens": 10, "output_tokens": 5, "cached_tokens": 4},
         ),
         # Turn 2: assistant sees the tool output and stops.
         CompletionResponse(
@@ -80,6 +80,9 @@ def test_loop_runs_tool_and_terminates() -> None:
     # Second request: original user, assistant tool_use, user tool_result.
     second = provider.requests[1]
     assert [m.role for m in second.messages] == ["user", "assistant", "user"]
+    assert second.messages[1].input_tokens == 10
+    assert second.messages[1].output_tokens == 5
+    assert second.messages[1].cached_tokens == 4
     tool_result_msg = second.messages[2]
     assert len(tool_result_msg.content) == 1
     block = tool_result_msg.content[0]
@@ -98,6 +101,11 @@ def test_loop_runs_tool_and_terminates() -> None:
         "user",
         "assistant",
     ]
+    assert messages_out[1].input_tokens == 10
+    assert messages_out[1].output_tokens == 5
+    assert messages_out[1].cached_tokens == 4
+    assert messages_out[3].input_tokens == 20
+    assert messages_out[3].output_tokens == 8
 
 
 def test_loop_retries_context_length_error_with_compacted_history() -> None:

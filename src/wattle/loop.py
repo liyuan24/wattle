@@ -129,7 +129,7 @@ async def arun(
 
     for _ in itertools.count():
         response = await acomplete_with_recovery(preparer, messages)
-        messages.append(Message(role="assistant", content=list(response.content)))
+        messages.append(_assistant_message(response))
 
         if response.stop_reason != "tool_use":
             monitor_blocks = _drain_monitor_event_blocks(runtime)
@@ -260,7 +260,7 @@ async def arun_streaming(
                 "Provider stream ended without a StreamComplete event."
             )
 
-        messages.append(Message(role="assistant", content=list(response.content)))
+        messages.append(_assistant_message(response))
 
         if response.stop_reason != "tool_use":
             monitor_blocks = _drain_monitor_event_blocks(runtime)
@@ -432,6 +432,24 @@ def _as_image_block(item: object) -> ImageBlock:
         filename=str(image.filename),
         size_bytes=int(image.size_bytes),
     )
+
+
+def _assistant_message(response: CompletionResponse) -> Message:
+    return Message(
+        role="assistant",
+        content=list(response.content),
+        input_tokens=response.usage.get("input_tokens", 0),
+        output_tokens=response.usage.get("output_tokens", 0),
+        cached_tokens=_cached_tokens_from_usage(response.usage),
+    )
+
+
+def _cached_tokens_from_usage(usage: Mapping[str, int]) -> int:
+    for key in ("cached_tokens", "cache_read_input_tokens"):
+        value = usage.get(key)
+        if isinstance(value, int):
+            return value
+    return 0
 
 
 def _runtime_from_tools(tools_by_name: Mapping[str, Tool]) -> object | None:
