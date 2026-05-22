@@ -24,19 +24,21 @@ Stop-reason vocabulary is Anthropic's; OpenAI's `finish_reason` is mapped
 into it (`stop` -> `end_turn`, `tool_calls` -> `tool_use`,
 `length` -> `max_tokens`, anything else -> `stop_sequence`).
 
-Reasoning is not preservable on this provider
----------------------------------------------
-Chat Completions reasoning models do reason internally, but the API surface
-exposes no content-block representation of that reasoning and no input
-field that would let a client replay reasoning between turns. The only
-reasoning-related signal returned is a token count
-(`usage.completion_tokens_details.reasoning_tokens`).
+Reasoning round-trip on OpenAI-compatible providers
+---------------------------------------------------
+OpenAI Chat Completions reasoning models do reason internally, but OpenAI's
+API does not normally expose replayable reasoning content on assistant
+messages. Some OpenAI-compatible providers, notably DeepSeek and Kimi, expose
+and require a nonstandard `reasoning_content` field when thinking mode and
+tool calls are combined.
 
-Concretely: any `ThinkingBlock`s in `request.messages` are silently dropped
-on the way out (they have no wire-format home), and the deserialized
-response never contains a `ThinkingBlock`.
+Concretely: when a response message contains `reasoning_content`, this adapter
+preserves it as a `ThinkingBlock`; when an outgoing assistant history message
+contains `ThinkingBlock`s, the adapter serializes their text back into
+`reasoning_content`. OpenAI's endpoint tolerates this extra field, while
+DeepSeek/Kimi require it for thinking/tool-call continuations.
 
-The provider does, however, support a `reasoning_effort` knob that
+The provider also supports a `reasoning_effort` knob that
 influences how much the model thinks internally. `request.thinking` plus
 `request.effort` / `request.budget` now flow through to the wire as a
 top-level `reasoning_effort` kwarg (with `effort="max"` clamped to
@@ -47,7 +49,8 @@ never contain ThinkingBlocks (no reasoning content channel).
 This is a real limitation: a multi-turn agent run that depends on the
 model carrying earlier reasoning forward through tool calls cannot use
 this provider for reasoning continuity. Pick the Anthropic or OpenAI
-Responses provider for reasoning-heavy tasks.
+Responses provider for reasoning-heavy tasks unless the target OpenAI-compatible vendor
+exposes enough reasoning content for its own continuation requirements.
 """
 
 from __future__ import annotations
@@ -77,6 +80,7 @@ from .base import (
     TextBlock,
     TextDelta,
     ThinkingBlock,
+    ThinkingDelta,
     ToolResultBlock,
     ToolUseBlock,
     ToolUseDelta,
@@ -149,6 +153,9 @@ class OpenAICompletionsProvider(Provider):
 
         choice = response.choices[0]
         content: list[ContentBlock] = []
+        reasoning_content = _reasoning_content_from_obj(choice.message)
+        if reasoning_content:
+            content.append(ThinkingBlock(thinking=reasoning_content))
         if choice.message.content:
             content.append(TextBlock(text=choice.message.content))
         for tool_call in choice.message.tool_calls or []:
@@ -160,9 +167,7 @@ class OpenAICompletionsProvider(Provider):
                 )
             )
 
-        stop_reason: StopReason = _FINISH_REASON_MAP.get(
-            choice.finish_reason, "stop_sequence"
-        )
+        stop_reason: StopReason = _FINISH_REASON_MAP.get(choice.finish_reason, "stop_sequence")
         usage = {
             "input_tokens": response.usage.prompt_tokens,
             "output_tokens": response.usage.completion_tokens,
@@ -207,6 +212,7 @@ class OpenAICompletionsProvider(Provider):
         kwargs["stream_options"] = {"include_usage": True}
 
         text_parts: list[str] = []
+        reasoning_parts: list[str] = []
         # Per-tool-call-index accumulators. Indices in `delta.tool_calls`
         # are stable across chunks for the same tool call; we keep a dict
         # so iteration order is preserved (insertion order) when assembling.
@@ -229,6 +235,11 @@ class OpenAICompletionsProvider(Provider):
 
             choice = chunk.choices[0]
             delta = choice.delta
+
+            reasoning_content = _reasoning_content_from_obj(delta)
+            if reasoning_content:
+                reasoning_parts.append(reasoning_content)
+                yield ThinkingDelta(thinking=reasoning_content)
 
             if delta.content:
                 text_parts.append(delta.content)
@@ -286,6 +297,9 @@ class OpenAICompletionsProvider(Provider):
 
         # Assemble the final response.
         content: list[ContentBlock] = []
+        reasoning_content = "".join(reasoning_parts)
+        if reasoning_content:
+            content.append(ThinkingBlock(thinking=reasoning_content))
         text = "".join(text_parts)
         if text:
             content.append(TextBlock(text=text))
@@ -298,9 +312,7 @@ class OpenAICompletionsProvider(Provider):
                 )
             )
 
-        stop_reason: StopReason = _FINISH_REASON_MAP.get(
-            finish_reason or "", "stop_sequence"
-        )
+        stop_reason: StopReason = _FINISH_REASON_MAP.get(finish_reason or "", "stop_sequence")
         usage = {
             "input_tokens": prompt_tokens,
             "output_tokens": completion_tokens,
@@ -409,16 +421,18 @@ def _message_to_wire(message: Message) -> list[dict[str, Any]]:
     per block on the dedicated `"tool"` role. Everything else collapses
     into a single wire message.
 
-    `ThinkingBlock`s are dropped: Chat Completions has no wire shape for
-    reasoning content. An assistant turn whose only blocks were thinking
-    blocks therefore yields no wire message at all.
+    `ThinkingBlock`s are removed from visible assistant content and, when
+    non-empty, serialized into the OpenAI-compatible `reasoning_content`
+    extension field. An assistant turn whose only blocks were thinking blocks
+    still yields no wire message because there is no visible assistant content
+    or tool call to attach the reasoning to.
 
     Any: each wire message is a JSON object whose required fields depend on
     role (`role="tool"` carries `tool_call_id`; `role="assistant"` may carry
     `tool_calls` whose entries are themselves nested role-dependent objects).
     The OpenAI wire schema is the source of truth.
     """
-    # Strip ThinkingBlocks up front: they have no Chat Completions wire shape.
+    thinking = _concat_thinking(message.content)
     blocks = [b for b in message.content if not isinstance(b, ThinkingBlock)]
 
     if message.role == "user":
@@ -434,9 +448,7 @@ def _message_to_wire(message: Message) -> list[dict[str, Any]]:
         else:
             user_content = text
         if tool_results:
-            user_wire: list[dict[str, Any]] = [
-                _tool_result_to_wire(b) for b in tool_results
-            ]
+            user_wire: list[dict[str, Any]] = [_tool_result_to_wire(b) for b in tool_results]
             if text or image_blocks:
                 user_wire.append({"role": "user", "content": user_content})
             return user_wire
@@ -455,6 +467,8 @@ def _message_to_wire(message: Message) -> list[dict[str, Any]]:
         "role": "assistant",
         "content": text if text else None,
     }
+    if thinking:
+        assistant_wire["reasoning_content"] = thinking
     if tool_uses:
         assistant_wire["tool_calls"] = [
             {
@@ -468,6 +482,18 @@ def _message_to_wire(message: Message) -> list[dict[str, Any]]:
             for b in tool_uses
         ]
     return [assistant_wire]
+
+
+def _reasoning_content_from_obj(obj: Any) -> str:
+    value = getattr(obj, "reasoning_content", None)
+    if isinstance(value, str):
+        return value
+    if hasattr(obj, "model_dump"):
+        dumped = obj.model_dump()
+        value = dumped.get("reasoning_content")
+        if isinstance(value, str):
+            return value
+    return ""
 
 
 def _tool_result_to_wire(block: ToolResultBlock) -> dict[str, Any]:
@@ -491,3 +517,9 @@ def _image_to_wire_part(block: ImageBlock) -> dict[str, Any]:
 
 def _concat_text(content: Iterable[ContentBlock], *, separator: str = "") -> str:
     return separator.join(b.text for b in content if isinstance(b, TextBlock))
+
+
+def _concat_thinking(content: Iterable[ContentBlock]) -> str:
+    return "\n\n".join(
+        block.thinking for block in content if isinstance(block, ThinkingBlock) and block.thinking
+    )

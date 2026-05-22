@@ -26,6 +26,7 @@ from wattle.providers import (
     TextBlock,
     TextDelta,
     ThinkingBlock,
+    ThinkingDelta,
     ToolResultBlock,
     ToolUseBlock,
     ToolUseDelta,
@@ -40,9 +41,12 @@ def _fake_response(
     prompt_tokens: int = 7,
     completion_tokens: int = 11,
     cached_tokens: int = 0,
+    reasoning_content: str | None = None,
 ) -> SimpleNamespace:
     """Build a duck-typed Chat Completions response."""
-    message = SimpleNamespace(content=content, tool_calls=tool_calls)
+    message = SimpleNamespace(
+        content=content, tool_calls=tool_calls, reasoning_content=reasoning_content
+    )
     choice = SimpleNamespace(message=message, finish_reason=finish_reason)
     usage = SimpleNamespace(
         prompt_tokens=prompt_tokens,
@@ -222,8 +226,7 @@ def test_user_text_blocks_are_separated_when_flattened() -> None:
         {
             "role": "user",
             "content": (
-                "[queued user message 1 of 2]\nfirst\n\n"
-                "[queued user message 2 of 2]\nsecond"
+                "[queued user message 1 of 2]\nfirst\n\n[queued user message 2 of 2]\nsecond"
             ),
         }
     ]
@@ -494,9 +497,7 @@ def test_response_with_only_tool_calls_no_text() -> None:
         id="call_x",
         function=SimpleNamespace(name="bash", arguments=json.dumps({"cmd": "ls"})),
     )
-    response = _fake_response(
-        content=None, tool_calls=[tool_call], finish_reason="tool_calls"
-    )
+    response = _fake_response(content=None, tool_calls=[tool_call], finish_reason="tool_calls")
     provider = OpenAICompletionsProvider(async_client=_make_client(response))
 
     result = provider.complete(
@@ -539,13 +540,13 @@ def test_finish_reason_mapping(finish_reason: str, expected: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Thinking handling: dropped on the wire, never emitted in responses
+# Thinking handling: reasoning_content round-trips when providers expose it
 # ---------------------------------------------------------------------------
 
 
-def test_thinking_blocks_in_input_are_dropped_from_wire_messages() -> None:
-    """Chat Completions has no shape for reasoning content; ThinkingBlocks
-    must not appear anywhere in the outgoing wire messages."""
+def test_thinking_blocks_in_input_are_serialized_as_reasoning_content() -> None:
+    """OpenAI-compatible providers such as DeepSeek/Kimi require prior
+    assistant reasoning to be replayed as reasoning_content for tool calls."""
     client = _make_client(_fake_response(content="ok"))
     provider = OpenAICompletionsProvider(async_client=client)
 
@@ -574,12 +575,12 @@ def test_thinking_blocks_in_input_are_dropped_from_wire_messages() -> None:
     messages = client.chat.completions.create.call_args.kwargs["messages"]
     serialized = json.dumps(messages)
     assert "thinking" not in serialized
-    assert "reasoning" not in serialized
 
-    # Assistant message still carries text and tool_calls — only the
-    # ThinkingBlock vanished.
+    # Assistant message still carries text and tool_calls; ThinkingBlock text
+    # moves to the nonstandard OpenAI-compatible reasoning_content field.
     assistant = next(m for m in messages if m["role"] == "assistant")
     assert assistant["content"] == "here you go"
+    assert assistant["reasoning_content"] == "reasoning"
     assert "tool_calls" in assistant
 
 
@@ -615,9 +616,29 @@ def test_assistant_message_with_only_thinking_blocks_is_skipped() -> None:
     ]
 
 
-def test_response_never_contains_thinking_block() -> None:
-    """The Chat Completions response shape has no reasoning channel, so
-    the deserialized content cannot contain a ThinkingBlock."""
+def test_response_reasoning_content_becomes_thinking_block() -> None:
+    response = _fake_response(
+        content="all done",
+        finish_reason="stop",
+        reasoning_content="provider reasoning",
+    )
+    provider = OpenAICompletionsProvider(async_client=_make_client(response))
+
+    result = provider.complete(
+        CompletionRequest(
+            model="gpt-4o-mini",
+            max_tokens=64,
+            messages=[Message(role="user", content=[TextBlock(text="hi")])],
+        )
+    )
+
+    assert isinstance(result.content[0], ThinkingBlock)
+    assert result.content[0].thinking == "provider reasoning"
+    assert isinstance(result.content[1], TextBlock)
+    assert result.content[1].text == "all done"
+
+
+def test_response_without_reasoning_content_has_no_thinking_block() -> None:
     response = _fake_response(content="all done", finish_reason="stop")
     provider = OpenAICompletionsProvider(async_client=_make_client(response))
 
@@ -628,6 +649,7 @@ def test_response_never_contains_thinking_block() -> None:
             messages=[Message(role="user", content=[TextBlock(text="hi")])],
         )
     )
+
     assert not any(isinstance(b, ThinkingBlock) for b in result.content)
 
 
@@ -760,8 +782,12 @@ def test_thinking_true_no_effort_no_budget_omits_reasoning_effort() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _text_chunk(text: str, finish_reason: str | None = None) -> SimpleNamespace:
-    delta = SimpleNamespace(content=text, tool_calls=None)
+def _text_chunk(
+    text: str,
+    finish_reason: str | None = None,
+    reasoning_content: str | None = None,
+) -> SimpleNamespace:
+    delta = SimpleNamespace(content=text, tool_calls=None, reasoning_content=reasoning_content)
     choice = SimpleNamespace(delta=delta, finish_reason=finish_reason)
     return SimpleNamespace(choices=[choice], usage=None)
 
@@ -776,7 +802,7 @@ def _tool_chunk(
 ) -> SimpleNamespace:
     function = SimpleNamespace(name=name, arguments=arguments)
     tool_call = SimpleNamespace(index=index, id=id, function=function)
-    delta = SimpleNamespace(content=None, tool_calls=[tool_call])
+    delta = SimpleNamespace(content=None, tool_calls=[tool_call], reasoning_content=None)
     choice = SimpleNamespace(delta=delta, finish_reason=finish_reason)
     return SimpleNamespace(choices=[choice], usage=None)
 
@@ -800,8 +826,8 @@ def _stream_client(chunks: list[SimpleNamespace]) -> MagicMock:
 
 def test_stream_text_emits_deltas_then_complete_with_usage() -> None:
     chunks = [
-        _text_chunk("Hel"),
-        _text_chunk("lo"),
+        _text_chunk("Hel", reasoning_content="plan "),
+        _text_chunk("lo", reasoning_content="done"),
         _text_chunk("!", finish_reason="stop"),
         _final_usage_chunk(prompt_tokens=10, completion_tokens=4, cached_tokens=6),
     ]
@@ -818,6 +844,8 @@ def test_stream_text_emits_deltas_then_complete_with_usage() -> None:
         )
     )
 
+    thinking_deltas = [e for e in emitted if isinstance(e, ThinkingDelta)]
+    assert [d.thinking for d in thinking_deltas] == ["plan ", "done"]
     text_deltas = [e for e in emitted if isinstance(e, TextDelta)]
     assert [d.text for d in text_deltas] == ["Hel", "lo", "!"]
 
@@ -829,8 +857,10 @@ def test_stream_text_emits_deltas_then_complete_with_usage() -> None:
     complete = next(e for e in emitted if isinstance(e, StreamComplete))
     response = complete.response
     assert response.stop_reason == "end_turn"
-    assert isinstance(response.content[0], TextBlock)
-    assert response.content[0].text == "Hello!"
+    assert isinstance(response.content[0], ThinkingBlock)
+    assert response.content[0].thinking == "plan done"
+    assert isinstance(response.content[1], TextBlock)
+    assert response.content[1].text == "Hello!"
     assert response.usage == {"input_tokens": 10, "output_tokens": 4, "cached_tokens": 6}
 
 
