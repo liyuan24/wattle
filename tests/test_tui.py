@@ -3990,6 +3990,12 @@ def test_edit_tool_result_renders_diff_review_style() -> None:
     assert f"{tui.DIFF_DELETE_COUNT_STYLE}-0{tui.RESET}" in rendered
     assert "48;5" not in tui.DIFF_ADD_COUNT_STYLE
     assert "48;5" not in tui.DIFF_DELETE_COUNT_STYLE
+    assert "48;5" not in tui.DIFF_ADD_LINE_NUMBER_STYLE
+    assert "48;5" not in tui.DIFF_ADD_MARKER_STYLE
+    assert "48;5" not in tui.DIFF_ADD_CODE_STYLE
+    assert "48;5" not in tui.DIFF_DELETE_LINE_NUMBER_STYLE
+    assert "48;5" not in tui.DIFF_DELETE_MARKER_STYLE
+    assert "48;5" not in tui.DIFF_DELETE_CODE_STYLE
     assert "    1 +hello" in plain
     assert "    2 +world" in plain
     assert tui.DIFF_ADD_LINE_NUMBER_STYLE in rendered
