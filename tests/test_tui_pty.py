@@ -537,12 +537,12 @@ def test_pty_subagent_waiting_and_completion_notifications(tmp_path: Path) -> No
         rows=36,
     ) as session:
         session.read_until("Spawned Hopper [explorer] (gpt-5.5 xhigh)", timeout=4)
-        session.read_until("Waiting for 1 subagent", timeout=4)
-        session.read_until("Hopper [explorer] completed", timeout=6)
+        session.read_until("Waiting for 1 agent", timeout=4)
+        session.read_until("Subagents · 1 running", timeout=4)
+        session.read_until("Hopper [explorer] complete", timeout=6)
 
         screen_text = session.screen.text()
         assert "Waiting for subagent(s)" not in screen_text
-        assert "Workspace:" in screen_text
         assert "inspect prompt waiting state" in screen_text
         assert "subagent_id:" not in screen_text
 

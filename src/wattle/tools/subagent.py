@@ -12,14 +12,21 @@ class SpawnAgentTool(Tool):
     description = (
         "Start a managed Wattle subagent in the current runtime. The subagent "
         "runs in-process with its own message history and can be waited on with "
-        "wait_agent."
+        "wait_agent. Use this for independent, bounded work. Before calling it, "
+        "decide what the primary agent will keep doing locally, what this "
+        "subagent owns, and when the primary must wait. Put the subagent's "
+        "scope and edit/read-only expectations in the task or instructions text."
     )
     input_schema = {
         "type": "object",
         "properties": {
             "task": {
                 "type": "string",
-                "description": "The delegated task for the subagent.",
+                "description": (
+                    "The delegated task for the subagent. Include a clear scope, "
+                    "expected output, and whether the subagent should only "
+                    "inspect or may edit."
+                ),
             },
             "agent_type": {
                 "type": "string",
@@ -125,7 +132,10 @@ class WaitAgentTool(Tool):
     name = "wait_agent"
     description = (
         "Wait for a managed Wattle subagent update, completion, or current "
-        "status after a timeout. The subagent keeps running if the wait times out."
+        "status after a timeout. The subagent keeps running if the wait times "
+        "out. Use this before depending on delegated findings, editing "
+        "overlapping work, or producing a final answer that relies on subagent "
+        "results."
     )
     input_schema = {
         "type": "object",

@@ -43,9 +43,10 @@ def test_build_system_prompt_uses_wattle_default_without_pi_docs(tmp_path: Path)
     assert "prefer conventional entrypoint names and process shapes" in prompt
     assert "Before starting a long-running, expensive, or quiet operation" in prompt
     assert "Wattle does not automatically start monitors after background commands" in prompt
-    assert "Use spawn_agent for independent, bounded side tasks" in prompt
+    assert "Before spawning subagents, quickly decide the work split" in prompt
     assert "set agent_type explicitly when the role matters" in prompt
-    assert "do not duplicate their assigned work locally while they are still running" in prompt
+    assert "do not duplicate a subagent's assigned work while it is still running" in prompt
+    assert "write the task so the ownership is clear in prose" in prompt
     assert "first find the image path using available file-search tools" in prompt
     assert "Each old_text must match exactly and uniquely" in prompt
     assert "send them together in one edit call with the edits array" in prompt

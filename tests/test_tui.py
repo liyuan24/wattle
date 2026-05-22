@@ -1015,6 +1015,7 @@ def test_transcript_user_text_keeps_distinct_prompt_background() -> None:
     assert "48;5;235" in tui.USER_STYLE
     assert "48;5" not in tui.ASSISTANT_STYLE
     assert "48;5" not in tui.THINKING_STYLE
+    assert ";3" not in tui.THINKING_STYLE
     assert "48;5" in tui.PROMPT_STYLE
     assert tui.USER_STYLE == tui.PROMPT_STYLE
     assert "you" not in rendered
@@ -2215,7 +2216,7 @@ def test_live_prompt_shows_end_turn_queue_in_separate_panel(tmp_path: Path) -> N
     assert str(second) not in rendered
 
 
-def test_live_prompt_shows_active_subagent_waiting_status(
+def test_live_prompt_shows_subagent_lifecycle_status(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     out = _TTYBuffer()
@@ -2231,21 +2232,22 @@ def test_live_prompt_shows_active_subagent_waiting_status(
                     "subagent_id": "subagent-123",
                     "display_name": "Hopper",
                     "role": "explorer",
-                    "status": "running",
+                    "status": "completed",
                     "task": "Inspect the prompt state",
+                    "result": "TUI input path identified",
                 },
                 {
                     "subagent_id": "subagent-456",
                     "display_name": "Grace",
                     "role": "explorer",
-                    "status": "pending",
+                    "status": "running",
                     "task": "Inspect tool flows",
                 },
                 {
                     "subagent_id": "subagent-789",
                     "display_name": "Ada",
                     "role": "worker",
-                    "status": "closing",
+                    "status": "running",
                     "task": "Patch tests",
                 },
             ]
@@ -2255,12 +2257,12 @@ def test_live_prompt_shows_active_subagent_waiting_status(
     live._draw_prompt()
 
     rendered = out.getvalue()
-    assert f"\x1b[0m\x1b[2K{tui.SUBAGENT_WAIT_TITLE_STYLE} Waiting for 3 subagents" in rendered
+    assert f"\x1b[0m\x1b[2K{tui.SUBAGENT_WAIT_TITLE_STYLE} Subagents · 1 complete, 2 running" in rendered
     assert "Waiting for subagent(s)" not in rendered
-    assert "Waiting for 3 subagents" in rendered
-    assert "Hopper [explorer] Inspect the prompt state" in rendered
-    assert "Grace [explorer] Inspect tool flows" in rendered
-    assert "Ada [worker] Patch tests" in rendered
+    assert "Subagents · 1 complete, 2 running" in rendered
+    assert "Hopper [explorer] complete · TUI input path identified" in rendered
+    assert "Grace [explorer] running · Inspect tool flows" in rendered
+    assert "Ada [worker] running · Patch tests" in rendered
 
 
 def test_live_prompt_suppresses_generic_wait_agent_status_for_active_subagents(
@@ -2290,7 +2292,7 @@ def test_live_prompt_suppresses_generic_wait_agent_status_for_active_subagents(
     live._draw_prompt()
 
     rendered = _strip_ansi(out.getvalue())
-    assert "Waiting for 1 subagent" in rendered
+    assert "Subagents · 1 running" in rendered
     assert "Waiting for subagent\n" not in rendered
 
 
@@ -2370,7 +2372,7 @@ def test_live_subagent_event_renders_notification_without_queueing() -> None:
     )
 
     rendered = _strip_ansi(out.getvalue())
-    assert "Hopper [explorer] completed" in rendered
+    assert "Hopper [explorer] complete" in rendered
     assert "Inspect the prompt state" in rendered
     assert live.pending_monitor_inputs == []
     assert started == []
@@ -3081,7 +3083,6 @@ def test_live_terminal_configures_subagents_before_tool_dispatch() -> None:
     rendered = _strip_ansi(out.getvalue())
     assert provider.child_requests
     assert "Spawned Hopper [explorer] (gpt-5.5)" in rendered
-    assert "Workspace:" in rendered
     assert "inspect child task" in rendered
     assert "subagent runtime is not configured" not in rendered
     assert "spawn_agent error" not in rendered
@@ -3115,15 +3116,137 @@ def test_spawn_agent_success_renders_friendly_summary() -> None:
 
     rendered = _strip_ansi(out.getvalue())
     assert "Spawned Hopper [explorer] (gpt-5.5 xhigh)" in rendered
-    assert (
-        "Workspace: /Users/LiyuanLiu/repos/enterprise-rag. "
-        "Investigate reproduction surfaces for issue 3 only"
-    ) in rendered
+    assert "└ Investigate reproduction surfaces for issue 3 only" in rendered
     assert "subagent_id:" not in rendered
 
 
-@pytest.mark.parametrize("tool_name", ["wait_agent", "send_input", "close_agent"])
-def test_subagent_housekeeping_successes_are_hidden_in_transcript(tool_name: str) -> None:
+def test_wait_agent_success_renders_finished_waiting_block() -> None:
+    out = _TTYBuffer()
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+    block = ToolUseBlock(
+        id="call_1",
+        name="wait_agent",
+        input={"subagent_id": "subagent-123"},
+    )
+    result = ToolResultBlock(
+        tool_use_id="call_1",
+        content=(
+            "subagent_id: subagent-123\n"
+            "name: Hopper\n"
+            "role: explorer\n"
+            "status: completed\n"
+            "result:\n"
+            "inspected TUI rendering"
+        ),
+    )
+
+    app._write_tool_result(block, result)
+
+    rendered = _strip_ansi(out.getvalue())
+    assert "Finished waiting" in rendered
+    assert "Hopper [explorer]: Complete - inspected TUI rendering" in rendered
+    assert "subagent_id:" not in rendered
+
+
+def test_wait_agent_group_result_uses_visible_subagent_statuses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    out = _TTYBuffer()
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+
+    class FakeSubagents:
+        def snapshots(self) -> list[dict[str, object]]:
+            return [
+                {
+                    "subagent_id": "subagent-123",
+                    "display_name": "Grace",
+                    "role": "explorer",
+                    "status": "completed",
+                    "result": "inspected TUI rendering",
+                },
+                {
+                    "subagent_id": "subagent-456",
+                    "display_name": "Ada",
+                    "role": "explorer",
+                    "status": "running",
+                    "task": "checking PTY coverage",
+                },
+                {
+                    "subagent_id": "subagent-789",
+                    "display_name": "Hopper",
+                    "role": "worker",
+                    "status": "failed",
+                    "error": "failed to apply patch",
+                },
+            ]
+
+    monkeypatch.setattr(app.runtime, "_subagents", FakeSubagents())
+    block = ToolUseBlock(
+        id="call_1",
+        name="wait_agent",
+        input={"subagent_id": "subagent-123"},
+    )
+    result = ToolResultBlock(tool_use_id="call_1", content="status: completed")
+
+    app._write_tool_result(block, result)
+
+    rendered = _strip_ansi(out.getvalue())
+    assert "Finished waiting" in rendered
+    assert "Grace [explorer]: Complete - inspected TUI rendering" in rendered
+    assert "Ada [explorer]: Running - checking PTY coverage" in rendered
+    assert "Hopper [worker]: Error - failed to apply patch" in rendered
+    assert "subagent_id:" not in rendered
+
+
+def test_wait_agent_begin_renders_visible_subagent_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    out = _TTYBuffer()
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+
+    class FakeSubagents:
+        def snapshots(self) -> list[dict[str, object]]:
+            return [
+                {
+                    "subagent_id": "subagent-123",
+                    "display_name": "Grace",
+                    "role": "explorer",
+                    "status": "running",
+                },
+                {
+                    "subagent_id": "subagent-456",
+                    "display_name": "Ada",
+                    "role": "worker",
+                    "status": "pending",
+                },
+            ]
+
+    monkeypatch.setattr(app.runtime, "_subagents", FakeSubagents())
+
+    app._write_wait_agent_begin(
+        ToolUseBlock(id="call_1", name="wait_agent", input={"subagent_id": "subagent-123"})
+    )
+
+    rendered = _strip_ansi(out.getvalue())
+    assert "Waiting for 2 agents" in rendered
+    assert "Grace [explorer]" in rendered
+    assert "Ada [worker]" in rendered
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "expected"),
+    [
+        ("send_input", "Sent input to Hopper [explorer]"),
+        ("close_agent", "Closed Hopper [explorer]"),
+    ],
+)
+def test_subagent_housekeeping_successes_render_lifecycle_rows(
+    tool_name: str,
+    expected: str,
+) -> None:
     out = _TTYBuffer()
     app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
@@ -3134,15 +3257,17 @@ def test_subagent_housekeeping_successes_are_hidden_in_transcript(tool_name: str
     )
     result = ToolResultBlock(
         tool_use_id="call_1",
-        content="subagent_id: subagent-123\nstatus: completed",
+        content="subagent_id: subagent-123\nname: Hopper\nrole: explorer\nstatus: completed",
     )
 
     app._write_tool_result(block, result)
 
-    assert out.getvalue() == ""
+    rendered = _strip_ansi(out.getvalue())
+    assert expected in rendered
+    assert "subagent_id:" not in rendered
 
 
-def test_subagent_housekeeping_errors_are_hidden_in_transcript() -> None:
+def test_subagent_housekeeping_errors_remain_visible() -> None:
     out = _TTYBuffer()
     app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app._force_plain = False
@@ -3160,8 +3285,8 @@ def test_subagent_housekeeping_errors_are_hidden_in_transcript() -> None:
     app._write_tool_result(block, result)
 
     rendered = _strip_ansi(out.getvalue())
-    assert "wait_agent error" not in rendered
-    assert "RuntimeError: failed" not in rendered
+    assert "wait_agent error" in rendered
+    assert "RuntimeError: failed" in rendered
 
 
 def test_terminal_read_only_blocks_non_read_tool(monkeypatch: pytest.MonkeyPatch) -> None:

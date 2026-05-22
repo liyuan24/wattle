@@ -207,14 +207,13 @@ BOLD = "\x1b[1m"
 USER_STYLE = "\x1b[48;5;235;38;5;231m"
 MESSAGE_BLOCK_VERTICAL_PADDING = 1
 ASSISTANT_STYLE = "\x1b[38;5;255m"
-THINKING_STYLE = "\x1b[38;5;245;3m"
+THINKING_STYLE = "\x1b[38;5;245m"
 WORKED_DURATION_STYLE = "\x1b[38;5;240m"
 TOOL_STYLE = "\x1b[48;5;58;38;5;230m"
 TOOL_MARKER_STYLE = "\x1b[38;5;82m"
 TOOL_MARKER = "|"
 TOOL_TITLE_STYLE = "\x1b[38;5;255;1m"
 TOOL_PREVIEW_STYLE = "\x1b[38;5;245m"
-QUIET_SUCCESS_TOOL_NAMES = frozenset({"wait_agent", "send_input", "close_agent"})
 DIFF_ADD_STYLE = "\x1b[48;5;22;38;5;231m"
 DIFF_DELETE_STYLE = "\x1b[48;5;52;38;5;231m"
 DIFF_ADD_COUNT_STYLE = "\x1b[38;5;82;1m"
@@ -258,6 +257,26 @@ SELECTED_ROW_STYLE = "\x1b[48;5;240;38;5;255;1m"
 COMPACTION_FRAMES = ("◐", "◓", "◑", "◒")
 WAIT_AGENT_RUNNING_TITLE = "Waiting for subagent"
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b[78]")
+SUBAGENT_VISIBLE_STATUSES = frozenset(
+    {"pending", "running", "closing", "completed", "failed"}
+)
+SUBAGENT_STATUS_LABELS = {
+    "pending": "waiting to start",
+    "running": "running",
+    "completed": "complete",
+    "failed": "error",
+    "closing": "closing",
+    "closed": "closed",
+}
+SUBAGENT_STATUS_GLYPHS = {
+    "pending": "◌",
+    "running": "↻",
+    "completed": "✓",
+    "failed": "!",
+    "closing": "×",
+    "closed": "×",
+}
+SUBAGENT_STATUS_ORDER = ("completed", "failed", "running", "pending", "closing")
 
 WATTLE_LOGO_LINES: tuple[str, ...] = (
     "   \\ | /   ",
@@ -336,8 +355,108 @@ def _key_value_lines(content: str) -> dict[str, str]:
     return fields
 
 
+def _subagent_summary_fields(content: str) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    lines = content.splitlines()
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        key, separator, value = line.partition(": ")
+        if separator:
+            fields[key] = value
+            index += 1
+            continue
+        if line in {"result:", "error:"}:
+            key = line[:-1]
+            index += 1
+            body: list[str] = []
+            while index < len(lines) and not re.match(r"^[a-z_]+: ", lines[index]):
+                body.append(lines[index])
+                index += 1
+            fields[key] = "\n".join(body).strip()
+            continue
+        index += 1
+    return fields
+
+
+def _short_subagent_id(subagent_id: object) -> str:
+    text = str(subagent_id or "subagent")
+    if text.startswith("subagent-") and len(text) > 18:
+        return f"subagent-{text[-6:]}"
+    return text
+
+
+def _subagent_label(fields: Mapping[str, object]) -> str:
+    name = str(
+        fields.get("name")
+        or fields.get("display_name")
+        or _short_subagent_id(fields.get("subagent_id"))
+    )
+    role = str(fields.get("role") or "subagent")
+    return f"{name} [{role}]"
+
+
+def _subagent_status_label(status: object) -> str:
+    return SUBAGENT_STATUS_LABELS.get(str(status or ""), str(status or "updated"))
+
+
+def _subagent_status_glyph(status: object) -> str:
+    return SUBAGENT_STATUS_GLYPHS.get(str(status or ""), "•")
+
+
+def _subagent_summary_text(fields: Mapping[str, object]) -> str:
+    for key in ("result", "error", "summary", "task"):
+        value = fields.get(key)
+        if isinstance(value, str) and value.strip():
+            return _one_line(value, limit=120)
+    return ""
+
+
+def _subagent_count_summary(snapshots: list[Mapping[str, object]]) -> str:
+    counts: dict[str, int] = {}
+    for snapshot in snapshots:
+        status = str(snapshot.get("status") or "")
+        if status:
+            counts[status] = counts.get(status, 0) + 1
+    parts: list[str] = []
+    for status in SUBAGENT_STATUS_ORDER:
+        count = counts.get(status, 0)
+        if count:
+            parts.append(f"{count} {_subagent_status_label(status)}")
+    for status, count in sorted(counts.items()):
+        if status not in SUBAGENT_STATUS_ORDER:
+            parts.append(f"{count} {_subagent_status_label(status)}")
+    return ", ".join(parts) if parts else "none"
+
+
+def _subagent_lifecycle_lines(snapshots: list[Mapping[str, object]]) -> list[str]:
+    lines: list[str] = []
+    for snapshot in snapshots:
+        status = str(snapshot.get("status") or "")
+        line = (
+            f"  {_subagent_status_glyph(status)} {_subagent_label(snapshot)} "
+            f"{_subagent_status_label(status)}"
+        )
+        summary = _subagent_summary_text(snapshot)
+        if summary:
+            line = f"{line} · {summary}"
+        lines.append(line)
+    return lines
+
+
+def _subagent_result_line(fields: Mapping[str, object]) -> str:
+    status = str(fields.get("status") or "")
+    label = _subagent_label(fields)
+    status_text = _subagent_status_label(status).capitalize()
+    summary = _subagent_summary_text(fields)
+    line = f"{label}: {status_text}"
+    if summary:
+        line = f"{line} - {summary}"
+    return line
+
+
 def _spawn_agent_title(block: ToolUseBlock, result: ToolResultBlock) -> str:
-    fields = _key_value_lines(result.content)
+    fields = _subagent_summary_fields(result.content)
     name = fields.get("name") or fields.get("subagent_id") or "subagent"
     role = fields.get("role") or "subagent"
     model = fields.get("model") or _one_line(block.input.get("model", "default"))
@@ -347,31 +466,27 @@ def _spawn_agent_title(block: ToolUseBlock, result: ToolResultBlock) -> str:
 
 
 def _spawn_agent_detail(block: ToolUseBlock, result: ToolResultBlock) -> str:
-    fields = _key_value_lines(result.content)
-    workspace = fields.get("workspace") or str(Path.cwd())
+    fields = _subagent_summary_fields(result.content)
     task = fields.get("task") or _one_line(block.input.get("task", ""))
     if task:
-        return _one_line(f"└ Workspace: {workspace}. {task}", limit=180)
-    return _one_line(f"└ Workspace: {workspace}", limit=180)
+        return _one_line(f"└ {task}", limit=180)
+    return "└ [no task]"
 
 
 def _subagent_event_title(event: Mapping[str, object]) -> str:
-    name = str(event.get("name") or event.get("subagent_id") or "subagent")
-    role = str(event.get("role") or "subagent")
-    status = str(event.get("status") or "updated")
-    return f"{name} [{role}] {status}"
+    return f"{_subagent_label(event)} {_subagent_status_label(event.get('status'))}"
 
 
 def _subagent_event_detail(event: Mapping[str, object]) -> str:
-    task = str(event.get("task") or event.get("summary") or "").strip()
-    return _one_line(f"└ {task}", limit=180) if task else ""
+    summary = _subagent_summary_text(event)
+    return _one_line(f"└ {summary}", limit=180) if summary else ""
 
 
-def _active_subagent_snapshots(snapshots: list[dict[str, object]]) -> list[dict[str, object]]:
+def _visible_subagent_snapshots(snapshots: list[dict[str, object]]) -> list[dict[str, object]]:
     return [
         snapshot
         for snapshot in snapshots
-        if snapshot.get("status") in {"pending", "running", "closing"}
+        if snapshot.get("status") in SUBAGENT_VISIBLE_STATUSES
     ]
 
 
@@ -557,13 +672,6 @@ def _render_diff_row(kind: str, line: str, *, width: int) -> str:
         f"{_render_python_syntax(code, base_style=code_style)}"
     )
     return f"\r\x1b[?7l\x1b[0m\x1b[2K{rendered}{code_style}\x1b[K{RESET}\x1b[?7h"
-
-
-def _suppress_successful_tool_result(
-    block: ToolUseBlock,
-    result: ToolResultBlock,
-) -> bool:
-    return block.name in QUIET_SUCCESS_TOOL_NAMES and not result.is_error
 
 
 def _first_tool_result(
@@ -2276,14 +2384,24 @@ class WattleApp:
         self._research_run_seen.clear()
         self._last_transcript_was_separator = False
         if result.is_error:
-            return
-        if _suppress_successful_tool_result(block, result):
+            if block.name in {"spawn_agent", "wait_agent", "send_input", "close_agent"}:
+                self._write_subagent_tool_error(block, result)
+                return
             return
         if block.name in {"write", "edit"} and not result.is_error:
             self._write_edit_result(block, result)
             return
         if block.name == "spawn_agent" and not result.is_error:
             self._write_spawn_agent_result(block, result)
+            return
+        if block.name == "wait_agent" and not result.is_error:
+            self._write_wait_agent_result(block, result)
+            return
+        if block.name == "send_input" and not result.is_error:
+            self._write_send_input_result(block, result)
+            return
+        if block.name == "close_agent" and not result.is_error:
+            self._write_close_agent_result(block, result)
             return
         title = _tool_action_title(block, is_error=result.is_error)
         preview_content = result.content
@@ -2327,6 +2445,117 @@ class WattleApp:
 
         self._write(f"{TOOL_MARKER_STYLE}{TOOL_MARKER}{RESET} {TOOL_TITLE_STYLE}{title}{RESET}\n")
         self._write(f"{TOOL_PREVIEW_STYLE}  {detail}{RESET}\n")
+
+    def _write_wait_agent_begin(self, block: ToolUseBlock) -> None:
+        snapshots = self._subagent_snapshots_for_tool(block)
+        if not snapshots:
+            subagent_id = block.input.get("subagent_id")
+            snapshots = [{"subagent_id": subagent_id, "role": "subagent"}]
+        count = len(snapshots)
+        noun = "agent" if count == 1 else "agents"
+        title = f"Waiting for {count} {noun}"
+        lines = [f"└ {_subagent_label(snapshots[0])}"]
+        lines.extend(f"  {_subagent_label(snapshot)}" for snapshot in snapshots[1:])
+        self._write_subagent_lifecycle_block(title, lines)
+
+    def _write_wait_agent_result(
+        self,
+        block: ToolUseBlock,
+        result: ToolResultBlock,
+    ) -> None:
+        snapshots = self._subagent_snapshots_for_tool(block)
+        if snapshots:
+            lines = []
+            for index, snapshot in enumerate(snapshots):
+                prefix = "└" if index == 0 else " "
+                lines.append(f"{prefix} {_subagent_result_line(snapshot)}")
+        else:
+            fields = _subagent_summary_fields(result.content)
+            lines = [f"└ {_subagent_result_line(fields)}"]
+        self._write_subagent_lifecycle_block("Finished waiting", lines)
+
+    def _write_send_input_result(
+        self,
+        _block: ToolUseBlock,
+        result: ToolResultBlock,
+    ) -> None:
+        fields = _subagent_summary_fields(result.content)
+        self._write_subagent_lifecycle_block(
+            f"Sent input to {_subagent_label(fields)}",
+            [],
+        )
+
+    def _write_close_agent_result(
+        self,
+        _block: ToolUseBlock,
+        result: ToolResultBlock,
+    ) -> None:
+        fields = _subagent_summary_fields(result.content)
+        self._write_subagent_lifecycle_block(
+            f"Closed {_subagent_label(fields)}",
+            [],
+        )
+
+    def _write_subagent_tool_error(
+        self,
+        block: ToolUseBlock,
+        result: ToolResultBlock,
+    ) -> None:
+        title = f"{block.name} error"
+        preview = _compact_lines(result.content, max_lines=4, max_width=110) or ["[no output]"]
+        if not self._styles_enabled():
+            self._write_line(f"{TOOL_MARKER} {title}")
+            for line in preview:
+                self._write_line(f"  {line}")
+            return
+        self._write(f"{ERROR_TEXT_STYLE}{TOOL_MARKER}{RESET} {ERROR_TEXT_STYLE}{title}{RESET}\n")
+        for line in preview:
+            self._write(f"{TOOL_PREVIEW_STYLE}  {line}{RESET}\n")
+
+    def _write_subagent_lifecycle_block(self, title: str, lines: list[str]) -> None:
+        if not self._styles_enabled():
+            self._write_line(f"{TOOL_MARKER} {title}")
+            for line in lines:
+                self._write_line(f"  {line}")
+            return
+        self._write(
+            f"{TOOL_MARKER_STYLE}{TOOL_MARKER}{RESET} "
+            f"{TOOL_TITLE_STYLE}{title}{RESET}\n"
+        )
+        for line in lines:
+            self._write(f"{TOOL_PREVIEW_STYLE}  {line}{RESET}\n")
+
+    def _subagent_snapshots_for_tool(
+        self,
+        block: ToolUseBlock,
+    ) -> list[dict[str, object]]:
+        target_id = str(block.input.get("subagent_id") or "")
+        visible = self._visible_subagent_snapshots()
+        if target_id and any(snapshot.get("subagent_id") == target_id for snapshot in visible):
+            if len(visible) > 1:
+                return visible
+            return [
+                snapshot
+                for snapshot in visible
+                if snapshot.get("subagent_id") == target_id
+            ]
+        if not target_id and len(visible) > 1:
+            return visible
+        if target_id:
+            for snapshot in self._subagent_snapshots():
+                if snapshot.get("subagent_id") == target_id:
+                    return [snapshot]
+            return []
+        return visible
+
+    def _subagent_snapshots(self) -> list[dict[str, object]]:
+        subagents = getattr(self.runtime, "_subagents", None)
+        if subagents is None:
+            return []
+        return list(subagents.snapshots())
+
+    def _visible_subagent_snapshots(self) -> list[dict[str, object]]:
+        return _visible_subagent_snapshots(self._subagent_snapshots())
 
     def _write_edit_result(
         self,
@@ -4314,6 +4543,8 @@ class _LiveTerminal:
 
         self.active_tool_status = _tool_running_title(block)
         self._last_running_frame_at = 0.0
+        if block.name == "wait_agent":
+            self.app._write_wait_agent_begin(block)
         self._draw_prompt()
         worker = threading.Thread(
             target=run_tool,
@@ -4383,7 +4614,7 @@ class _LiveTerminal:
         )
         preview = rendered_input.text
         cursor = min(len(preview), rendered_input.cursor)
-        active_subagents = self._active_subagent_snapshots()
+        visible_subagents = self._visible_subagent_snapshots()
         if self.statusline_selector_active:
             rows.extend(
                 _render_statusline_selector_rows(
@@ -4403,27 +4634,23 @@ class _LiveTerminal:
             frame = COMPACTION_FRAMES[int(time.monotonic() * 8) % len(COMPACTION_FRAMES)]
             line = f" {frame} Auto-compacting..."
             rows.append(_styled_terminal_line(line, COMPACTION_STYLE, width))
-        elif self.streaming and not self._suppress_running_status_line(active_subagents):
+        elif self.streaming and not self._suppress_running_status_line(visible_subagents):
             rows.append(_default_terminal_line("", width))
             rows.append(self._running_status_line(width))
             rows.append(_default_terminal_line("", width))
-        if active_subagents:
-            count = len(active_subagents)
-            noun = "subagent" if count == 1 else "subagents"
+        if visible_subagents:
+            summary = _subagent_count_summary(visible_subagents)
             rows.append(
                 _styled_terminal_line(
-                    f" Waiting for {count} {noun}",
+                    f" Subagents · {summary}",
                     SUBAGENT_WAIT_TITLE_STYLE,
                     width,
                 )
             )
-            for snapshot in active_subagents[:3]:
-                name = str(snapshot.get("display_name") or snapshot.get("subagent_id"))
-                role = str(snapshot.get("role") or "subagent")
-                task = _one_line(str(snapshot.get("task") or ""), limit=max(20, line_width - 8))
-                line = f"  ↳ {name} [{role}] {task}"
+            for line in _subagent_lifecycle_lines(visible_subagents[:3]):
+                line = _one_line(line, limit=max(20, line_width - 1))
                 rows.append(_styled_terminal_line(line, STATUS_STYLE, width))
-            omitted = count - 3
+            omitted = len(visible_subagents) - 3
             if omitted > 0:
                 rows.append(_styled_terminal_line(f"  ... +{omitted} more", STATUS_STYLE, width))
         if self.interrupted_user_inputs:
@@ -4530,11 +4757,11 @@ class _LiveTerminal:
             cursor_column=cursor_column,
         )
 
-    def _active_subagent_snapshots(self) -> list[dict[str, object]]:
+    def _visible_subagent_snapshots(self) -> list[dict[str, object]]:
         subagents = getattr(self.app.runtime, "_subagents", None)
         if subagents is None:
             return []
-        return _active_subagent_snapshots(subagents.snapshots())
+        return _visible_subagent_snapshots(subagents.snapshots())
 
     def _write_prompt_frame(
         self,
@@ -4603,14 +4830,14 @@ class _LiveTerminal:
         return (
             self.streaming
             and not self.compacting
-            and not self._suppress_running_status_line(self._active_subagent_snapshots())
+            and not self._suppress_running_status_line(self._visible_subagent_snapshots())
         )
 
     def _suppress_running_status_line(
         self,
-        active_subagents: list[dict[str, object]],
+        visible_subagents: list[dict[str, object]],
     ) -> bool:
-        return self.active_tool_status == WAIT_AGENT_RUNNING_TITLE and bool(active_subagents)
+        return self.active_tool_status == WAIT_AGENT_RUNNING_TITLE and bool(visible_subagents)
 
     def _redraw_running_status_line(self) -> None:
         if not self._running_status_active() or self.prompt_lines == 0:

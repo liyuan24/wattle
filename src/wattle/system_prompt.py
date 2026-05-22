@@ -160,10 +160,9 @@ def _guidelines(
         guidelines.append("Use read to examine files before editing.")
     if {"spawn_agent", "wait_agent"}.issubset(names):
         guidelines.append(
-            "Use spawn_agent for independent, bounded side tasks that can run "
-            "without blocking your immediate next step. Wait with wait_agent "
-            "only when you need the result to continue, and close subagents "
-            "when they are no longer needed."
+            "Before spawning subagents, quickly decide the work split: what "
+            "you will continue doing locally now, what each subagent owns, and "
+            "when you must wait before continuing."
         )
         guidelines.append(
             "When spawning a subagent, set agent_type explicitly when the role "
@@ -172,11 +171,18 @@ def _guidelines(
             "is intended."
         )
         guidelines.append(
-            "After delegating work to subagents, do not duplicate their assigned "
-            "work locally while they are still running. Check status periodically "
-            "with wait_agent and keep waiting when those results are needed; "
-            "synthesize only after the relevant subagents complete, fail, or are "
-            "explicitly closed."
+            "Use subagents only for independent, bounded side tasks that can run "
+            "without blocking your immediate next local step. After spawning, do "
+            "not duplicate a subagent's assigned work while it is still running. "
+            "Continue locally only on non-overlapping work, and use wait_agent "
+            "before synthesizing results, making decisions that depend on "
+            "delegated findings, editing shared files, or giving a final answer "
+            "that depends on delegated work."
+        )
+        guidelines.append(
+            "When spawning, write the task so the ownership is clear in prose. "
+            'For example: "Inspect only the TUI rendering path and relevant '
+            'tests. Do not edit files."'
         )
     if "edit" in names:
         guidelines.append(
