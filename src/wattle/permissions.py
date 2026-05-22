@@ -35,7 +35,7 @@ class PermissionResult:
 
 PermissionPrompt = Callable[[ToolUseBlock], PermissionAnswer]
 
-READ_ONLY_TOOLS = frozenset({"read", "view_image"})
+READ_ONLY_TOOLS = frozenset({"read", "view_image", "update_plan"})
 _READ_ONLY_SHELL_COMMANDS = frozenset({"pwd", "ls", "rg"})
 _READ_ONLY_GIT_SUBCOMMANDS = frozenset(
     {

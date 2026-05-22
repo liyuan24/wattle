@@ -5,6 +5,7 @@ from .bash import BashTool
 from .edit import EditTool
 from .image import ViewImageTool
 from .monitor import MonitorTool
+from .plan import UpdatePlanTool
 from .read import ReadTool
 from .subagent import CloseAgentTool, SendInputTool, SpawnAgentTool, WaitAgentTool
 from .write import WriteTool
@@ -25,6 +26,7 @@ def build_tools(runtime: WattleRuntime | None = None) -> dict[str, Tool]:
         ReadTool(),
         WriteTool(),
         EditTool(),
+        UpdatePlanTool(),
     ]
     return {tool.name: tool for tool in tools}
 
@@ -45,6 +47,7 @@ __all__ = [
     "SpawnAgentTool",
     "Tool",
     "ToolSpec",
+    "UpdatePlanTool",
     "ViewImageTool",
     "WattleRuntime",
     "WaitAgentTool",

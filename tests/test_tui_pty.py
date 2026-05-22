@@ -250,6 +250,125 @@ def _tool_rendering_child_code() -> str:
     )
 
 
+def _grouped_edit_child_code() -> str:
+    return textwrap.dedent(
+        """
+        import argparse
+
+        from wattle.permissions import PermissionMode
+        from wattle.providers import (
+            CompletionResponse,
+            Provider,
+            StreamComplete,
+            TextBlock,
+            TextDelta,
+            ToolUseBlock,
+            ToolUseDelta,
+        )
+        from wattle.tools import TOOLS_BY_NAME
+        from wattle.tools.base import Tool
+        from wattle.tui import WattleApp
+
+
+        class FastEditTool(Tool):
+            name = "edit"
+            description = "Fast test edit."
+            input_schema = {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "line": {"type": "integer"},
+                    "before": {"type": "string"},
+                    "after": {"type": "string"},
+                },
+            }
+
+            def run(self, path, line, before, after):
+                return "\\n".join(
+                    [
+                        f"Edited {path}",
+                        f"--- {path} (before)",
+                        f"+++ {path} (after)",
+                        f"@@ -{line},1 +{line},1 @@",
+                        f"-{before}",
+                        f"+{after}",
+                    ]
+                )
+
+
+        TOOLS_BY_NAME["edit"] = FastEditTool()
+
+
+        class GroupedEditProvider(Provider):
+            def __init__(self):
+                self.calls = 0
+
+            def complete(self, request):
+                return CompletionResponse(
+                    content=[TextBlock(text="done")],
+                    stop_reason="end_turn",
+                    usage={},
+                )
+
+            def stream(self, request):
+                self.calls += 1
+                if self.calls == 1:
+                    yield ToolUseDelta(id="edit_1", name="edit", partial_json=None)
+                    yield ToolUseDelta(id="edit_2", name="edit", partial_json=None)
+                    yield StreamComplete(
+                        CompletionResponse(
+                            content=[
+                                ToolUseBlock(
+                                    id="edit_1",
+                                    name="edit",
+                                    input={
+                                        "path": "src/demo.py",
+                                        "line": 1,
+                                        "before": "old_one",
+                                        "after": "new_one",
+                                    },
+                                ),
+                                ToolUseBlock(
+                                    id="edit_2",
+                                    name="edit",
+                                    input={
+                                        "path": "src/demo.py",
+                                        "line": 7,
+                                        "before": "old_two",
+                                        "after": "new_two",
+                                    },
+                                ),
+                            ],
+                            stop_reason="tool_use",
+                            usage={},
+                        )
+                    )
+                    return
+                yield TextDelta(text="done")
+                yield StreamComplete(
+                    CompletionResponse(
+                        content=[TextBlock(text="done")],
+                        stop_reason="end_turn",
+                        usage={},
+                    )
+                )
+
+
+        args = argparse.Namespace(
+            provider="openai_responses",
+            model="gpt-5.5",
+            max_tokens=4096,
+            thinking=False,
+            effort=None,
+            prompt="group edits",
+            persist_session=False,
+            permission_mode=PermissionMode.YOLO,
+        )
+        raise SystemExit(WattleApp(args, GroupedEditProvider()).run())
+        """
+    )
+
+
 def _subagent_wait_child_code() -> str:
     return textwrap.dedent(
         """
@@ -482,6 +601,115 @@ def _research_child_code() -> str:
     )
 
 
+def _plan_update_child_code() -> str:
+    return textwrap.dedent(
+        """
+        import argparse
+
+        from wattle.permissions import PermissionMode
+        from wattle.providers import (
+            CompletionResponse,
+            Provider,
+            StreamComplete,
+            TextBlock,
+            TextDelta,
+            ToolUseBlock,
+            ToolUseDelta,
+        )
+        from wattle.tui import WattleApp
+
+
+        class PlanUpdateProvider(Provider):
+            def __init__(self):
+                self.calls = 0
+
+            def complete(self, request):
+                return CompletionResponse(
+                    content=[TextBlock(text="done")],
+                    stop_reason="end_turn",
+                    usage={},
+                )
+
+            def stream(self, request):
+                self.calls += 1
+                if self.calls == 1:
+                    yield ToolUseDelta(id="plan_1", name="update_plan", partial_json=None)
+                    yield StreamComplete(
+                        CompletionResponse(
+                            content=[
+                                ToolUseBlock(
+                                    id="plan_1",
+                                    name="update_plan",
+                                    input={
+                                        "explanation": "Moving into TUI checks.",
+                                        "plan": [
+                                            {
+                                                "step": "Inspect current flow",
+                                                "status": "completed",
+                                            },
+                                            {
+                                                "step": "Add semantic plan cell",
+                                                "status": "in_progress",
+                                            },
+                                            {
+                                                "step": "Run PTY coverage",
+                                                "status": "pending",
+                                            },
+                                        ],
+                                    },
+                                )
+                            ],
+                            stop_reason="tool_use",
+                            usage={},
+                        )
+                    )
+                    return
+                yield TextDelta(text="done")
+                yield StreamComplete(
+                    CompletionResponse(
+                        content=[TextBlock(text="done")],
+                        stop_reason="end_turn",
+                        usage={},
+                    )
+                )
+
+
+        args = argparse.Namespace(
+            provider="openai_responses",
+            model="gpt-5.5",
+            max_tokens=4096,
+            thinking=False,
+            effort=None,
+            prompt="plan",
+            persist_session=False,
+            permission_mode=PermissionMode.YOLO,
+        )
+        raise SystemExit(WattleApp(args, PlanUpdateProvider()).run())
+        """
+    )
+
+
+def test_pty_update_plan_renders_semantic_cell_without_tool_result(tmp_path: Path) -> None:
+    with PtySession.spawn_python(
+        _plan_update_child_code(),
+        cwd=tmp_path,
+        cols=100,
+        rows=30,
+    ) as session:
+        session.read_until("Updated Plan", timeout=4)
+        session.read_until("Add semantic plan cell", timeout=4)
+        session.read_until("done", timeout=4)
+
+        screen_text = session.screen.text()
+        assert "Updated Plan" in screen_text
+        assert "Moving into TUI checks." in screen_text
+        assert "- [x] Inspect current flow" in screen_text
+        assert "- [>] Add semantic plan cell" in screen_text
+        assert "- [ ] Run PTY coverage" in screen_text
+        assert "Plan updated" not in screen_text
+        assert "update_plan ok" not in screen_text
+
+
 def test_pty_research_tool_calls_render_aggregate(tmp_path: Path) -> None:
     (tmp_path / "notes.txt").write_text("needle\n", encoding="utf-8")
     (tmp_path / "other.txt").write_text("more\n", encoding="utf-8")
@@ -527,6 +755,27 @@ def test_pty_tool_rendering_uses_distinct_command_and_diff_styles(tmp_path: Path
         assert "\x1b[38;5;159;1msrc/demo.py\x1b[0m" in raw
         assert "\x1b[48;5;22;38;5;108m    1 " in raw
         assert "\x1b[48;5;22;38;5;82;1m+" in raw
+
+
+def test_pty_groups_adjacent_same_file_edit_results(tmp_path: Path) -> None:
+    with PtySession.spawn_python(
+        _grouped_edit_child_code(),
+        cwd=tmp_path,
+        cols=120,
+        rows=36,
+    ) as session:
+        session.read_until("Edited src/demo.py", timeout=4)
+        session.read_until("done", timeout=4)
+
+        screen_text = session.screen.text()
+        assert screen_text.count("Edited src/demo.py") == 1
+        assert "Edited src/demo.py (+2 -2)" in screen_text
+        assert "    1 -old_one" in screen_text
+        assert "    1 +new_one" in screen_text
+        assert "      ..." in screen_text
+        assert "    7 -old_two" in screen_text
+        assert "    7 +new_two" in screen_text
+        assert screen_text.index("    1 -old_one") < screen_text.index("    7 -old_two")
 
 
 def test_pty_subagent_waiting_and_completion_notifications(tmp_path: Path) -> None:

@@ -48,6 +48,8 @@ def test_build_system_prompt_uses_wattle_default_without_pi_docs(tmp_path: Path)
     assert "do not duplicate a subagent's assigned work while it is still running" in prompt
     assert "write the task so the ownership is clear in prose" in prompt
     assert "first find the image path using available file-search tools" in prompt
+    assert "Use update_plan for nontrivial multi-step work" in prompt
+    assert "Keep exactly one item in_progress at a time" in prompt
     assert "Each old_text must match exactly and uniquely" in prompt
     assert "send them together in one edit call with the edits array" in prompt
     assert "Merge nearby or overlapping changes into one replacement" in prompt
@@ -66,6 +68,7 @@ def test_system_prompt_preserves_context_and_runtime_metadata(tmp_path: Path) ->
     assert prompt.startswith("I'm Wattle, an AI coding assistant.")
     assert "# Project Context" in prompt
     assert "Project rules." in prompt
+    assert "Use update_plan for nontrivial multi-step work" not in prompt
     assert "Current date: 2026-05-10" in prompt
 
 

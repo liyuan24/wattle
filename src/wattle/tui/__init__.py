@@ -108,6 +108,7 @@ from wattle.skills import (
 from wattle.system_prompt import build_system_prompt
 from wattle.tools import DEFAULT_RUNTIME, TOOLS_BY_NAME
 from wattle.tools.base import Tool
+from wattle.tools.plan import PlanUpdate, parse_plan_update_input
 from wattle.tui import terminal as terminal_rendering
 from wattle.tui_flowers import Flower, flower_for_elapsed
 from wattle.turns import append_turn_step, build_turn_step
@@ -214,6 +215,9 @@ TOOL_MARKER_STYLE = "\x1b[38;5;82m"
 TOOL_MARKER = "|"
 TOOL_TITLE_STYLE = "\x1b[38;5;255;1m"
 TOOL_PREVIEW_STYLE = "\x1b[38;5;245m"
+PLAN_COMPLETED_STYLE = "\x1b[38;5;240m"
+PLAN_IN_PROGRESS_STYLE = "\x1b[38;5;80;1m"
+PLAN_PENDING_STYLE = TOOL_PREVIEW_STYLE
 DIFF_ADD_STYLE = "\x1b[48;5;22;38;5;231m"
 DIFF_DELETE_STYLE = "\x1b[48;5;52;38;5;231m"
 DIFF_ADD_COUNT_STYLE = "\x1b[38;5;82;1m"
@@ -277,6 +281,22 @@ SUBAGENT_STATUS_GLYPHS = {
     "closed": "×",
 }
 SUBAGENT_STATUS_ORDER = ("completed", "failed", "running", "pending", "closing")
+_EDIT_HUNK_SEPARATOR_ROW = "      ..."
+
+
+@dataclass
+class _EditRenderItem:
+    path: str
+    tool_name: str
+    added: int
+    deleted: int
+    rows: list[tuple[str, str]]
+
+
+@dataclass
+class _EditRenderGroup:
+    path: str
+    items: list[_EditRenderItem]
 
 WATTLE_LOGO_LINES: tuple[str, ...] = (
     "   \\ | /   ",
@@ -530,13 +550,65 @@ def _tool_running_title(block: ToolUseBlock) -> str:
 
 
 def _tool_edit_title(block: ToolUseBlock, *, path: str, added: int, deleted: int) -> str:
-    if block.name == "edit":
+    return _edit_title_for_tool_name(block.name, path=path, added=added, deleted=deleted)
+
+
+def _edit_title_for_tool_name(
+    tool_name: str,
+    *,
+    path: str,
+    added: int,
+    deleted: int,
+) -> str:
+    if tool_name == "edit":
         verb = "Edited"
     elif deleted == 0:
         verb = "Added"
     else:
         verb = "Wrote"
     return f"{verb} {path} (+{added} -{deleted})"
+
+
+def _edit_group_title(group: _EditRenderGroup) -> str:
+    added = sum(item.added for item in group.items)
+    deleted = sum(item.deleted for item in group.items)
+    tool_names = {item.tool_name for item in group.items}
+    if len(group.items) == 1:
+        return _edit_title_for_tool_name(
+            group.items[0].tool_name,
+            path=group.path,
+            added=added,
+            deleted=deleted,
+        )
+    if tool_names == {"edit"}:
+        verb = "Edited"
+    elif tool_names == {"write"}:
+        verb = "Wrote"
+    else:
+        verb = "Updated"
+    return f"{verb} {group.path} (+{added} -{deleted})"
+
+
+def _edit_render_item(
+    block: ToolUseBlock,
+    result: ToolResultBlock,
+) -> _EditRenderItem | None:
+    if result.is_error or block.name not in {"write", "edit"}:
+        return None
+    path = _tool_arg(block, "path", "<missing path>")
+    lines = result.content.splitlines()
+    diff_lines = lines[1:] if lines else []
+    added, deleted = _diff_counts(diff_lines)
+    rows = _diff_preview_lines(diff_lines, max_changes=None)
+    if not rows:
+        rows = [("meta", lines[0] if lines else "[no changes]")]
+    return _EditRenderItem(
+        path=path,
+        tool_name=block.name,
+        added=added,
+        deleted=deleted,
+        rows=rows,
+    )
 
 
 def _tool_arg(block: ToolUseBlock, name: str, default: str) -> str:
@@ -634,9 +706,7 @@ def _render_python_syntax(text: str, *, base_style: str) -> str:
             syntax_style = SYNTAX_STRING_STYLE
         elif token in _PYTHON_KEYWORDS:
             syntax_style = SYNTAX_KEYWORD_STYLE
-        elif token in _PYTHON_CONSTANTS:
-            syntax_style = SYNTAX_CONSTANT_STYLE
-        elif re.fullmatch(r"\d+(?:\.\d+)?", token):
+        elif token in _PYTHON_CONSTANTS or re.fullmatch(r"\d+(?:\.\d+)?", token):
             syntax_style = SYNTAX_CONSTANT_STYLE
         else:
             syntax_style = SYNTAX_NAME_STYLE
@@ -688,6 +758,29 @@ def _first_tool_result(
     )
 
 
+def _matching_tool_result(
+    message: Message | None,
+    tool_use_id: str,
+) -> ToolResultBlock | None:
+    if message is None:
+        return None
+    for block in message.content:
+        if isinstance(block, ToolResultBlock) and block.tool_use_id == tool_use_id:
+            return block
+    return None
+
+
+def _history_message_is_fully_suppressed(
+    message: Message,
+    suppressed_tool_result_ids: set[str],
+) -> bool:
+    return bool(message.content) and all(
+        isinstance(block, ToolResultBlock)
+        and block.tool_use_id in suppressed_tool_result_ids
+        for block in message.content
+    )
+
+
 def _research_summary_for_success(
     block: ToolUseBlock,
     result: ToolResultBlock,
@@ -702,6 +795,34 @@ def _research_summary_for_success(
 
 def _research_lines(summaries: list[CommandSummary]) -> list[str]:
     return [render_summary_action(summary) for summary in summaries]
+
+
+def _plan_update_for_success(
+    block: ToolUseBlock,
+    result: ToolResultBlock,
+) -> PlanUpdate | None:
+    if block.name != "update_plan" or result.is_error:
+        return None
+    try:
+        return parse_plan_update_input(block.input)
+    except ValueError:
+        return None
+
+
+def _plan_marker(status: str) -> str:
+    if status == "completed":
+        return "[x]"
+    if status == "in_progress":
+        return "[>]"
+    return "[ ]"
+
+
+def _plan_style(status: str) -> str:
+    if status == "completed":
+        return PLAN_COMPLETED_STYLE
+    if status == "in_progress":
+        return PLAN_IN_PROGRESS_STYLE
+    return PLAN_PENDING_STYLE
 
 
 def _diff_counts(diff_lines: list[str]) -> tuple[int, int]:
@@ -2303,11 +2424,18 @@ class WattleApp:
     async def _adispatch_tools(self, response: CompletionResponse) -> list[ContentBlock]:
         results: list[ContentBlock] = []
         pending_research: list[CommandSummary] = []
+        pending_edit_group: _EditRenderGroup | None = None
 
         def flush_research() -> None:
             if pending_research:
                 self._write_research_result(pending_research)
                 pending_research.clear()
+
+        def flush_edit_group() -> None:
+            nonlocal pending_edit_group
+            if pending_edit_group is not None:
+                self._write_edit_result_group(pending_edit_group)
+                pending_edit_group = None
 
         for block in response.content:
             if not isinstance(block, ToolUseBlock):
@@ -2318,13 +2446,32 @@ class WattleApp:
                 self.permission_gate,
             )
             result = _first_tool_result(block, blocks)
+            edit_item = _edit_render_item(block, result)
             summary = _research_summary_for_success(block, result)
-            if summary is not None:
+            if edit_item is not None:
+                flush_research()
+                if pending_edit_group is None:
+                    pending_edit_group = _EditRenderGroup(
+                        path=edit_item.path,
+                        items=[edit_item],
+                    )
+                elif pending_edit_group.path == edit_item.path:
+                    pending_edit_group.items.append(edit_item)
+                else:
+                    flush_edit_group()
+                    pending_edit_group = _EditRenderGroup(
+                        path=edit_item.path,
+                        items=[edit_item],
+                    )
+            elif summary is not None:
+                flush_edit_group()
                 pending_research.append(summary)
             else:
+                flush_edit_group()
                 flush_research()
                 self._write_tool_result(block, result)
             results.extend(blocks)
+        flush_edit_group()
         flush_research()
         return results
 
@@ -2376,6 +2523,35 @@ class WattleApp:
         for line in lines[1:]:
             self._write(f"{TOOL_PREVIEW_STYLE}    {line}{RESET}\n")
 
+    def _write_plan_update(self, update: PlanUpdate) -> None:
+        self._research_run_seen.clear()
+        self._last_transcript_was_separator = False
+        width = self._terminal_width()
+
+        rows: list[tuple[str, str]] = []
+        if update.explanation:
+            rows.extend(
+                (line, TOOL_PREVIEW_STYLE)
+                for line in _wrap_terminal_line(f"  {update.explanation}", width)
+            )
+        for step in update.plan:
+            prefix = f"  - {_plan_marker(step.status)} "
+            wrapped = _wrap_terminal_line(f"{prefix}{step.step}", width)
+            rows.extend((line, _plan_style(step.status)) for line in wrapped)
+
+        if not self._styles_enabled():
+            self._write_line(f"{TOOL_MARKER} Updated Plan")
+            for line, _style in rows:
+                self._write_line(line)
+            return
+
+        self._write(
+            f"{TOOL_MARKER_STYLE}{TOOL_MARKER}{RESET} "
+            f"{TOOL_TITLE_STYLE}Updated Plan{RESET}\n"
+        )
+        for line, style in rows:
+            self._write(f"{style}{line}{RESET}\n")
+
     def _write_tool_result(
         self,
         block: ToolUseBlock,
@@ -2387,6 +2563,10 @@ class WattleApp:
             if block.name in {"spawn_agent", "wait_agent", "send_input", "close_agent"}:
                 self._write_subagent_tool_error(block, result)
                 return
+            return
+        plan_update = _plan_update_for_success(block, result)
+        if plan_update is not None:
+            self._write_plan_update(plan_update)
             return
         if block.name in {"write", "edit"} and not result.is_error:
             self._write_edit_result(block, result)
@@ -2562,23 +2742,29 @@ class WattleApp:
         block: ToolUseBlock,
         result: ToolResultBlock,
     ) -> None:
-        path = _tool_arg(block, "path", "<missing path>")
-        lines = result.content.splitlines()
-        diff_lines = lines[1:] if lines else []
-        added, deleted = _diff_counts(diff_lines)
-        title = _tool_edit_title(block, path=path, added=added, deleted=deleted)
-        rows = _diff_preview_lines(diff_lines, max_changes=None)
-        if not rows:
-            rows = [("meta", lines[0] if lines else "[no changes]")]
+        item = _edit_render_item(block, result)
+        if item is None:
+            return
+        self._write_edit_result_group(_EditRenderGroup(path=item.path, items=[item]))
+
+    def _write_edit_result_group(self, group: _EditRenderGroup) -> None:
+        self._research_run_seen.clear()
+        self._last_transcript_was_separator = False
+        title = _edit_group_title(group)
 
         if not self._styles_enabled():
             self._write_line(f"{TOOL_MARKER} {title}")
-            for _, line in rows:
-                self._write_line(line)
+            for index, item in enumerate(group.items):
+                if index > 0:
+                    self._write_line(_EDIT_HUNK_SEPARATOR_ROW)
+                for _, line in item.rows:
+                    self._write_line(line)
             return
 
         verb_path = title.rsplit(" (", 1)[0]
         verb, _, title_path = verb_path.partition(" ")
+        added = sum(item.added for item in group.items)
+        deleted = sum(item.deleted for item in group.items)
         self._write(
             f"{TOOL_MARKER_STYLE}{TOOL_MARKER}{RESET} "
             f"{TOOL_TITLE_STYLE}{verb} {RESET}"
@@ -2589,8 +2775,13 @@ class WattleApp:
             f"{TOOL_TITLE_STYLE}){RESET}\n"
         )
         width = self._terminal_width()
-        for kind, line in rows:
-            self._write(f"{_render_diff_row(kind, line, width=width)}\n")
+        for index, item in enumerate(group.items):
+            if index > 0:
+                self._write(
+                    f"{_render_diff_row('meta', _EDIT_HUNK_SEPARATOR_ROW, width=width)}\n"
+                )
+            for kind, line in item.rows:
+                self._write(f"{_render_diff_row(kind, line, width=width)}\n")
 
     def _write_separator(self) -> None:
         if self._last_transcript_was_separator:
@@ -3153,20 +3344,50 @@ class WattleApp:
             self._run_turn()
 
     def _write_history_transcript(self) -> None:
-        for index, message in enumerate(self.messages):
-            if index:
+        self._write_history_messages(self.messages, with_separators=True)
+
+    def _write_history_messages(
+        self,
+        messages: list[Message],
+        *,
+        with_separators: bool,
+    ) -> None:
+        suppressed_tool_result_ids: set[str] = set()
+        wrote_message = False
+        for index, message in enumerate(messages):
+            if _history_message_is_fully_suppressed(message, suppressed_tool_result_ids):
+                continue
+            if with_separators and wrote_message:
                 self._write_separator()
-            self._write_history_message(message)
-        if self.messages:
+            next_message = messages[index + 1] if index + 1 < len(messages) else None
+            displayed = self._write_history_message(
+                message,
+                next_message=next_message,
+                suppressed_tool_result_ids=suppressed_tool_result_ids,
+            )
+            wrote_message = wrote_message or displayed
+        if with_separators and wrote_message:
             self._write_separator()
 
-    def _write_history_message(self, message: Message) -> None:
+    def _write_history_message(
+        self,
+        message: Message,
+        *,
+        next_message: Message | None = None,
+        suppressed_tool_result_ids: set[str] | None = None,
+    ) -> bool:
+        suppressed_ids = (
+            suppressed_tool_result_ids
+            if suppressed_tool_result_ids is not None
+            else set()
+        )
         text_parts: list[str] = []
         tool_results: list[ToolResultBlock] = []
         tool_uses: list[ToolUseBlock] = []
         images: list[ImageBlock] = []
         thinking_parts: list[str] = []
         redacted_thinking = 0
+        displayed = False
         for block in message.content:
             if isinstance(block, TextBlock):
                 text_parts.append(block.text)
@@ -3183,12 +3404,14 @@ class WattleApp:
 
         if thinking_parts:
             self._write_panel("thinking", "\n".join(thinking_parts), THINKING_STYLE)
+            displayed = True
         elif redacted_thinking:
             self._write_panel(
                 "thinking",
                 f"[{redacted_thinking} redacted thinking block(s)]",
                 THINKING_STYLE,
             )
+            displayed = True
 
         text = "\n".join(part for part in text_parts if part)
         if images:
@@ -3196,16 +3419,32 @@ class WattleApp:
             text = f"{text}\n{image_text}" if text else image_text
         if text:
             self._write_block(text, USER_STYLE if message.role == "user" else ASSISTANT_STYLE)
+            displayed = True
         elif not tool_uses and not tool_results and not thinking_parts and not redacted_thinking:
             self._write_panel(message.role, "[empty message]", STATUS_STYLE)
+            displayed = True
 
         for block in tool_uses:
+            result = _matching_tool_result(next_message, block.id)
+            plan_update = (
+                _plan_update_for_success(block, result) if result is not None else None
+            )
+            if plan_update is not None:
+                self._write_plan_update(plan_update)
+                suppressed_ids.add(block.id)
+                displayed = True
+                continue
             self._write_panel("tool use", tool_permission_summary(block), TOOL_TITLE_STYLE)
+            displayed = True
         for block in tool_results:
+            if block.tool_use_id in suppressed_ids:
+                continue
             label = "tool error" if block.is_error else "tool result"
             preview = "\n".join(_compact_lines(block.content, max_lines=6, max_width=110))
             style = ERROR_STYLE if block.is_error else TOOL_PREVIEW_STYLE
             self._write_panel(label, preview or "[no output]", style)
+            displayed = True
+        return displayed
 
     def _write_welcome_card(self) -> None:
         rows = [
@@ -4495,24 +4734,50 @@ class _LiveTerminal:
     ) -> list[ContentBlock]:
         results: list[ContentBlock] = []
         pending_research: list[CommandSummary] = []
+        pending_edit_group: _EditRenderGroup | None = None
 
         def flush_research() -> None:
             if pending_research:
                 self.app._write_research_result(pending_research)
                 pending_research.clear()
 
+        def flush_edit_group() -> None:
+            nonlocal pending_edit_group
+            if pending_edit_group is not None:
+                self.app._write_edit_result_group(pending_edit_group)
+                pending_edit_group = None
+
         for block in response.content:
             if not isinstance(block, ToolUseBlock):
                 continue
             blocks = self._dispatch_tool_with_animated_prompt(block)
             result = _first_tool_result(block, blocks)
+            edit_item = _edit_render_item(block, result)
             summary = _research_summary_for_success(block, result)
-            if summary is not None:
+            if edit_item is not None:
+                flush_research()
+                if pending_edit_group is None:
+                    pending_edit_group = _EditRenderGroup(
+                        path=edit_item.path,
+                        items=[edit_item],
+                    )
+                elif pending_edit_group.path == edit_item.path:
+                    pending_edit_group.items.append(edit_item)
+                else:
+                    flush_edit_group()
+                    pending_edit_group = _EditRenderGroup(
+                        path=edit_item.path,
+                        items=[edit_item],
+                    )
+            elif summary is not None:
+                flush_edit_group()
                 pending_research.append(summary)
             else:
+                flush_edit_group()
                 flush_research()
                 self.app._write_tool_result(block, result)
             results.extend(blocks)
+        flush_edit_group()
         flush_research()
         return results
 
@@ -4874,8 +5139,7 @@ class _LiveTerminal:
         self.app._write(VISIBLE_SCREEN_CLEAR)
         self.app._write(TERMINAL_HISTORY_CLEAR)
         self.app._write_welcome_card()
-        for message in self.app.messages:
-            self.app._write_history_message(message)
+        self.app._write_history_messages(self.app.messages, with_separators=False)
         self.app._last_transcript_was_separator = False
 
     def _clear_prompt(self) -> None:

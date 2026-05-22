@@ -18,6 +18,7 @@ def test_read_only_permission_allows_read_image_and_safe_shell() -> None:
 
     assert gate.check(_tool("read", path="README.md")).allowed
     assert gate.check(_tool("view_image", path="shot.png")).allowed
+    assert gate.check(_tool("update_plan", plan=[])).allowed
     assert gate.check(_tool("bash", command="pwd")).allowed
     assert gate.check(_tool("bash", command="git status --short")).allowed
 

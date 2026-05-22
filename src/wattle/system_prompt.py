@@ -155,6 +155,13 @@ def _guidelines(
             "the image path using available file-search tools, then call view_image with "
             "that path."
         )
+    if "update_plan" in names:
+        guidelines.append(
+            "Use update_plan for nontrivial multi-step work when tracking progress "
+            "would help the user. Keep exactly one item in_progress at a time. "
+            "Update the plan as work completes or changes; do not use it for "
+            "trivial one-step tasks."
+        )
 
     if "read" in names and "edit" in names:
         guidelines.append("Use read to examine files before editing.")

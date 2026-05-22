@@ -12,6 +12,7 @@ from wattle.tools.bash import BashTool
 from wattle.tools.edit import EditTool
 from wattle.tools.image import ViewImageTool
 from wattle.tools.monitor import MonitorTool
+from wattle.tools.plan import PlanValidationError, UpdatePlanTool, parse_plan_update_input
 from wattle.tools.read import ReadTool
 from wattle.tools.subagent import (
     CloseAgentTool,
@@ -24,6 +25,70 @@ from wattle.tools.write import WriteTool
 
 def test_edit_tool_is_registered() -> None:
     assert isinstance(TOOLS_BY_NAME["edit"], EditTool)
+
+
+def test_update_plan_tool_is_registered() -> None:
+    assert isinstance(TOOLS_BY_NAME["update_plan"], UpdatePlanTool)
+
+
+def test_update_plan_tool_schema_and_success_result() -> None:
+    schema = UpdatePlanTool.spec()["input_schema"]
+
+    assert schema["required"] == ["plan"]
+    assert schema["properties"]["plan"]["items"]["properties"]["status"]["enum"] == [
+        "pending",
+        "in_progress",
+        "completed",
+    ]
+    assert (
+        UpdatePlanTool().run(
+            explanation="Working through the feature.",
+            plan=[
+                {"step": "Inspect current flow", "status": "completed"},
+                {"step": "Add plan tool", "status": "in_progress"},
+                {"step": "Add TUI tests", "status": "pending"},
+            ],
+        )
+        == "Plan updated"
+    )
+
+
+def test_update_plan_parser_validates_input() -> None:
+    update = parse_plan_update_input(
+        {
+            "explanation": "  next phase  ",
+            "plan": [{"step": "  Add renderer  ", "status": "in_progress"}],
+        }
+    )
+
+    assert update.explanation == "next phase"
+    assert update.plan[0].step == "Add renderer"
+    assert update.plan[0].status == "in_progress"
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "expected"),
+    [
+        ({}, "plan is required"),
+        ({"plan": [{"step": "Ship", "status": "blocked"}]}, "status must be one of"),
+        (
+            {
+                "plan": [
+                    {"step": "One", "status": "in_progress"},
+                    {"step": "Two", "status": "in_progress"},
+                ]
+            },
+            "at most one plan item can be in_progress",
+        ),
+        ({"plan": [{"step": " ", "status": "pending"}]}, "step must not be empty"),
+    ],
+)
+def test_update_plan_tool_rejects_invalid_input(
+    kwargs: dict[str, object],
+    expected: str,
+) -> None:
+    with pytest.raises(PlanValidationError, match=expected):
+        UpdatePlanTool().run(**kwargs)
 
 
 def test_edit_tool_schema_avoids_top_level_composition_keywords() -> None:
@@ -57,6 +122,7 @@ def test_build_tools_shares_runtime_between_bash_and_monitor(tmp_path) -> None:
     assert isinstance(tools["send_input"], SendInputTool)
     assert isinstance(wait_agent, WaitAgentTool)
     assert isinstance(tools["close_agent"], CloseAgentTool)
+    assert isinstance(tools["update_plan"], UpdatePlanTool)
     assert bash.runtime is runtime
     assert monitor.runtime is runtime
     assert spawn_agent.runtime is runtime
@@ -71,6 +137,7 @@ def test_default_tools_share_runtime_between_bash_and_monitor() -> None:
     assert isinstance(bash, BashTool)
     assert isinstance(monitor, MonitorTool)
     assert isinstance(TOOLS_BY_NAME["view_image"], ViewImageTool)
+    assert isinstance(TOOLS_BY_NAME["update_plan"], UpdatePlanTool)
     assert bash.runtime is monitor.runtime
     assert spawn_agent.runtime is bash.runtime
 

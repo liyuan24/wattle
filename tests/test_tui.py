@@ -150,6 +150,77 @@ class _RecordingTool(Tool):
         return f"echoed: {kwargs.get('message', '')}"
 
 
+class _DiffEditTool(Tool):
+    name = "edit"
+    description = "Return a focused edit diff."
+    input_schema = {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string"},
+            "line": {"type": "integer"},
+            "before": {"type": "string"},
+            "after": {"type": "string"},
+            "fail": {"type": "boolean"},
+        },
+        "required": ["path"],
+    }
+
+    def run(self, **kwargs: Any) -> str:
+        path = str(kwargs["path"])
+        if kwargs.get("fail"):
+            raise ValueError(f"old_text not found in {path}")
+        line = int(kwargs.get("line", 1))
+        before = str(kwargs.get("before", "old"))
+        after = str(kwargs.get("after", "new"))
+        return "\n".join(
+            [
+                f"Edited {path}",
+                f"--- {path} (before)",
+                f"+++ {path} (after)",
+                f"@@ -{line},1 +{line},1 @@",
+                f"-{before}",
+                f"+{after}",
+            ]
+        )
+
+
+class _DiffWriteTool(Tool):
+    name = "write"
+    description = "Return a focused write diff."
+    input_schema = {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string"},
+            "line": {"type": "integer"},
+            "before": {"type": "string"},
+            "after": {"type": "string"},
+        },
+        "required": ["path"],
+    }
+
+    def run(self, **kwargs: Any) -> str:
+        path = str(kwargs["path"])
+        line = int(kwargs.get("line", 1))
+        after = str(kwargs.get("after", "new"))
+        diff_lines = [
+            f"Wrote {len(after)} bytes to {path}",
+            f"--- {path} (before)",
+            f"+++ {path} (after)",
+        ]
+        if "before" in kwargs:
+            before = str(kwargs["before"])
+            diff_lines.extend(
+                [
+                    f"@@ -{line},1 +{line},1 @@",
+                    f"-{before}",
+                    f"+{after}",
+                ]
+            )
+        else:
+            diff_lines.extend([f"@@ -0,0 +{line},1 @@", f"+{after}"])
+        return "\n".join(diff_lines)
+
+
 class _PromptObservingTool(Tool):
     name = "observe_prompt"
     description = "Record the terminal while the tool is running."
@@ -2257,7 +2328,11 @@ def test_live_prompt_shows_subagent_lifecycle_status(
     live._draw_prompt()
 
     rendered = out.getvalue()
-    assert f"\x1b[0m\x1b[2K{tui.SUBAGENT_WAIT_TITLE_STYLE} Subagents · 1 complete, 2 running" in rendered
+    expected_title = (
+        f"\x1b[0m\x1b[2K{tui.SUBAGENT_WAIT_TITLE_STYLE} "
+        "Subagents · 1 complete, 2 running"
+    )
+    assert expected_title in rendered
     assert "Waiting for subagent(s)" not in rendered
     assert "Subagents · 1 complete, 2 running" in rendered
     assert "Hopper [explorer] complete · TUI input path identified" in rendered
@@ -3236,6 +3311,106 @@ def test_wait_agent_begin_renders_visible_subagent_group(
     assert "Ada [worker]" in rendered
 
 
+def test_update_plan_success_renders_semantic_cell_and_suppresses_tool_output() -> None:
+    out = _TTYBuffer()
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+    block = ToolUseBlock(
+        id="call_1",
+        name="update_plan",
+        input={
+            "explanation": "Switching to TUI coverage.",
+            "plan": [
+                {"step": "Inspect current flow", "status": "completed"},
+                {"step": "Add plan renderer", "status": "in_progress"},
+                {"step": "Add PTY regression", "status": "pending"},
+            ],
+        },
+    )
+    result = ToolResultBlock(tool_use_id="call_1", content="Plan updated")
+
+    app._write_tool_result(block, result)
+
+    rendered = out.getvalue()
+    visible = _strip_ansi(rendered)
+    assert "| Updated Plan" in visible
+    assert "  Switching to TUI coverage." in visible
+    assert "  - [x] Inspect current flow" in visible
+    assert "  - [>] Add plan renderer" in visible
+    assert "  - [ ] Add PTY regression" in visible
+    assert "Plan updated" not in visible
+    assert "update_plan ok" not in visible
+    assert tui.PLAN_COMPLETED_STYLE in rendered
+    assert tui.PLAN_IN_PROGRESS_STYLE in rendered
+    assert tui.PLAN_PENDING_STYLE in rendered
+
+
+def test_update_plan_cell_wraps_long_explanation_and_steps() -> None:
+    out = _TTYBuffer()
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+    app._terminal_width = lambda: 34  # type: ignore[method-assign]
+    block = ToolUseBlock(
+        id="call_1",
+        name="update_plan",
+        input={
+            "explanation": "A concise note that wraps across rows",
+            "plan": [
+                {
+                    "step": "Add semantic TUI rendering coverage",
+                    "status": "in_progress",
+                }
+            ],
+        },
+    )
+
+    app._write_tool_result(block, ToolResultBlock(tool_use_id="call_1", content="Plan updated"))
+
+    rendered_lines = _strip_ansi(out.getvalue()).splitlines()
+    assert "  A concise note that wraps across" in rendered_lines
+    assert " rows" in rendered_lines
+    assert "  - [>] Add semantic TUI rendering" in rendered_lines
+    assert " coverage" in rendered_lines
+
+
+def test_update_plan_history_replay_uses_tool_input_and_skips_generic_result() -> None:
+    out = _TTYBuffer()
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+    app.messages = [
+        Message(role="user", content=[TextBlock(text="do the feature")]),
+        Message(
+            role="assistant",
+            content=[
+                ToolUseBlock(
+                    id="call_1",
+                    name="update_plan",
+                    input={
+                        "plan": [
+                            {"step": "Inspect flow", "status": "completed"},
+                            {"step": "Render history", "status": "in_progress"},
+                        ]
+                    },
+                )
+            ],
+        ),
+        Message(
+            role="user",
+            content=[ToolResultBlock(tool_use_id="call_1", content="Plan updated")],
+        ),
+    ]
+
+    app._write_history_transcript()
+
+    rendered = _strip_ansi(out.getvalue())
+    assert "Updated Plan" in rendered
+    assert "  - [x] Inspect flow" in rendered
+    assert "  - [>] Render history" in rendered
+    assert "[tool use]" not in rendered
+    assert "[tool result]" not in rendered
+    assert "Plan updated" not in rendered
+
+
 @pytest.mark.parametrize(
     ("tool_name", "expected"),
     [
@@ -3916,6 +4091,204 @@ def test_edit_tool_result_renders_full_diff_preview() -> None:
     assert tui.DIFF_DELETE_MARKER_STYLE in rendered
     assert tui.SYNTAX_NAME_STYLE in rendered
     assert "changed lines" not in rendered
+
+
+def test_adjacent_same_file_edits_render_as_one_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(TOOLS_BY_NAME, "edit", _DiffEditTool())
+    response = CompletionResponse(
+        content=[
+            ToolUseBlock(
+                id="call_1",
+                name="edit",
+                input={"path": "src/app.py", "line": 1, "before": "a", "after": "b"},
+            ),
+            ToolUseBlock(
+                id="call_2",
+                name="edit",
+                input={"path": "src/app.py", "line": 5, "before": "c", "after": "d"},
+            ),
+            ToolUseBlock(
+                id="call_3",
+                name="edit",
+                input={"path": "src/app.py", "line": 9, "before": "e", "after": "f"},
+            ),
+        ],
+        stop_reason="tool_use",
+    )
+    end_response = CompletionResponse(content=[TextBlock(text="done")], stop_reason="end_turn")
+    provider = _ScriptedStreamProvider(
+        [[StreamComplete(response=response)], [StreamComplete(response=end_response)]]
+    )
+
+    out, _app = _drive(provider, ["edit files", "/exit"])
+    rendered = _strip_ansi(out)
+
+    assert rendered.count("Edited src/app.py") == 1
+    assert "Edited src/app.py (+3 -3)" in rendered
+    assert rendered.count(tui._EDIT_HUNK_SEPARATOR_ROW) == 2
+    assert rendered.index("    1 -a") < rendered.index("    5 -c")
+    assert rendered.index("    5 -c") < rendered.index("    9 -e")
+
+
+def test_same_file_edit_groups_do_not_cross_order_boundaries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(TOOLS_BY_NAME, "edit", _DiffEditTool())
+    echo_tool = _RecordingTool()
+    monkeypatch.setitem(TOOLS_BY_NAME, "echo", echo_tool)
+    response = CompletionResponse(
+        content=[
+            ToolUseBlock(
+                id="call_1",
+                name="edit",
+                input={"path": "src/app.py", "line": 1, "before": "a", "after": "b"},
+            ),
+            ToolUseBlock(id="call_2", name="echo", input={"message": "middle"}),
+            ToolUseBlock(
+                id="call_3",
+                name="edit",
+                input={"path": "src/app.py", "line": 5, "before": "c", "after": "d"},
+            ),
+        ],
+        stop_reason="tool_use",
+    )
+    end_response = CompletionResponse(content=[TextBlock(text="done")], stop_reason="end_turn")
+    provider = _ScriptedStreamProvider(
+        [[StreamComplete(response=response)], [StreamComplete(response=end_response)]]
+    )
+
+    out, _app = _drive(provider, ["edit files", "/exit"])
+    rendered = _strip_ansi(out)
+
+    assert rendered.count("Edited src/app.py (+1 -1)") == 2
+    assert "echo ok" in rendered
+    assert rendered.index("    1 -a") < rendered.index("echo ok")
+    assert rendered.index("echo ok") < rendered.index("    5 -c")
+
+
+def test_edit_groups_split_on_different_file_and_failed_edit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(TOOLS_BY_NAME, "edit", _DiffEditTool())
+    response = CompletionResponse(
+        content=[
+            ToolUseBlock(
+                id="call_1",
+                name="edit",
+                input={"path": "src/app.py", "line": 1, "before": "a", "after": "b"},
+            ),
+            ToolUseBlock(
+                id="call_2",
+                name="edit",
+                input={"path": "src/other.py", "line": 3, "before": "x", "after": "y"},
+            ),
+            ToolUseBlock(
+                id="call_3",
+                name="edit",
+                input={"path": "src/app.py", "fail": True},
+            ),
+            ToolUseBlock(
+                id="call_4",
+                name="edit",
+                input={"path": "src/app.py", "line": 8, "before": "c", "after": "d"},
+            ),
+        ],
+        stop_reason="tool_use",
+    )
+    end_response = CompletionResponse(content=[TextBlock(text="done")], stop_reason="end_turn")
+    provider = _ScriptedStreamProvider(
+        [[StreamComplete(response=response)], [StreamComplete(response=end_response)]]
+    )
+
+    out, _app = _drive(provider, ["edit files", "/exit"])
+    rendered = _strip_ansi(out)
+
+    assert rendered.count("Edited src/app.py (+1 -1)") == 2
+    assert rendered.count("Edited src/other.py (+1 -1)") == 1
+    assert "old_text not found" not in rendered
+    assert rendered.index("    1 -a") < rendered.index("Edited src/other.py")
+    assert rendered.index("Edited src/other.py") < rendered.index("    8 -c")
+
+
+def test_mixed_write_edit_group_uses_updated_header(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(TOOLS_BY_NAME, "write", _DiffWriteTool())
+    monkeypatch.setitem(TOOLS_BY_NAME, "edit", _DiffEditTool())
+    response = CompletionResponse(
+        content=[
+            ToolUseBlock(
+                id="call_1",
+                name="write",
+                input={"path": "src/app.py", "line": 1, "after": "created"},
+            ),
+            ToolUseBlock(
+                id="call_2",
+                name="edit",
+                input={"path": "src/app.py", "line": 2, "before": "old", "after": "new"},
+            ),
+        ],
+        stop_reason="tool_use",
+    )
+    end_response = CompletionResponse(content=[TextBlock(text="done")], stop_reason="end_turn")
+    provider = _ScriptedStreamProvider(
+        [[StreamComplete(response=response)], [StreamComplete(response=end_response)]]
+    )
+
+    out, _app = _drive(provider, ["edit files", "/exit"])
+    rendered = _strip_ansi(out)
+
+    assert "Updated src/app.py (+2 -1)" in rendered
+    assert "Added src/app.py" not in rendered
+    assert "Edited src/app.py" not in rendered
+    assert rendered.index("    1 +created") < rendered.index("    2 -old")
+
+
+def test_grouped_edit_separator_is_dim_and_keeps_count_styles() -> None:
+    out = _TTYBuffer()
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+    first = tui._edit_render_item(
+        ToolUseBlock(id="call_1", name="edit", input={"path": "src/app.py"}),
+        ToolResultBlock(
+            tool_use_id="call_1",
+            content=(
+                "Edited src/app.py\n"
+                "--- src/app.py (before)\n"
+                "+++ src/app.py (after)\n"
+                "@@ -1,1 +1,1 @@\n"
+                "-old\n"
+                "+new"
+            ),
+        ),
+    )
+    second = tui._edit_render_item(
+        ToolUseBlock(id="call_2", name="edit", input={"path": "src/app.py"}),
+        ToolResultBlock(
+            tool_use_id="call_2",
+            content=(
+                "Edited src/app.py\n"
+                "--- src/app.py (before)\n"
+                "+++ src/app.py (after)\n"
+                "@@ -5,1 +5,1 @@\n"
+                "-before\n"
+                "+after"
+            ),
+        ),
+    )
+    assert first is not None
+    assert second is not None
+
+    app._write_edit_result_group(tui._EditRenderGroup(path="src/app.py", items=[first, second]))
+
+    rendered = out.getvalue()
+    assert f"{tui.DIFF_ADD_COUNT_STYLE}+2{tui.RESET}" in rendered
+    assert f"{tui.DIFF_DELETE_COUNT_STYLE}-2{tui.RESET}" in rendered
+    assert f"{tui.DIFF_META_STYLE}{tui._EDIT_HUNK_SEPARATOR_ROW}{tui.RESET}" in rendered
+    assert f"{tui.DIFF_ADD_STYLE}{tui._EDIT_HUNK_SEPARATOR_ROW}" not in rendered
+    assert f"{tui.DIFF_DELETE_STYLE}{tui._EDIT_HUNK_SEPARATOR_ROW}" not in rendered
 
 
 def test_terminal_deduplicates_separators_between_consecutive_tool_turns(
