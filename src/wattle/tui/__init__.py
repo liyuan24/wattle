@@ -4058,6 +4058,7 @@ class _LiveTerminal:
 
     def _start_worker(self) -> None:
         self.streaming = True
+        self.last_worked_duration_text = None
         if self.turn_started_at is None:
             self.turn_started_at = time.monotonic()
         self.working_started_at = time.monotonic()
@@ -4554,7 +4555,7 @@ class _LiveTerminal:
                 parts.append(f"\x1b[{self.prompt_cursor_line_index}A")
             parts.append("\r")
         else:
-            if force_reflow_clear and self.streaming:
+            if force_reflow_clear:
                 self._redraw_visible_screen_after_resize()
             else:
                 parts.append(self._clear_prompt_sequence(force_reflow_clear=force_reflow_clear))
@@ -4646,9 +4647,7 @@ class _LiveTerminal:
         self.app._write(VISIBLE_SCREEN_CLEAR)
         self.app._write(TERMINAL_HISTORY_CLEAR)
         self.app._write_welcome_card()
-        for index, message in enumerate(self.app.messages):
-            if index:
-                self.app._write_separator()
+        for message in self.app.messages:
             self.app._write_history_message(message)
         self.app._last_transcript_was_separator = False
 

@@ -746,7 +746,7 @@ def test_pty_idle_resize_keeps_statusline_on_terminal_background(tmp_path: Path)
         assert all(background is None for background in backgrounds)
 
 
-def test_pty_resize_does_not_replay_welcome_or_transcript(tmp_path: Path) -> None:
+def test_pty_resize_redraw_keeps_single_welcome_and_transcript(tmp_path: Path) -> None:
     with PtySession.spawn_python(
         _slow_wattle_child_code(first_delay=0.1, later_delay=0.1, prompt=None),
         cwd=tmp_path,
@@ -758,17 +758,40 @@ def test_pty_resize_does_not_replay_welcome_or_transcript(tmp_path: Path) -> Non
         session.read_until("done 1", timeout=3)
         session.read_until("Worked for", timeout=3)
         session.read_until("gpt-5.5 |", timeout=3)
-        before_resize_output_length = len(session.raw_output)
-
         session.resize(cols=80, rows=40)
         session.read_for(0.35)
 
-        resize_output = session.raw_output[before_resize_output_length:]
-        assert "\x1b[H\x1b[2J\x1b[H" not in resize_output
-        assert "Wattle Agent" not in resize_output
-        assert "done 1" not in resize_output
         assert session.screen.text().count("Wattle Agent") == 1
+        assert session.screen.text().count(" hello") == 1
         assert session.screen.text().count(" done 1") == 1
+
+
+def test_pty_resize_does_not_insert_rules_around_user_message(tmp_path: Path) -> None:
+    with PtySession.spawn_python(
+        _slow_wattle_child_code(first_delay=0.1, later_delay=0.1, prompt=None),
+        cwd=tmp_path,
+        cols=120,
+        rows=42,
+    ) as session:
+        session.read_until(">", timeout=3)
+        session.write("resize rule regression\n")
+        session.read_until("done 1", timeout=3)
+        session.read_until("Worked for", timeout=3)
+
+        session.resize(cols=80, rows=42)
+        session.read_for(0.35)
+
+        user_row = session.screen.find_row_containing(" resize rule regression")
+        for row in (user_row - 1, user_row, user_row + 1):
+            assert all(
+                background == "ansi-235"
+                for background in session.screen.row_backgrounds(row)
+            )
+
+        above_text = session.screen.row_text(user_row - 2).strip()
+        below_text = session.screen.row_text(user_row + 2).strip()
+        assert not above_text or set(above_text) != {"─"}
+        assert not below_text or set(below_text) != {"─"}
 
 
 def test_pty_clear_redraws_clean_session_screen(tmp_path: Path) -> None:

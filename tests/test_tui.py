@@ -1440,6 +1440,52 @@ def test_live_prompt_survives_repeated_zoom_in_and_out_without_black_input_gap()
     assert visible_lines[input_line_index + 1].startswith("   ")
 
 
+def test_live_resize_repaints_screen_once_with_last_worked_duration() -> None:
+    out = _TTYBuffer()
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+    widths = [34]
+    app._terminal_width = lambda: widths[-1]  # type: ignore[method-assign]
+    live = tui._LiveTerminal(app)
+    live.last_worked_duration_text = "Worked for 1s"
+    live._draw_prompt()
+
+    out.seek(0)
+    out.truncate(0)
+    widths.append(52)
+    live._draw_prompt(force_reflow_clear=True)
+
+    rendered = out.getvalue()
+    visible = _strip_ansi(rendered)
+    assert tui.VISIBLE_SCREEN_CLEAR in rendered
+    assert tui.TERMINAL_HISTORY_CLEAR in rendered
+    assert visible.count("Worked for 1s") == 1
+    assert live.prompt_width == 52
+
+
+def test_live_new_worker_replaces_previous_worked_duration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeThread:
+        def __init__(self, **_kwargs: Any) -> None:
+            pass
+
+        def start(self) -> None:
+            pass
+
+    monkeypatch.setattr(tui.threading, "Thread", FakeThread)
+    out = _TTYBuffer()
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+    live = tui._LiveTerminal(app)
+    live.last_worked_duration_text = "Worked for 1s"
+
+    live._start_worker()
+
+    assert live.last_worked_duration_text is None
+    assert live.streaming is True
+
+
 def test_live_prompt_box_switches_to_type_box_when_streaming_with_input() -> None:
     out = _TTYBuffer()
     app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
