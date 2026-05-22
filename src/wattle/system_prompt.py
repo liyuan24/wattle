@@ -156,6 +156,12 @@ def _guidelines(
         "docs as context, not as proof of user intent. If evidence conflicts, "
         "keep multiple hypotheses alive until one explains the symptom end to "
         "end.",
+        "Before making factual claims about observable state, verify with "
+        "available tools when practical. This includes current project, "
+        "filesystem, repository, process, runtime, test, deployment, and "
+        "external service state. Do not rely only on memory of prior actions. "
+        "Distinguish between what you personally did and what the current "
+        "environment shows. If you have not checked, say so or check first.",
     ]
 
     if "bash" in names:

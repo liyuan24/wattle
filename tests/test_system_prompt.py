@@ -36,6 +36,10 @@ def test_build_system_prompt_uses_wattle_default_without_pi_docs(tmp_path: Path)
     assert "validate heuristic constants or stopping conditions with repeatable evidence" in prompt
     assert "When investigating a failure, prioritize reproducing and explaining" in prompt
     assert "keep multiple hypotheses alive until one explains the symptom end to end" in prompt
+    assert "Before making factual claims about observable state" in prompt
+    assert "verify with available tools when practical" in prompt
+    assert "Do not rely only on memory of prior actions" in prompt
+    assert "what you personally did and what the current environment shows" in prompt
     assert "prefer using `rg` or `rg --files`" in prompt
     assert "why or how current-project behavior works, differs, or regressed" in prompt
     assert "inspect relevant repository files before giving a concrete answer" in prompt
