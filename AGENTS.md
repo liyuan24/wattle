@@ -1,5 +1,9 @@
 # Wattle Agent Notes
 
+## Git Workflow
+
+For Wattle development, prefer committing directly to the mainline branch (`master`) and pushing it when the user asks to commit or push. Do not create a feature branch or PR by default unless the user explicitly requests that workflow.
+
 ## TUI Verification
 
 For any change that touches Wattle TUI behavior, run the relevant PTY harness immediately after the focused unit tests. This includes terminal input, prompt rendering, live redraw, queued messages, image anchors, subagent status, and tool status UI.
