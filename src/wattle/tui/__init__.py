@@ -147,6 +147,26 @@ SLASH_COMMAND_HINTS: tuple[tuple[str, str], ...] = (
     ("/status", "show session and status details"),
     ("/statusline", "configure the bottom statusline"),
 )
+
+DEFAULT_LOGIN_CALLBACK_TIMEOUT_SECONDS = 300.0
+SSH_LOGIN_CALLBACK_TIMEOUT_SECONDS = 2.0
+SSH_LOGIN_CALLBACK_HINT = (
+    "SSH detected. If your browser shows localhost refused to connect, copy the "
+    "full callback URL from the browser address bar and paste it into Wattle "
+    "when prompted."
+)
+
+
+def _running_over_ssh(env: Mapping[str, str] = os.environ) -> bool:
+    return any(env.get(name) for name in ("SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"))
+
+
+def _login_callback_timeout_seconds() -> float:
+    if _running_over_ssh():
+        return SSH_LOGIN_CALLBACK_TIMEOUT_SECONDS
+    return DEFAULT_LOGIN_CALLBACK_TIMEOUT_SECONDS
+
+
 BUILTIN_SLASH_COMMANDS = frozenset(command for command, _description in SLASH_COMMAND_HINTS)
 LOGIN_PROVIDER_CHOICES: tuple[tuple[str, str], ...] = (
     ("openai-codex", "ChatGPT Plus/Pro Codex OAuth"),
@@ -247,6 +267,7 @@ WELCOME_TITLE_STYLE = "\x1b[38;5;255;1m"
 WELCOME_LABEL_STYLE = "\x1b[38;5;245m"
 WELCOME_VALUE_STYLE = "\x1b[38;5;255;1m"
 STATUS_STYLE = "\x1b[48;5;236;38;5;248m"
+SSH_LOGIN_HINT_STYLE = "\x1b[48;5;236;38;5;82;1m"
 SUBAGENT_WAIT_TITLE_STYLE = "\x1b[48;5;236;38;5;255m"
 STATUS_MODEL_STYLE = "\x1b[48;5;236;38;5;82m"
 STATUS_TOKEN_STYLE = "\x1b[48;5;236;38;5;203m"
@@ -2951,14 +2972,23 @@ class WattleApp:
             )
             return
 
+        callback_timeout_seconds = _login_callback_timeout_seconds()
+        running_over_ssh = _running_over_ssh()
+
+        def write_auth_url(url: str) -> None:
+            self._write_panel(
+                "login",
+                f"Open this URL to authenticate OpenAI Codex:\n{url}",
+                STATUS_STYLE,
+            )
+            if running_over_ssh:
+                self._write_panel("login", SSH_LOGIN_CALLBACK_HINT, SSH_LOGIN_HINT_STYLE)
+
         try:
             credential = login_openai_codex(
-                on_auth=lambda url: self._write_panel(
-                    "login",
-                    f"Open this URL to authenticate OpenAI Codex:\n{url}",
-                    STATUS_STYLE,
-                ),
+                on_auth=write_auth_url,
                 prompt=self.input_func,
+                callback_timeout_seconds=callback_timeout_seconds,
                 originator="wattle",
             )
         except Exception as exc:  # noqa: BLE001

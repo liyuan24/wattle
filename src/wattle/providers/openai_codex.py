@@ -17,6 +17,7 @@ import urllib.error
 import urllib.request
 from collections.abc import Callable, Iterator
 from typing import Any, Literal
+from uuid import uuid4
 
 from wattle.auth import _jwt_payload
 from wattle.providers.openai_responses import _messages_to_input, _tool_spec_to_api
@@ -58,10 +59,14 @@ class OpenAICodexResponsesProvider(Provider):
         *,
         base_url: str = DEFAULT_CODEX_BASE_URL,
         urlopen: UrlOpen | None = None,
+        session_id: str | None = None,
+        thread_id: str | None = None,
     ) -> None:
         self.bearer_token = bearer_token
         self.base_url = base_url
         self.urlopen = urlopen or urllib.request.urlopen
+        self.session_id = session_id or str(uuid4())
+        self.thread_id = thread_id or str(uuid4())
 
     def fork(self) -> OpenAICodexResponsesProvider:
         return OpenAICodexResponsesProvider(
@@ -84,7 +89,11 @@ class OpenAICodexResponsesProvider(Provider):
         http_request = urllib.request.Request(
             _codex_responses_url(self.base_url),
             data=json.dumps(body).encode("utf-8"),
-            headers=_build_headers(self.bearer_token),
+            headers=_build_headers(
+                self.bearer_token,
+                session_id=self.session_id,
+                thread_id=self.thread_id,
+            ),
             method="POST",
         )
 
@@ -106,6 +115,7 @@ class OpenAICodexResponsesProvider(Provider):
             "include": ["reasoning.encrypted_content"],
             "tool_choice": "auto",
             "parallel_tool_calls": True,
+            "prompt_cache_key": self.thread_id,
         }
         if request.tools:
             body["tools"] = [_codex_tool_spec_to_api(spec) for spec in request.tools]
@@ -146,7 +156,7 @@ def _codex_responses_url(base_url: str) -> str:
     return f"{normalized}/codex/responses"
 
 
-def _build_headers(token: str) -> dict[str, str]:
+def _build_headers(token: str, *, session_id: str, thread_id: str) -> dict[str, str]:
     return {
         "Authorization": f"Bearer {token}",
         "chatgpt-account-id": _extract_account_id(token),
@@ -155,6 +165,9 @@ def _build_headers(token: str) -> dict[str, str]:
         "OpenAI-Beta": OPENAI_BETA_RESPONSES,
         "Accept": "text/event-stream",
         "Content-Type": "application/json",
+        "session-id": session_id,
+        "thread-id": thread_id,
+        "x-client-request-id": thread_id,
     }
 
 

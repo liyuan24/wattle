@@ -626,6 +626,8 @@ def login_openai_codex(
         if code is None:
             raw = prompt("Paste the authorization code or full redirect URL: ")
             code, pasted_state = _parse_authorization_input(raw)
+            if code is None and server is not None:
+                code = server.wait(0)
             if pasted_state is not None and pasted_state != state:
                 raise ValueError("OpenAI Codex OAuth state mismatch.")
 
@@ -732,7 +734,7 @@ def _oauth_token_scopes(token_map: dict) -> set[str]:
 
 
 def _has_openai_codex_scopes(token_map: dict) -> bool:
-    return OPENAI_CODEX_REQUIRED_SCOPES <= _oauth_token_scopes(token_map)
+    return _oauth_token_scopes(token_map) >= OPENAI_CODEX_REQUIRED_SCOPES
 
 
 def _oauth_credential_from_vendor_entry(

@@ -480,6 +480,65 @@ def test_login_openai_codex_persists_openai_oauth(
     ]
 
 
+def test_login_openai_codex_accepts_callback_after_manual_prompt(
+    auth_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeServer:
+        def __init__(self) -> None:
+            self.waits: list[float] = []
+            self.closed = False
+
+        def wait(self, timeout: float) -> str | None:
+            self.waits.append(timeout)
+            if len(self.waits) == 1:
+                return None
+            return "auth-code"
+
+        def close(self) -> None:
+            self.closed = True
+
+    fake_server = FakeServer()
+    seen_exchange: dict[str, str] = {}
+
+    monkeypatch.setattr(auth, "_generate_pkce", lambda: ("verifier", "challenge"))
+    monkeypatch.setattr(auth.secrets, "token_hex", lambda _n: "state_123")
+    monkeypatch.setattr(
+        auth,
+        "_start_openai_codex_callback_server",
+        lambda *, state: fake_server,
+    )
+
+    def fake_exchange(**kwargs: str) -> dict[str, object]:
+        seen_exchange.update(kwargs)
+        return {
+            "access_token": _jwt_with_payload(
+                {
+                    "exp": 2_000_000_000,
+                    "https://api.openai.com/auth": {
+                        "chatgpt_account_id": "acct_123",
+                    },
+                }
+            ),
+            "refresh_token": "refresh-token",
+            "expires_in": 3600,
+        }
+
+    monkeypatch.setattr(auth, "_request_openai_codex_token", fake_exchange)
+
+    credential = auth.login_openai_codex(
+        prompt=lambda _message: "",
+        open_browser=None,
+        callback_timeout_seconds=0.01,
+    )
+
+    saved = json.loads(auth_file.read_text())
+    assert credential.bearer_token == saved["openai"]["oauth"]["access_token"]
+    assert seen_exchange == {"code": "auth-code", "verifier": "verifier"}
+    assert fake_server.waits == [0.01, 0]
+    assert fake_server.closed is True
+
+
 def test_login_openai_codex_replaces_existing_openai_oauth(
     auth_file: Path,
     monkeypatch: pytest.MonkeyPatch,

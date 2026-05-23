@@ -100,7 +100,12 @@ def test_codex_provider_builds_chatgpt_backend_request() -> None:
             ]
         )
 
-    provider = OpenAICodexResponsesProvider(bearer_token=_token(), urlopen=urlopen)
+    provider = OpenAICodexResponsesProvider(
+        bearer_token=_token(),
+        urlopen=urlopen,
+        session_id="session_123",
+        thread_id="thread_123",
+    )
     response = provider.complete(
         CompletionRequest(
             model="gpt-5.5",
@@ -126,12 +131,16 @@ def test_codex_provider_builds_chatgpt_backend_request() -> None:
     assert headers["Originator"] == "wattle"
     assert headers["Openai-beta"] == "responses=experimental"
     assert headers["Accept"] == "text/event-stream"
+    assert headers["Session-id"] == "session_123"
+    assert headers["Thread-id"] == "thread_123"
+    assert headers["X-client-request-id"] == "thread_123"
 
     body = json.loads(req.data.decode("utf-8"))  # type: ignore[union-attr]
     assert body["model"] == "gpt-5.5"
     assert body["store"] is False
     assert body["stream"] is True
     assert body["instructions"] == "sys"
+    assert body["prompt_cache_key"] == "thread_123"
     assert "max_output_tokens" not in body
     assert "previous_response_id" not in body
     assert body["input"] == [
@@ -171,7 +180,12 @@ def test_codex_provider_is_stateless_and_resends_full_history() -> None:
             ]
         )
 
-    provider = OpenAICodexResponsesProvider(bearer_token=_token(), urlopen=urlopen)
+    provider = OpenAICodexResponsesProvider(
+        bearer_token=_token(),
+        urlopen=urlopen,
+        session_id="session_123",
+        thread_id="thread_123",
+    )
     user_msg = Message(role="user", content=[TextBlock(text="run a tool")])
 
     first = provider.complete(
@@ -184,6 +198,7 @@ def test_codex_provider_is_stateless_and_resends_full_history() -> None:
 
     first_body = json.loads(captured[0].data.decode("utf-8"))  # type: ignore[union-attr]
     assert first_body["store"] is False
+    assert first_body["prompt_cache_key"] == "thread_123"
     assert "previous_response_id" not in first_body
     assert first_body["input"] == [
         {
@@ -213,6 +228,7 @@ def test_codex_provider_is_stateless_and_resends_full_history() -> None:
 
     second_body = json.loads(captured[1].data.decode("utf-8"))  # type: ignore[union-attr]
     assert second_body["store"] is False
+    assert second_body["prompt_cache_key"] == "thread_123"
     assert "previous_response_id" not in second_body
     assert second_body["input"] == [
         {
@@ -233,6 +249,29 @@ def test_codex_provider_is_stateless_and_resends_full_history() -> None:
         }
     ]
     assert second.usage == {"input_tokens": 10, "output_tokens": 20}
+
+    first_headers = dict(captured[0].header_items())
+    second_headers = dict(captured[1].header_items())
+    assert first_headers["Session-id"] == second_headers["Session-id"] == "session_123"
+    assert first_headers["Thread-id"] == second_headers["Thread-id"] == "thread_123"
+    assert (
+        first_headers["X-client-request-id"]
+        == second_headers["X-client-request-id"]
+        == "thread_123"
+    )
+
+
+def test_codex_provider_fork_gets_distinct_cache_identity() -> None:
+    parent = OpenAICodexResponsesProvider(
+        bearer_token=_token(),
+        session_id="session_parent",
+        thread_id="thread_parent",
+    )
+
+    child = parent.fork()
+
+    assert child.session_id != parent.session_id
+    assert child.thread_id != parent.thread_id
 
 
 def test_codex_provider_streams_text_and_tool_calls() -> None:

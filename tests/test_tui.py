@@ -4382,6 +4382,9 @@ def test_terminal_status_command_shows_disabled_persistence() -> None:
 def test_terminal_login_openai_codex(monkeypatch: pytest.MonkeyPatch) -> None:
     from wattle import cli
 
+    for name in ("SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"):
+        monkeypatch.delenv(name, raising=False)
+
     calls: list[dict[str, object]] = []
     provider_names: list[str] = []
     reloaded_provider = _ScriptedStreamProvider([])
@@ -4409,12 +4412,82 @@ def test_terminal_login_openai_codex(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert len(calls) == 1
     assert calls[0]["originator"] == "wattle"
+    assert calls[0]["callback_timeout_seconds"] == tui.DEFAULT_LOGIN_CALLBACK_TIMEOUT_SECONDS
     assert "Open this URL to authenticate OpenAI Codex" in out
     assert "https://auth.example/login" in out
     assert "OpenAI Codex OAuth saved to /tmp/auth.json openai.oauth" in out
     assert provider_names == ["openai_codex"]
     assert app.current_provider_name == "openai_codex"
     assert app.provider is reloaded_provider
+
+
+def test_terminal_login_openai_codex_uses_ssh_manual_callback_hint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from wattle import cli
+
+    monkeypatch.setenv("SSH_CONNECTION", "client 123 server 22")
+    monkeypatch.delenv("SSH_CLIENT", raising=False)
+    monkeypatch.delenv("SSH_TTY", raising=False)
+
+    calls: list[dict[str, object]] = []
+
+    def fake_login(**kwargs: object) -> auth.AuthCredential:
+        calls.append(kwargs)
+        on_auth = kwargs["on_auth"]
+        assert callable(on_auth)
+        on_auth("https://auth.example/login")
+        return auth.AuthCredential(
+            kind="oauth",
+            bearer_token="access-token",
+            source="/tmp/auth.json openai.oauth",
+            expires_at=2_000_000_000,
+        )
+
+    monkeypatch.setattr(tui, "login_openai_codex", fake_login)
+    monkeypatch.setattr(cli, "_build_provider", lambda _provider: _ScriptedStreamProvider([]))
+
+    out, _app = _drive(_ScriptedStreamProvider([]), ["/login", "/exit"])
+
+    assert calls[0]["callback_timeout_seconds"] == tui.SSH_LOGIN_CALLBACK_TIMEOUT_SECONDS
+    assert "SSH detected" in out
+    assert "copy the full callback URL from the browser address bar" in out
+
+
+def test_terminal_login_openai_codex_styles_ssh_manual_callback_hint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from wattle import cli
+
+    monkeypatch.setenv("SSH_CONNECTION", "client 123 server 22")
+    inputs = iter(["/login", "/exit"])
+
+    def input_func(_prompt: str = "") -> str:
+        return next(inputs)
+
+    def fake_login(**kwargs: object) -> auth.AuthCredential:
+        on_auth = kwargs["on_auth"]
+        assert callable(on_auth)
+        on_auth("https://auth.example/login")
+        return auth.AuthCredential(
+            kind="oauth",
+            bearer_token="access-token",
+            source="/tmp/auth.json openai.oauth",
+            expires_at=2_000_000_000,
+        )
+
+    monkeypatch.setattr(tui, "login_openai_codex", fake_login)
+    monkeypatch.setattr(cli, "_build_provider", lambda _provider: _ScriptedStreamProvider([]))
+
+    out = _TTYBuffer()
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), input_func=input_func, out=out)
+    app._force_plain = False
+
+    assert app.run() == 0
+    rendered = out.getvalue()
+    assert tui.SSH_LOGIN_HINT_STYLE in rendered
+    assert "SSH detected" in rendered
+    assert "callback URL" in rendered
 
 
 def test_terminal_compaction_uses_projection_but_persists_full_history(
