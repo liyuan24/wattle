@@ -16,6 +16,7 @@ import platform
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 from typing import Any, Literal
 from uuid import uuid4
 
@@ -48,6 +49,24 @@ DEFAULT_CODEX_INSTRUCTIONS = (
 )
 
 UrlOpen = Callable[[urllib.request.Request], Any]
+
+MINUTES_PER_HOUR = 60
+MINUTES_PER_5_HOURS = 5 * MINUTES_PER_HOUR
+MINUTES_PER_DAY = 24 * MINUTES_PER_HOUR
+MINUTES_PER_WEEK = 7 * MINUTES_PER_DAY
+
+
+@dataclass(frozen=True, slots=True)
+class _RateLimitWindow:
+    used_percent: float
+    window_minutes: int | None = None
+    resets_at: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _RateLimitSnapshot:
+    primary: _RateLimitWindow | None = None
+    secondary: _RateLimitWindow | None = None
 
 
 class OpenAICodexResponsesProvider(Provider):
@@ -99,7 +118,10 @@ class OpenAICodexResponsesProvider(Provider):
 
         try:
             with self.urlopen(http_request) as response:
-                yield from _events_from_sse(response)
+                yield from _events_from_sse(
+                    response,
+                    initial_rate_limits=_rate_limit_snapshot_from_headers(response),
+                )
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
             raise RuntimeError(_codex_error_message(exc.code, detail)) from exc
@@ -189,9 +211,11 @@ def _events_from_sse(
     response: Any,
     *,
     on_final_response: Callable[[dict[str, Any]], None] | None = None,
+    initial_rate_limits: _RateLimitSnapshot | None = None,
 ) -> Iterator[StreamEvent]:
     current_call_id: str | None = None
     final_response: dict[str, Any] | None = None
+    rate_limits = initial_rate_limits
     fallback_blocks: list[ContentBlock] = []
     text_buffer: list[str] = []
     tool_arg_buffers: dict[str, list[str]] = {}
@@ -200,6 +224,10 @@ def _events_from_sse(
     for raw_event in _iter_sse_events(response):
         event = _parse_sse_event(raw_event)
         if event is not None:
+            event_rate_limits = _rate_limit_snapshot_from_event(event)
+            if event_rate_limits is not None:
+                rate_limits = event_rate_limits
+                continue
             mapped, current_call_id, final_response = _map_event(
                 event,
                 current_call_id,
@@ -220,6 +248,7 @@ def _events_from_sse(
                 yield StreamComplete(
                     response=_completion_from_response(
                         final_response,
+                        rate_limits=rate_limits,
                         fallback_blocks=_finalize_fallback_blocks(
                             fallback_blocks,
                             text_buffer,
@@ -394,6 +423,7 @@ def _flush_text_buffer(
 def _completion_from_response(
     response: dict[str, Any],
     *,
+    rate_limits: _RateLimitSnapshot | None = None,
     fallback_blocks: list[ContentBlock] | None = None,
 ) -> CompletionResponse:
     content = _content_from_response(response)
@@ -405,7 +435,10 @@ def _completion_from_response(
     return CompletionResponse(
         content=content,
         stop_reason=_stop_reason_from_response(response, content),
-        usage=_usage_from_response(usage if isinstance(usage, dict) else {}),
+        usage=_usage_from_response(
+            usage if isinstance(usage, dict) else {},
+            rate_limits=rate_limits,
+        ),
     )
 
 
@@ -474,7 +507,11 @@ def _stop_reason_from_response(
     return "end_turn"
 
 
-def _usage_from_response(usage: dict[str, Any]) -> dict[str, int]:
+def _usage_from_response(
+    usage: dict[str, Any],
+    *,
+    rate_limits: _RateLimitSnapshot | None = None,
+) -> dict[str, int]:
     normalized = {
         "input_tokens": _int_usage(usage.get("input_tokens")),
         "output_tokens": _int_usage(usage.get("output_tokens")),
@@ -482,6 +519,8 @@ def _usage_from_response(usage: dict[str, Any]) -> dict[str, int]:
     cached_tokens = _cached_tokens_from_usage(usage)
     if cached_tokens > 0:
         normalized["cached_tokens"] = cached_tokens
+    if rate_limits is not None:
+        normalized.update(_quota_usage_from_rate_limits(rate_limits))
     return normalized
 
 
@@ -497,6 +536,121 @@ def _cached_tokens_from_usage(usage: dict[str, Any]) -> int:
 
 def _int_usage(value: Any) -> int:
     return value if isinstance(value, int) else 0
+
+
+def _quota_usage_from_rate_limits(snapshot: _RateLimitSnapshot) -> dict[str, int]:
+    usage: dict[str, int] = {}
+    for window in (snapshot.primary, snapshot.secondary):
+        if window is None:
+            continue
+        label = _limit_label_for_window(window.window_minutes)
+        remaining = int(round(max(0.0, min(100.0, 100.0 - window.used_percent))))
+        if label == "5h":
+            usage["quota_5h_remaining_percent"] = remaining
+        elif label == "weekly":
+            usage["quota_1w_remaining_percent"] = remaining
+    return usage
+
+
+def _rate_limit_snapshot_from_headers(response: Any) -> _RateLimitSnapshot | None:
+    primary = _rate_limit_window_from_headers(response, "primary")
+    secondary = _rate_limit_window_from_headers(response, "secondary")
+    if primary is None and secondary is None:
+        return None
+    return _RateLimitSnapshot(primary=primary, secondary=secondary)
+
+
+def _rate_limit_window_from_headers(response: Any, kind: str) -> _RateLimitWindow | None:
+    used_percent = _header_float(response, f"x-codex-{kind}-used-percent")
+    if used_percent is None:
+        return None
+    window_minutes = _header_int(response, f"x-codex-{kind}-window-minutes")
+    resets_at = _header_int(response, f"x-codex-{kind}-reset-at")
+    if used_percent == 0.0 and not window_minutes and resets_at is None:
+        return None
+    return _RateLimitWindow(
+        used_percent=used_percent,
+        window_minutes=window_minutes,
+        resets_at=resets_at,
+    )
+
+
+def _rate_limit_snapshot_from_event(event: dict[str, Any]) -> _RateLimitSnapshot | None:
+    if event.get("type") != "codex.rate_limits":
+        return None
+    rate_limits = event.get("rate_limits")
+    if not isinstance(rate_limits, dict):
+        return None
+    return _RateLimitSnapshot(
+        primary=_rate_limit_window_from_event(rate_limits.get("primary")),
+        secondary=_rate_limit_window_from_event(rate_limits.get("secondary")),
+    )
+
+
+def _rate_limit_window_from_event(value: object) -> _RateLimitWindow | None:
+    if not isinstance(value, dict):
+        return None
+    used_percent = value.get("used_percent")
+    if not isinstance(used_percent, int | float):
+        return None
+    window_minutes = value.get("window_minutes")
+    reset_at = value.get("reset_at")
+    return _RateLimitWindow(
+        used_percent=float(used_percent),
+        window_minutes=window_minutes if isinstance(window_minutes, int) else None,
+        resets_at=reset_at if isinstance(reset_at, int) else None,
+    )
+
+
+def _limit_label_for_window(window_minutes: int | None) -> str | None:
+    if window_minutes is None:
+        return None
+    if _is_approximate_window(window_minutes, MINUTES_PER_5_HOURS):
+        return "5h"
+    if _is_approximate_window(window_minutes, MINUTES_PER_WEEK):
+        return "weekly"
+    return None
+
+
+def _is_approximate_window(minutes: int, expected_minutes: int) -> bool:
+    return expected_minutes * 0.95 <= max(minutes, 0) <= expected_minutes * 1.05
+
+
+def _header_float(response: Any, name: str) -> float | None:
+    value = _header(response, name)
+    if value is None:
+        return None
+    try:
+        parsed = float(value)
+    except ValueError:
+        return None
+    return parsed if parsed == parsed else None
+
+
+def _header_int(response: Any, name: str) -> int | None:
+    value = _header(response, name)
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
+def _header(response: Any, name: str) -> str | None:
+    headers = getattr(response, "headers", None)
+    if headers is not None:
+        get = getattr(headers, "get", None)
+        if callable(get):
+            value = get(name)
+            if value is not None:
+                return str(value)
+    getheader = getattr(response, "getheader", None)
+    if callable(getheader):
+        value = getheader(name)
+        if value is not None:
+            return str(value)
+    return None
 
 
 def _codex_error_message(status: int, detail: str) -> str:

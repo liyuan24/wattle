@@ -12,6 +12,7 @@ wheels/
 # Local debug output
 debug_images/
 system_prompt_investigation.md
+feature_requests.md
 .wattle/jobs/
 .wattle/**/*.txt
 design_log/

@@ -850,6 +850,23 @@ def test_render_statusline_uses_configured_fields() -> None:
     )
 
 
+def test_render_statusline_shows_provider_quota_percentages() -> None:
+    rendered = tui._render_statusline(
+        model="gpt-5.5",
+        context_tokens=100,
+        context_window=1000,
+        input_tokens=40,
+        cached_tokens=12,
+        output_tokens=2,
+        cwd="~/repos/wattle",
+        quota_5h_remaining_percent=60,
+        quota_1w_remaining_percent=6,
+        fields=("model", "quota_5h", "quota_1w", "cwd"),
+    )
+
+    assert rendered == "gpt-5.5 | 5h 60% | weekly 6% | ~/repos/wattle"
+
+
 def test_render_statusline_selector_explains_controls_without_numbers() -> None:
     rows = tui._render_statusline_selector_rows(
         selected_fields={"model", "thinking", "cwd"},
@@ -897,6 +914,29 @@ def test_status_text_uses_last_provider_input_tokens_not_heuristic() -> None:
     assert "input: 900.0k tok" in rendered
     assert "cached total: 300.0k tok" in rendered
     assert "output: 100.0k tok" in rendered
+
+
+def test_status_text_uses_last_provider_quota_percentages() -> None:
+    app = tui.WattleApp(
+        _make_args(statusline_fields=("model", "quota_5h", "quota_1w", "cwd")),
+        _ScriptedStreamProvider([]),
+        out=io.StringIO(),
+    )
+
+    app._record_usage(
+        CompletionResponse(
+            content=[TextBlock(text="done")],
+            stop_reason="end_turn",
+            usage={
+                "input_tokens": 1,
+                "output_tokens": 2,
+                "quota_5h_remaining_percent": 72,
+                "quota_1w_remaining_percent": 90,
+            },
+        )
+    )
+
+    assert app._status_text().startswith("gpt-5.5 | 5h 72% | weekly 90% | ")
 
 
 def test_terminal_appends_without_rewriting_scrollback() -> None:

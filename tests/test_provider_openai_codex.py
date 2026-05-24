@@ -40,11 +40,17 @@ def _token() -> str:
 
 
 class _FakeSSE:
-    def __init__(self, events: list[dict[str, Any]]) -> None:
+    def __init__(
+        self,
+        events: list[dict[str, Any]],
+        *,
+        headers: dict[str, str] | None = None,
+    ) -> None:
         self._payload = "".join(
             f"data: {json.dumps(event)}\n\n" for event in events
         ).encode("utf-8")
         self._offset = 0
+        self.headers = headers or {}
 
     def __enter__(self) -> _FakeSSE:
         return self
@@ -159,6 +165,91 @@ def test_codex_provider_builds_chatgpt_backend_request() -> None:
             "strict": None,
         }
     ]
+
+
+def test_codex_provider_reads_rate_limit_headers_into_usage() -> None:
+    provider = OpenAICodexResponsesProvider(
+        bearer_token=_token(),
+        urlopen=lambda _req: _FakeSSE(
+            [
+                {
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp_1",
+                        "status": "completed",
+                        "output": [],
+                        "usage": {"input_tokens": 3, "output_tokens": 4},
+                    },
+                }
+            ],
+            headers={
+                "x-codex-primary-used-percent": "40",
+                "x-codex-primary-window-minutes": "300",
+                "x-codex-secondary-used-percent": "94",
+                "x-codex-secondary-window-minutes": "10080",
+            },
+        ),
+    )
+
+    response = provider.complete(
+        CompletionRequest(
+            model="gpt-5.5",
+            max_tokens=512,
+            messages=[Message(role="user", content=[TextBlock(text="hello")])],
+        )
+    )
+
+    assert response.usage == {
+        "input_tokens": 3,
+        "output_tokens": 4,
+        "quota_5h_remaining_percent": 60,
+        "quota_1w_remaining_percent": 6,
+    }
+
+
+def test_codex_provider_reads_streamed_rate_limit_event_into_usage() -> None:
+    provider = OpenAICodexResponsesProvider(
+        bearer_token=_token(),
+        urlopen=lambda _req: _FakeSSE(
+            [
+                {
+                    "type": "codex.rate_limits",
+                    "rate_limits": {
+                        "primary": {
+                            "used_percent": 28.4,
+                            "window_minutes": 300,
+                            "reset_at": 1_700_000_000,
+                        },
+                        "secondary": {
+                            "used_percent": 10.1,
+                            "window_minutes": 10080,
+                            "reset_at": 1_700_000_001,
+                        },
+                    },
+                },
+                {
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp_1",
+                        "status": "completed",
+                        "output": [],
+                        "usage": {"input_tokens": 3, "output_tokens": 4},
+                    },
+                },
+            ],
+        ),
+    )
+
+    response = provider.complete(
+        CompletionRequest(
+            model="gpt-5.5",
+            max_tokens=512,
+            messages=[Message(role="user", content=[TextBlock(text="hello")])],
+        )
+    )
+
+    assert response.usage["quota_5h_remaining_percent"] == 72
+    assert response.usage["quota_1w_remaining_percent"] == 90
 
 
 def test_codex_provider_is_stateless_and_resends_full_history() -> None:

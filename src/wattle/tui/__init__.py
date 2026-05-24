@@ -999,6 +999,8 @@ def _render_statusline(
     cwd: str,
     thinking: bool = False,
     effort: str | None = None,
+    quota_5h_remaining_percent: int | None = None,
+    quota_1w_remaining_percent: int | None = None,
     fields: tuple[str, ...] | list[str] | None = None,
 ) -> str:
     context_tokens = context_tokens or 0
@@ -1026,8 +1028,16 @@ def _render_statusline(
         "cached_tokens": f"cached total: {_format_tokens(cached_tokens)}",
         "output_tokens": f"output: {_format_tokens(output_tokens)}",
         "cwd": cwd,
-        "quota_5h": "5h quota: unknown",
-        "quota_1w": "1w limit: unknown",
+        "quota_5h": _format_quota_segment(
+            "5h",
+            quota_5h_remaining_percent,
+            unknown="5h quota: unknown",
+        ),
+        "quota_1w": _format_quota_segment(
+            "weekly",
+            quota_1w_remaining_percent,
+            unknown="1w limit: unknown",
+        ),
     }
 
     parts: list[str] = []
@@ -1045,12 +1055,32 @@ def _render_statusline(
     return " | ".join(parts)
 
 
+def _format_quota_segment(
+    label: str,
+    remaining_percent: int | None,
+    *,
+    unknown: str,
+) -> str:
+    if remaining_percent is None:
+        return unknown
+    return f"{label} {max(0, min(100, remaining_percent))}%"
+
+
 def _cached_tokens_from_usage(usage: dict[str, int]) -> int:
     for key in ("cached_tokens", "cache_read_input_tokens"):
         value = usage.get(key)
         if isinstance(value, int):
             return value
     return 0
+
+
+def _optional_percent(value: object) -> int | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        return max(0, min(100, int(value)))
+    except (TypeError, ValueError):
+        return None
 
 
 def _style_statusline_text(text: str) -> str:
@@ -1985,6 +2015,8 @@ class WattleApp:
         self._total_input_tokens = 0
         self._total_cached_tokens = 0
         self._total_output_tokens = 0
+        self._quota_5h_remaining_percent: int | None = None
+        self._quota_1w_remaining_percent: int | None = None
         self._session_record: SessionRecord | None = None
         self._session_path: Path | None = None
         self._force_plain = input_func is not None or out is not None
@@ -2199,6 +2231,8 @@ class WattleApp:
             "total_input_tokens": self._total_input_tokens,
             "total_cached_tokens": self._total_cached_tokens,
             "total_output_tokens": self._total_output_tokens,
+            "quota_5h_remaining_percent": self._quota_5h_remaining_percent,
+            "quota_1w_remaining_percent": self._quota_1w_remaining_percent,
         }
 
     def _restore_state(self, state: dict[str, object]) -> None:
@@ -2257,6 +2291,12 @@ class WattleApp:
         )
         self._total_output_tokens = int(
             cast(Any, state.get("total_output_tokens", self._total_output_tokens))
+        )
+        self._quota_5h_remaining_percent = _optional_percent(
+            state.get("quota_5h_remaining_percent", self._quota_5h_remaining_percent)
+        )
+        self._quota_1w_remaining_percent = _optional_percent(
+            state.get("quota_1w_remaining_percent", self._quota_1w_remaining_percent)
         )
 
     def _run_turn(self, *, started_at: float | None = None) -> None:
@@ -3275,6 +3315,12 @@ class WattleApp:
         self._total_cached_tokens += cached_tokens
         self._total_output_tokens += output_tokens
         self._last_context_tokens = input_tokens if input_tokens > 0 else None
+        quota_5h = _optional_percent(response.usage.get("quota_5h_remaining_percent"))
+        quota_1w = _optional_percent(response.usage.get("quota_1w_remaining_percent"))
+        if quota_5h is not None:
+            self._quota_5h_remaining_percent = quota_5h
+        if quota_1w is not None:
+            self._quota_1w_remaining_percent = quota_1w
 
     def _handle_clear(self) -> None:
         previous_usage = self._previous_session_usage_text()
@@ -3287,6 +3333,8 @@ class WattleApp:
         self._total_input_tokens = 0
         self._total_cached_tokens = 0
         self._total_output_tokens = 0
+        self._quota_5h_remaining_percent = None
+        self._quota_1w_remaining_percent = None
         self.provider.reset_conversation()
 
         if self._session_record is not None:
@@ -3336,6 +3384,8 @@ class WattleApp:
             cwd=_display_cwd(),
             thinking=self.thinking,
             effort=self.effort,
+            quota_5h_remaining_percent=self._quota_5h_remaining_percent,
+            quota_1w_remaining_percent=self._quota_1w_remaining_percent,
             fields=self._statusline_fields,
         )
 
