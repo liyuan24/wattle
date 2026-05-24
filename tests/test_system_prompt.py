@@ -53,8 +53,9 @@ def test_build_system_prompt_uses_wattle_default_without_pi_docs(tmp_path: Path)
     assert "do not duplicate a subagent's assigned work while it is still running" in prompt
     assert "write the task so the ownership is clear in prose" in prompt
     assert "first find the image path using available file-search tools" in prompt
-    assert "Use update_plan for nontrivial multi-step work" in prompt
-    assert "Keep exactly one item in_progress at a time" in prompt
+    assert "Use update_plan sparingly for complex, ambiguous, or long-running work" in prompt
+    assert "Do not use it for short routine tasks" in prompt
+    assert "brief status sentence" in prompt
     assert "first identify and review the referenced content" in prompt
     assert "whether it is in a file or earlier conversation" in prompt
     assert "do not use update_plan as a substitute for reading or understanding the plan" in prompt
@@ -77,7 +78,7 @@ def test_system_prompt_preserves_context_and_runtime_metadata(tmp_path: Path) ->
     assert "# Project Context" in prompt
     assert f"# AGENTS.md instructions for {tmp_path}" in prompt
     assert "<INSTRUCTIONS>\nProject rules.\n</INSTRUCTIONS>" in prompt
-    assert "Use update_plan for nontrivial multi-step work" not in prompt
+    assert "Use update_plan sparingly for complex, ambiguous, or long-running work" not in prompt
     assert "Current date: 2026-05-10" in prompt
 
 

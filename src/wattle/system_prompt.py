@@ -201,10 +201,12 @@ def _guidelines(
         )
     if "update_plan" in names:
         guidelines.append(
-            "Use update_plan for nontrivial multi-step work when tracking progress "
-            "would help the user. Keep exactly one item in_progress at a time. "
-            "Update the plan as work completes or changes; do not use it for "
-            "trivial one-step tasks."
+            "Use update_plan sparingly for complex, ambiguous, or long-running work "
+            "where a visible checklist helps the user track progress. Do not use it "
+            "for short routine tasks, simple command sequences, or obvious "
+            "inspect-then-act workflows. If the task can be handled with a brief "
+            "status sentence, use prose instead. Once a plan is started, keep exactly "
+            "one item in_progress at a time and update it as work completes or changes."
         )
         guidelines.append(
             "When the user asks you to implement a plan, proposal, design doc, "
