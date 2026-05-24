@@ -154,6 +154,18 @@ def test_write_tool_returns_unified_diff_for_new_file(tmp_path) -> None:
     assert "+beta" in output
 
 
+def test_write_tool_returns_full_diff_for_large_new_file(tmp_path) -> None:
+    path = tmp_path / "large.txt"
+    content = "".join(f"line {index}\n" for index in range(1, 214))
+
+    output = WriteTool().run(str(path), content)
+
+    assert path.read_text() == content
+    assert "+line 1" in output
+    assert "+line 213" in output
+    assert "diff lines" not in output
+
+
 def test_edit_tool_replaces_text_and_returns_diff(tmp_path) -> None:
     path = tmp_path / "story.txt"
     path.write_text("hello old world\n")

@@ -15,6 +15,7 @@ class ModelChoice:
     provider: str
     vendor: str
     description: str
+    context_window: int | None = None
 
 
 MODEL_CATALOG: tuple[ModelChoice, ...] = (
@@ -23,92 +24,111 @@ MODEL_CATALOG: tuple[ModelChoice, ...] = (
         provider="openai_codex",
         vendor="openai",
         description="Frontier model for complex coding, research, and real-world work.",
+        context_window=272_000,
     ),
     ModelChoice(
         model="gpt-5.4",
         provider="openai_codex",
         vendor="openai",
         description="Strong model for everyday coding.",
+        context_window=272_000,
     ),
     ModelChoice(
         model="gpt-5.4-mini",
         provider="openai_codex",
         vendor="openai",
         description="Small, fast, and cost-efficient model for simpler coding tasks.",
+        context_window=272_000,
     ),
     ModelChoice(
         model="gpt-5.3-codex",
         provider="openai_codex",
         vendor="openai",
         description="Coding-optimized model.",
+        context_window=272_000,
     ),
     ModelChoice(
         model="gpt-5.3-codex-spark",
         provider="openai_codex",
         vendor="openai",
         description="Ultra-fast coding model.",
+        context_window=128_000,
     ),
     ModelChoice(
         model="gpt-5.2",
         provider="openai_codex",
         vendor="openai",
         description="Optimized for professional work and long-running agents.",
+        context_window=272_000,
     ),
     ModelChoice(
         model="claude-sonnet-4-6",
         provider="anthropic",
         vendor="anthropic",
         description="Balanced Anthropic model for coding and agentic work.",
+        context_window=1_000_000,
     ),
     ModelChoice(
         model="claude-opus-4-6",
         provider="anthropic",
         vendor="anthropic",
         description="Anthropic model for complex coding and deep reasoning.",
+        context_window=1_000_000,
     ),
     ModelChoice(
         model="claude-haiku-4-6",
         provider="anthropic",
         vendor="anthropic",
         description="Fast Anthropic model for lightweight coding tasks.",
+        context_window=200_000,
     ),
     ModelChoice(
         model="deepseek-v4-flash",
         provider="deepseek",
         vendor="deepseek",
         description="DeepSeek fast model with 1M context and tool calling.",
+        context_window=1_000_000,
     ),
     ModelChoice(
         model="deepseek-v4-pro",
         provider="deepseek",
         vendor="deepseek",
         description="DeepSeek stronger model with 1M context and tool calling.",
+        context_window=1_000_000,
     ),
     ModelChoice(
         model="kimi-k2.6",
         provider="kimi",
         vendor="kimi",
         description="Moonshot Kimi flagship model for agentic coding.",
+        context_window=262_144,
     ),
     ModelChoice(
         model="kimi-k2.5",
         provider="kimi",
         vendor="kimi",
         description="Moonshot Kimi long-context multimodal model.",
+        context_window=262_144,
     ),
     ModelChoice(
         model="MiniMax-M2.7",
         provider="minimax",
         vendor="minimax",
         description="MiniMax latest OpenAI-compatible coding model.",
+        context_window=204_800,
     ),
     ModelChoice(
         model="MiniMax-M2.7-highspeed",
         provider="minimax",
         vendor="minimax",
         description="MiniMax M2.7 optimized for faster output.",
+        context_window=204_800,
     ),
 )
+
+MODEL_CHOICES_BY_MODEL: dict[str, ModelChoice] = {
+    choice.model: choice for choice in MODEL_CATALOG
+}
 
 
 def has_vendor_auth(vendor: str) -> bool:
@@ -135,6 +155,14 @@ def has_model_auth(choice: ModelChoice) -> bool:
 def available_model_choices() -> list[ModelChoice]:
     """Return catalog entries whose vendors are configured in auth."""
     return [choice for choice in MODEL_CATALOG if has_model_auth(choice)]
+
+
+def context_window_for_model(model: str) -> int | None:
+    """Return the max input/context window for a known model."""
+    choice = MODEL_CHOICES_BY_MODEL.get(model)
+    if choice is not None:
+        return choice.context_window
+    return None
 
 
 def find_model_choice(selector: str, choices: list[ModelChoice]) -> ModelChoice | None:

@@ -19,27 +19,10 @@ from wattle.compaction import (
     estimate_request_context_tokens,
     maybe_compact_messages,
 )
+from wattle.models import context_window_for_model
 from wattle.provider_errors import is_context_length_error
 from wattle.providers import CompletionRequest, CompletionResponse, Message, Provider, StreamEvent
 from wattle.session import message_to_dict
-
-MODEL_CONTEXT_TOKENS: dict[str, int] = {
-    "gpt-5.5": 1_050_000,
-    "gpt-5.4": 1_050_000,
-    "gpt-5.4-mini": 400_000,
-    "gpt-5.3-codex": 400_000,
-    "gpt-5.3-codex-spark": 400_000,
-    "gpt-5.2": 400_000,
-    "claude-sonnet-4-6": 200_000,
-    "claude-opus-4-6": 200_000,
-    "claude-haiku-4-6": 200_000,
-    "deepseek-v4-flash": 1_000_000,
-    "deepseek-v4-pro": 1_000_000,
-    "kimi-k2.6": 256_000,
-    "kimi-k2.5": 256_000,
-    "MiniMax-M2.7": 204_800,
-    "MiniMax-M2.7-highspeed": 204_800,
-}
 
 
 @dataclass(frozen=True, slots=True)
@@ -284,20 +267,6 @@ async def astream_with_recovery(
         yield event
 
 
-def context_window_for_model(model: str) -> int | None:
-    if model in MODEL_CONTEXT_TOKENS:
-        return MODEL_CONTEXT_TOKENS[model]
-    if model.startswith("gpt-"):
-        return 400_000
-    if model.startswith("claude-"):
-        return 200_000
-    if model.startswith("deepseek-"):
-        return 1_000_000
-    if model.startswith("kimi-"):
-        return 256_000
-    if model.startswith("MiniMax-"):
-        return 204_800
-    return None
 
 
 def estimate_serialized_request_bytes(

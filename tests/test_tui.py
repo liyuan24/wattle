@@ -1104,6 +1104,29 @@ def test_absolute_dragged_image_path_is_not_treated_as_slash_command(
     assert app.messages[0].content == message.content
 
 
+def test_tui_ignores_pasted_plan_prose_when_scanning_file_references() -> None:
+    text = (
+        "# Improve `wattle --resume` Session Search\n"
+        "      5 +Narrow the gap between Wattle's `--resume` flow and "
+        "Codex's resume picker.\n"
+        "     68 +Important nuance: Codex's interactive picker does not "
+        "currently pass the typed picker query into `thread/list.search_term`; "
+        "it loads backend-filtered pages by cwd/provider/source/sort and "
+        "applies typed query locally over rows.\n"
+        "    144 +Wattle's JSONL store is simpler than Codex's app-server-backed "
+        "thread store, so an eager full scan is acceptable for now.\n"
+        + " ".join(f"{index:04d}" for index in range(400))
+    )
+    out = _TTYBuffer()
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+
+    assert app._submit_user_text(text, render=True)
+
+    message = app.messages[-1]
+    assert message.role == "user"
+    assert message.content == [TextBlock(text=text)]
+
+
 def test_unknown_slash_text_still_routes_to_command_error() -> None:
     out, _app = _drive(_ScriptedStreamProvider([]), ["/definitely-not-a-command", "/exit"])
 
@@ -1307,6 +1330,21 @@ def test_assistant_markdown_renders_as_terminal_text() -> None:
     assert "`pytest`" not in visible
     assert "```" not in visible
     assert tui.TOOL_PREVIEW_STYLE in rendered
+
+
+def test_assistant_markdown_preserves_underscores_in_code_spans() -> None:
+    out = _TTYBuffer()
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+
+    app._write_block(
+        "Copy to `search_resume_plan_test.md` under `design_log`.",
+        tui.ASSISTANT_STYLE,
+    )
+
+    visible = _strip_ansi(out.getvalue())
+    assert "search_resume_plan_test.md" in visible
+    assert "design_log" in visible
 
 
 def test_running_terminal_line_animates_without_changing_text() -> None:
@@ -4030,12 +4068,12 @@ def test_edit_tool_result_renders_diff_review_style() -> None:
     assert f"{tui.DIFF_DELETE_COUNT_STYLE}-0{tui.RESET}" in rendered
     assert "48;5" not in tui.DIFF_ADD_COUNT_STYLE
     assert "48;5" not in tui.DIFF_DELETE_COUNT_STYLE
-    assert "48;5" not in tui.DIFF_ADD_LINE_NUMBER_STYLE
-    assert "48;5" not in tui.DIFF_ADD_MARKER_STYLE
-    assert "48;5" not in tui.DIFF_ADD_CODE_STYLE
-    assert "48;5" not in tui.DIFF_DELETE_LINE_NUMBER_STYLE
-    assert "48;5" not in tui.DIFF_DELETE_MARKER_STYLE
-    assert "48;5" not in tui.DIFF_DELETE_CODE_STYLE
+    assert "48;5;22" in tui.DIFF_ADD_LINE_NUMBER_STYLE
+    assert "48;5;22" in tui.DIFF_ADD_MARKER_STYLE
+    assert "48;5;22" in tui.DIFF_ADD_CODE_STYLE
+    assert "48;5;52" in tui.DIFF_DELETE_LINE_NUMBER_STYLE
+    assert "48;5;52" in tui.DIFF_DELETE_MARKER_STYLE
+    assert "48;5;52" in tui.DIFF_DELETE_CODE_STYLE
     assert "    1 +hello" in plain
     assert "    2 +world" in plain
     assert tui.DIFF_ADD_LINE_NUMBER_STYLE in rendered
@@ -4065,8 +4103,9 @@ def test_edit_tool_result_diff_rows_disable_autowrap() -> None:
     plain = _strip_ansi(rendered)
     assert "\x1b[?7l" in rendered
     assert "\x1b[K" in rendered
-    assert "    1 +abcdefghijklmnopqrstuvwxyzabcd..." in plain
-    assert "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz" not in plain
+    assert "    1 +abcdefghijklmnopqrstuvwxyzabcdefg" in plain
+    assert "       hijklmnopqrstuvwxyz" in plain
+    assert "..." not in plain
 
 
 def test_write_added_file_renders_full_diff_preview() -> None:
@@ -4097,6 +4136,93 @@ def test_write_added_file_renders_full_diff_preview() -> None:
     assert "write ok -" not in rendered
     assert "   23 +line 23" in plain
     assert "changed lines" not in rendered
+
+
+def test_write_added_file_title_counts_full_large_diff_preview() -> None:
+    out = _TTYBuffer()
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+    path = "design_log/search_resume_plan.md"
+    added_lines = [f"+line {index}" for index in range(1, 214)]
+    block = ToolUseBlock(id="call_1", name="write", input={"path": path})
+    result = ToolResultBlock(
+        tool_use_id="call_1",
+        content="\n".join(
+            [
+                f"Wrote 200 bytes to {path}",
+                f"--- {path} (before)",
+                f"+++ {path} (after)",
+                "@@ -0,0 +1,213 @@",
+                *added_lines,
+            ]
+        ),
+    )
+
+    app._write_tool_result(block, result)
+
+    plain = _strip_ansi(out.getvalue())
+    assert f"Added {path} (+213 -0)" in plain
+    assert f"Added {path} (+117 -0)" not in plain
+    assert "  213 +line 213" in plain
+    assert "diff lines" not in plain
+    assert "changed lines" not in plain
+
+
+def test_write_added_markdown_file_uses_pygments_diff_syntax() -> None:
+    out = _TTYBuffer()
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+    path = "design_log/search_resume_plan.md"
+    block = ToolUseBlock(id="call_1", name="write", input={"path": path})
+    result = ToolResultBlock(
+        tool_use_id="call_1",
+        content="\n".join(
+            [
+                f"Wrote 80 bytes to {path}",
+                f"--- {path} (before)",
+                f"+++ {path} (after)",
+                "@@ -0,0 +1,2 @@",
+                "+# Resume Search",
+                "+Plain body text",
+            ]
+        ),
+    )
+
+    app._write_tool_result(block, result)
+
+    rendered = out.getvalue()
+    plain = _strip_ansi(rendered)
+    assert "    1 +# Resume Search" in plain
+    assert "    2 +Plain body text" in plain
+    assert f"{tui.DIFF_ADD_SYNTAX_HEADING_STYLE}# Resume Search" in rendered
+
+
+def test_write_added_cpp_file_uses_pygments_diff_syntax() -> None:
+    out = _TTYBuffer()
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+    path = "src/demo.cpp"
+    block = ToolUseBlock(id="call_1", name="write", input={"path": path})
+    result = ToolResultBlock(
+        tool_use_id="call_1",
+        content="\n".join(
+            [
+                f"Wrote 80 bytes to {path}",
+                f"--- {path} (before)",
+                f"+++ {path} (after)",
+                "@@ -0,0 +1,1 @@",
+                "+int main() { return 0; }",
+            ]
+        ),
+    )
+
+    app._write_tool_result(block, result)
+
+    rendered = out.getvalue()
+    plain = _strip_ansi(rendered)
+    assert "    1 +int main() { return 0; }" in plain
+    assert f"{tui.DIFF_ADD_SYNTAX_KEYWORD_STYLE}int" in rendered
+    assert f"{tui.DIFF_ADD_SYNTAX_KEYWORD_STYLE}return" in rendered
 
 
 def test_edit_tool_result_renders_full_diff_preview() -> None:
@@ -4135,7 +4261,7 @@ def test_edit_tool_result_renders_full_diff_preview() -> None:
     assert "   17 +new 17" in plain
     assert tui.DIFF_DELETE_LINE_NUMBER_STYLE in rendered
     assert tui.DIFF_DELETE_MARKER_STYLE in rendered
-    assert tui.SYNTAX_NAME_STYLE in rendered
+    assert tui.SYNTAX_NAME_STYLE not in rendered
     assert "changed lines" not in rendered
 
 
@@ -4974,7 +5100,7 @@ def test_tui_statusline_fields_load_from_settings_section(
     assert args.statusline is True
     assert args.statusline_fields == ("model", "thinking", "context_remaining", "quota_5h")
     assert app._status_text() == (
-        "gpt-5.5 | thinking: medium | remaining: 1.0M tok | 5h quota: unknown"
+        "gpt-5.5 | thinking: medium | remaining: 271.9k tok | 5h quota: unknown"
     )
 
 

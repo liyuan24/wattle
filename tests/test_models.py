@@ -1,6 +1,36 @@
 from __future__ import annotations
 
-from wattle import models
+from wattle import models, request_preparation
+
+
+def test_model_catalog_includes_context_windows() -> None:
+    assert {choice.model: choice.context_window for choice in models.MODEL_CATALOG} == {
+        "gpt-5.5": 272_000,
+        "gpt-5.4": 272_000,
+        "gpt-5.4-mini": 272_000,
+        "gpt-5.3-codex": 272_000,
+        "gpt-5.3-codex-spark": 128_000,
+        "gpt-5.2": 272_000,
+        "claude-sonnet-4-6": 1_000_000,
+        "claude-opus-4-6": 1_000_000,
+        "claude-haiku-4-6": 200_000,
+        "deepseek-v4-flash": 1_000_000,
+        "deepseek-v4-pro": 1_000_000,
+        "kimi-k2.6": 262_144,
+        "kimi-k2.5": 262_144,
+        "MiniMax-M2.7": 204_800,
+        "MiniMax-M2.7-highspeed": 204_800,
+    }
+
+
+def test_request_preparation_uses_model_catalog_context_windows() -> None:
+    for choice in models.MODEL_CATALOG:
+        assert request_preparation.context_window_for_model(choice.model) == choice.context_window
+
+
+def test_unknown_model_context_window_is_unknown() -> None:
+    assert models.context_window_for_model("gpt-future-model") is None
+    assert request_preparation.context_window_for_model("gpt-future-model") is None
 
 
 def test_available_model_choices_includes_openai_compatible_vendors(

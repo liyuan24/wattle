@@ -11,8 +11,6 @@ def render_file_diff(
     before: str,
     after: str,
     path: Path,
-    *,
-    max_lines: int = 120,
 ) -> str:
     before_lines = before.splitlines()
     after_lines = after.splitlines()
@@ -27,10 +25,7 @@ def render_file_diff(
     )
     if not diff:
         return "[no changes]"
-    if len(diff) <= max_lines:
-        return "\n".join(diff)
-    shown = diff[:max_lines]
-    return "\n".join([*shown, f"... +{len(diff) - max_lines} diff lines"])
+    return "\n".join(diff)
 
 
 class _EditReplacement(TypedDict):

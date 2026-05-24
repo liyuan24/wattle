@@ -7,6 +7,8 @@ from pathlib import Path
 
 from pty_harness import PtySession
 
+from wattle import tui
+
 
 def _slow_wattle_child_code(
     *,
@@ -753,9 +755,10 @@ def test_pty_tool_rendering_uses_distinct_command_and_diff_styles(tmp_path: Path
         assert "\x1b[38;5;75;1mecho\x1b[0m" in raw
         assert "\x1b[38;5;80;1m|\x1b[0m" in raw
         assert "\x1b[38;5;159;1msrc/demo.py\x1b[0m" in raw
-        assert "\x1b[38;5;108m    1 " in raw
-        assert "\x1b[38;5;82;1m+" in raw
-        assert "\x1b[48;5;22" not in raw
+        assert "\x1b[48;5;22;38;5;72m    1 " in raw
+        assert "\x1b[48;5;22;38;5;40m+" in raw
+        assert f"{tui.DIFF_ADD_SYNTAX_KEYWORD_STYLE}def" in raw
+        assert f"{tui.DIFF_ADD_SYNTAX_NAME_STYLE}hello" in raw
 
 
 def test_pty_groups_adjacent_same_file_edit_results(tmp_path: Path) -> None:

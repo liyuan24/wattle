@@ -28,10 +28,16 @@ import tty
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
+from functools import lru_cache
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, TextIO, cast
 from urllib.parse import unquote, urlparse
+
+from pygments import lex as pygments_lex
+from pygments.lexers import get_lexer_for_filename
+from pygments.token import Token
+from pygments.util import ClassNotFound
 
 from wattle.auth import login_openai_codex
 from wattle.command_summary import (
@@ -243,12 +249,26 @@ DIFF_DELETE_STYLE = "\x1b[38;5;231m"
 DIFF_ADD_COUNT_STYLE = "\x1b[38;5;82;1m"
 DIFF_DELETE_COUNT_STYLE = "\x1b[38;5;203;1m"
 DIFF_META_STYLE = "\x1b[38;5;245m"
-DIFF_ADD_LINE_NUMBER_STYLE = "\x1b[38;5;108m"
-DIFF_DELETE_LINE_NUMBER_STYLE = "\x1b[38;5;131m"
-DIFF_ADD_MARKER_STYLE = "\x1b[38;5;82;1m"
-DIFF_DELETE_MARKER_STYLE = "\x1b[38;5;203;1m"
-DIFF_ADD_CODE_STYLE = "\x1b[38;5;254m"
-DIFF_DELETE_CODE_STYLE = "\x1b[38;5;248m"
+DIFF_ADD_LINE_NUMBER_STYLE = "\x1b[48;5;22;38;5;72m"
+DIFF_DELETE_LINE_NUMBER_STYLE = "\x1b[48;5;52;38;5;95m"
+DIFF_ADD_MARKER_STYLE = "\x1b[48;5;22;38;5;40m"
+DIFF_DELETE_MARKER_STYLE = "\x1b[48;5;52;38;5;160m"
+DIFF_ADD_CODE_STYLE = "\x1b[48;5;22;38;5;252m"
+DIFF_DELETE_CODE_STYLE = "\x1b[48;5;52;38;5;248m"
+DIFF_ADD_SYNTAX_COMMENT_STYLE = "\x1b[48;5;22;38;5;108m"
+DIFF_DELETE_SYNTAX_COMMENT_STYLE = "\x1b[48;5;52;38;5;138m"
+DIFF_ADD_SYNTAX_HEADING_STYLE = "\x1b[48;5;22;38;5;80m"
+DIFF_DELETE_SYNTAX_HEADING_STYLE = "\x1b[48;5;52;38;5;174m"
+DIFF_ADD_SYNTAX_KEYWORD_STYLE = "\x1b[48;5;22;38;5;177m"
+DIFF_DELETE_SYNTAX_KEYWORD_STYLE = "\x1b[48;5;52;38;5;174m"
+DIFF_ADD_SYNTAX_NAME_STYLE = "\x1b[48;5;22;38;5;116m"
+DIFF_DELETE_SYNTAX_NAME_STYLE = "\x1b[48;5;52;38;5;181m"
+DIFF_ADD_SYNTAX_STRING_STYLE = "\x1b[48;5;22;38;5;222m"
+DIFF_DELETE_SYNTAX_STRING_STYLE = "\x1b[48;5;52;38;5;180m"
+DIFF_ADD_SYNTAX_NUMBER_STYLE = "\x1b[48;5;22;38;5;229m"
+DIFF_DELETE_SYNTAX_NUMBER_STYLE = "\x1b[48;5;52;38;5;222m"
+DIFF_ADD_SYNTAX_OPERATOR_STYLE = "\x1b[48;5;22;38;5;159m"
+DIFF_DELETE_SYNTAX_OPERATOR_STYLE = "\x1b[48;5;52;38;5;181m"
 SYNTAX_KEYWORD_STYLE = "\x1b[38;5;177;1m"
 SYNTAX_STRING_STYLE = "\x1b[38;5;216m"
 SYNTAX_NAME_STYLE = "\x1b[38;5;75;1m"
@@ -738,9 +758,15 @@ def _render_python_syntax(text: str, *, base_style: str) -> str:
     return "".join(parts)
 
 
-def _render_diff_row(kind: str, line: str, *, width: int) -> str:
-    clipped = line if len(line) <= width else line[: width - 3] + "..."
+def _render_diff_row(
+    kind: str,
+    line: str,
+    *,
+    width: int,
+    path: str | None = None,
+) -> str:
     if kind not in {"add", "delete"}:
+        clipped = line if len(line) <= width else line[: width - 3] + "..."
         return f"{DIFF_META_STYLE}{clipped}{RESET}"
 
     if kind == "add":
@@ -752,17 +778,133 @@ def _render_diff_row(kind: str, line: str, *, width: int) -> str:
         marker_style = DIFF_DELETE_MARKER_STYLE
         code_style = DIFF_DELETE_CODE_STYLE
 
-    match = re.match(r"(\s*\d+\s+)([+-])(.*)", clipped)
+    match = re.match(r"(\s*\d+\s+)([+-])(.*)", line)
     if match is None:
-        return _styled_terminal_line(clipped, code_style, width)
+        return _styled_terminal_line(line, code_style, width)
 
     line_number, marker, code = match.groups()
-    rendered = (
-        f"{line_number_style}{line_number}"
-        f"{marker_style}{marker}"
-        f"{_render_python_syntax(code, base_style=code_style)}"
-    )
-    return f"\r\x1b[?7l\x1b[0m\x1b[2K{rendered}{code_style}\x1b[K{RESET}\x1b[?7h"
+    prefix_width = len(line_number) + len(marker)
+    code_width = max(1, width - prefix_width)
+    chunks = _diff_syntax_chunks(code, kind=kind, path=path, width=code_width)
+
+    rows: list[str] = []
+    for index, chunk in enumerate(chunks):
+        code_rendered = "".join(f"{style}{text}" for style, text in chunk)
+        if index == 0:
+            rendered = (
+                f"{line_number_style}{line_number}"
+                f"{marker_style}{marker}"
+                f"{code_rendered}"
+            )
+        else:
+            rendered = (
+                f"{line_number_style}{' ' * len(line_number)}"
+                f"{marker_style} "
+                f"{code_rendered}"
+            )
+        rows.append(_diff_terminal_row(rendered, code_style))
+    return "\n".join(rows)
+
+
+@lru_cache(maxsize=256)
+def _diff_lexer_for_path(path: str | None) -> Any | None:
+    if not path:
+        return None
+    try:
+        return get_lexer_for_filename(path)
+    except ClassNotFound:
+        return None
+
+
+def _diff_syntax_chunks(
+    text: str,
+    *,
+    kind: str,
+    path: str | None,
+    width: int,
+) -> list[list[tuple[str, str]]]:
+    spans = _diff_syntax_spans(text, kind=kind, path=path)
+    chunks: list[list[tuple[str, str]]] = [[]]
+    remaining = width
+    for style, value in spans:
+        if remaining == 0:
+            chunks.append([])
+            remaining = width
+        while value:
+            take = min(len(value), remaining)
+            chunks[-1].append((style, value[:take]))
+            value = value[take:]
+            remaining -= take
+            if remaining == 0 and value:
+                chunks.append([])
+                remaining = width
+    return chunks
+
+
+def _diff_syntax_spans(
+    text: str,
+    *,
+    kind: str,
+    path: str | None,
+) -> list[tuple[str, str]]:
+    base_style = DIFF_ADD_CODE_STYLE if kind == "add" else DIFF_DELETE_CODE_STYLE
+    lexer = _diff_lexer_for_path(path)
+    if lexer is None:
+        return [(base_style, text)]
+
+    spans: list[tuple[str, str]] = []
+    for token_type, value in pygments_lex(text, lexer):
+        value = value.replace("\n", "")
+        if not value:
+            continue
+        spans.append((_diff_syntax_style(token_type, kind=kind, base_style=base_style), value))
+    return spans or [(base_style, text)]
+
+
+def _diff_syntax_style(token_type: Any, *, kind: str, base_style: str) -> str:
+    if token_type in Token.Comment:
+        return (
+            DIFF_ADD_SYNTAX_COMMENT_STYLE
+            if kind == "add"
+            else DIFF_DELETE_SYNTAX_COMMENT_STYLE
+        )
+    if token_type in Token.Generic.Heading or token_type in Token.Generic.Subheading:
+        return (
+            DIFF_ADD_SYNTAX_HEADING_STYLE
+            if kind == "add"
+            else DIFF_DELETE_SYNTAX_HEADING_STYLE
+        )
+    if token_type in Token.Keyword:
+        return (
+            DIFF_ADD_SYNTAX_KEYWORD_STYLE
+            if kind == "add"
+            else DIFF_DELETE_SYNTAX_KEYWORD_STYLE
+        )
+    if token_type in Token.Literal.String:
+        return (
+            DIFF_ADD_SYNTAX_STRING_STYLE
+            if kind == "add"
+            else DIFF_DELETE_SYNTAX_STRING_STYLE
+        )
+    if token_type in Token.Literal.Number:
+        return (
+            DIFF_ADD_SYNTAX_NUMBER_STYLE
+            if kind == "add"
+            else DIFF_DELETE_SYNTAX_NUMBER_STYLE
+        )
+    if token_type in Token.Name:
+        return DIFF_ADD_SYNTAX_NAME_STYLE if kind == "add" else DIFF_DELETE_SYNTAX_NAME_STYLE
+    if token_type in Token.Operator or token_type in Token.Punctuation:
+        return (
+            DIFF_ADD_SYNTAX_OPERATOR_STYLE
+            if kind == "add"
+            else DIFF_DELETE_SYNTAX_OPERATOR_STYLE
+        )
+    return base_style
+
+
+def _diff_terminal_row(rendered: str, fill_style: str) -> str:
+    return f"\r\x1b[?7l\x1b[0m\x1b[2K{rendered}{fill_style}\x1b[K{RESET}\x1b[?7h"
 
 
 def _first_tool_result(
@@ -1615,7 +1757,9 @@ _NUMBERED_RE = re.compile(r"^(\s*)(\d+[.)])\s+(.+)$")
 _LINK_RE = re.compile(r"!?\[([^\]]*)\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
 _INLINE_CODE_RE = re.compile(r"`([^`]+)`")
 _STRONG_RE = re.compile(r"(\*\*|__)(.+?)\1")
-_EMPHASIS_RE = re.compile(r"(?<!\*)\*([^*\n]+)\*(?!\*)|(?<!_)_([^_\n]+)_(?!_)")
+_EMPHASIS_RE = re.compile(
+    r"(?<!\*)\*([^*\n]+)\*(?!\*)|(?<![\w_])_([^_\n]+)_(?![\w_])"
+)
 _STRIKE_RE = re.compile(r"~~(.+?)~~")
 
 
@@ -1774,7 +1918,7 @@ def _path_references_from_text(
     references: list[_PathReference] = []
     for token, raw_indexes in _shell_like_tokens_with_indexes(text):
         path, start, end = _token_to_path_span(token, raw_indexes, cwd=cwd)
-        if path is not None and path.is_file():
+        if path is not None and _path_is_file(path):
             if (
                 start > 0
                 and end < len(text)
@@ -1785,6 +1929,13 @@ def _path_references_from_text(
                 end += 1
             references.append(_PathReference(path=path, start=start, end=end))
     return references
+
+
+def _path_is_file(path: Path) -> bool:
+    try:
+        return path.is_file()
+    except (OSError, ValueError):
+        return False
 
 
 def _replace_text_ranges(
@@ -1889,7 +2040,7 @@ def _shell_like_tokens_with_indexes(text: str) -> list[tuple[str, list[int]]]:
                 quote = None
                 index += 1
                 continue
-            if quote is None and char in {"'", '"'}:
+            if quote is None and char in {"'", '"'} and (not value or value == ["@"]):
                 quote = char
                 index += 1
                 continue
@@ -1955,7 +2106,10 @@ def _token_to_path(token: str, *, cwd: Path) -> Path | None:
         path = Path(stripped).expanduser()
     if not path.is_absolute():
         path = cwd / path
-    return path.resolve()
+    try:
+        return path.resolve()
+    except (OSError, ValueError):
+        return None
 
 
 class WattleApp:
@@ -2842,7 +2996,7 @@ class WattleApp:
                     f"{_render_diff_row('meta', _EDIT_HUNK_SEPARATOR_ROW, width=width)}\n"
                 )
             for kind, line in item.rows:
-                self._write(f"{_render_diff_row(kind, line, width=width)}\n")
+                self._write(f"{_render_diff_row(kind, line, width=width, path=item.path)}\n")
 
     def _write_separator(self) -> None:
         if self._last_transcript_was_separator:
