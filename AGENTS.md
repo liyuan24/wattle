@@ -4,6 +4,12 @@
 
 For Wattle development, prefer committing directly to the mainline branch (`master`) and pushing it when the user asks to commit or push. Do not create a feature branch or PR by default unless the user explicitly requests that workflow.
 
+## Dependency Updates
+
+When adding or changing runtime dependencies in `pyproject.toml`, update the repo environment and the installed CLI tool environment. Run `uv sync` for the local project, then refresh the shell `wattle` command with `uv tool install --force .` because `~/.local/bin/wattle` is a separate `uv tool` environment and does not automatically pick up new dependencies from `.venv` or `uv build`.
+
+After refreshing the tool, verify the dependency through the interpreter used by the shell command. Inspect `which wattle` and the wrapper if needed, then run a lightweight command such as `wattle --help` or an import check through `/Users/liyuan/.local/share/uv/tools/wattle/bin/python3`.
+
 ## TUI Verification
 
 For any change that touches Wattle TUI behavior, run the relevant PTY harness immediately after the focused unit tests. This includes terminal input, prompt rendering, live redraw, queued messages, image anchors, subagent status, and tool status UI.
