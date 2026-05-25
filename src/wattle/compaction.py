@@ -6,6 +6,7 @@ only builds a compacted projection for provider requests.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -60,96 +61,25 @@ def maybe_compact_messages(
     keep_recent_tokens: int = DEFAULT_KEEP_RECENT_TOKENS,
     compaction_instructions: str | None = None,
 ) -> tuple[list[Message], RuntimeCompaction | None]:
-    """Return request messages, compacting in memory if needed."""
+    """Synchronous compatibility wrapper around async compaction."""
 
-    should_start = state is None and _should_start_compaction(
-        system=system,
-        messages=messages,
-        tools=tools,
-        max_tokens=max_tokens,
-        context_window=context_window,
-    )
-    should_start = should_start or (force and state is None)
-    if not force and not should_start and state is None:
-        return list(messages), None
-
-    if state is not None:
-        first_end, last_start = _compaction_bounds(
-            messages,
+    return asyncio.run(
+        amaybe_compact_messages(
+            provider=provider,
+            model=model,
+            system=system,
+            messages=messages,
+            tools=tools,
+            max_tokens=max_tokens,
+            context_window=context_window,
+            state=state,
+            on_start=on_start,
+            on_end=on_end,
             force=force,
-            context_window=context_window,
-            max_tokens=max_tokens,
             keep_recent_tokens=keep_recent_tokens,
+            compaction_instructions=compaction_instructions,
         )
-        should_update = force or state.summarized_until < last_start
-        if not should_update:
-            return _build_compacted_messages(
-                messages,
-                state.first_kept_index,
-                state.summary,
-            ), state
-
-    first_end, last_start = _compaction_bounds(
-        messages,
-        force=force,
-        context_window=context_window,
-        max_tokens=max_tokens,
-        keep_recent_tokens=keep_recent_tokens,
     )
-    if last_start <= first_end and should_start:
-        first_end, last_start = _compaction_bounds(
-            messages,
-            force=True,
-            context_window=context_window,
-            max_tokens=max_tokens,
-            keep_recent_tokens=keep_recent_tokens,
-        )
-    if last_start <= first_end:
-        if state is None:
-            return list(messages), None
-        return _build_compacted_messages(
-            messages,
-            state.first_kept_index,
-            state.summary,
-        ), state
-
-    if on_start is not None:
-        on_start()
-    try:
-        provider.reset_conversation()
-        if state is None or force:
-            summary = _summarize_messages(
-                provider=provider,
-                model=model,
-                messages=messages[first_end:last_start],
-                previous_summary=None,
-                compaction_instructions=compaction_instructions,
-            )
-        else:
-            summary = _summarize_messages(
-                provider=provider,
-                model=model,
-                messages=messages[state.summarized_until:last_start],
-                previous_summary=state.summary,
-                compaction_instructions=compaction_instructions,
-            )
-        provider.reset_conversation()
-    finally:
-        if on_end is not None:
-            on_end()
-
-    read_files, modified_files = _merge_file_metadata(
-        state,
-        messages[first_end:last_start],
-    )
-    next_state = RuntimeCompaction(
-        summary=summary,
-        summarized_until=last_start,
-        first_kept_index=last_start,
-        read_files=read_files,
-        modified_files=modified_files,
-    )
-    return _build_compacted_messages(messages, last_start, summary), next_state
 
 
 async def amaybe_compact_messages(
@@ -168,7 +98,7 @@ async def amaybe_compact_messages(
     keep_recent_tokens: int = DEFAULT_KEEP_RECENT_TOKENS,
     compaction_instructions: str | None = None,
 ) -> tuple[list[Message], RuntimeCompaction | None]:
-    """Async counterpart to :func:`maybe_compact_messages`."""
+    """Return request messages, compacting in memory if needed."""
 
     should_start = state is None and _should_start_compaction(
         system=system,
@@ -181,7 +111,20 @@ async def amaybe_compact_messages(
     if not force and not should_start and state is None:
         return list(messages), None
 
-    if state is not None:
+    if state is not None and not force:
+        projected_messages = _build_compacted_messages(
+            messages,
+            state.first_kept_index,
+            state.summary,
+        )
+        if not _should_start_compaction(
+            system=system,
+            messages=projected_messages,
+            tools=tools,
+            max_tokens=max_tokens,
+            context_window=context_window,
+        ):
+            return projected_messages, state
         first_end, last_start = _compaction_bounds(
             messages,
             force=force,
@@ -189,13 +132,8 @@ async def amaybe_compact_messages(
             max_tokens=max_tokens,
             keep_recent_tokens=keep_recent_tokens,
         )
-        should_update = force or state.summarized_until < last_start
-        if not should_update:
-            return _build_compacted_messages(
-                messages,
-                state.first_kept_index,
-                state.summary,
-            ), state
+        if state.summarized_until >= last_start:
+            return projected_messages, state
 
     first_end, last_start = _compaction_bounds(
         messages,
@@ -327,42 +265,6 @@ def _build_compacted_messages(
         ],
     )
     return [summary_message, *messages[first_kept_index:]]
-
-
-def _summarize_messages(
-    *,
-    provider: Provider,
-    model: str,
-    messages: list[Message],
-    previous_summary: str | None,
-    compaction_instructions: str | None,
-) -> str:
-    if not messages and previous_summary:
-        return previous_summary
-
-    prompt = _summary_prompt(
-        messages,
-        previous_summary=previous_summary,
-        compaction_instructions=compaction_instructions,
-    )
-    request = CompletionRequest(
-        model=model,
-        messages=[Message(role="user", content=[TextBlock(text=prompt)])],
-        max_tokens=SUMMARY_MAX_TOKENS,
-        system=SUMMARY_SYSTEM_PROMPT,
-        tools=[],
-    )
-
-    final_text: list[str] = []
-    for event in provider.stream(request):
-        if isinstance(event, StreamComplete):
-            final_text = [
-                block.text for block in event.response.content if isinstance(block, TextBlock)
-            ]
-    summary = "\n".join(final_text).strip()
-    if not summary:
-        raise RuntimeError("compaction summarization returned no text")
-    return summary
 
 
 async def _asummarize_messages(

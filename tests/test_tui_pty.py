@@ -406,6 +406,115 @@ def _tool_rendering_child_code() -> str:
     )
 
 
+def _slow_second_write_child_code() -> str:
+    return textwrap.dedent(
+        """
+        import argparse
+        import time
+
+        from wattle.permissions import PermissionMode
+        from wattle.providers import (
+            CompletionResponse,
+            Provider,
+            StreamComplete,
+            TextBlock,
+            TextDelta,
+            ToolUseBlock,
+            ToolUseDelta,
+        )
+        from wattle.tools import TOOLS_BY_NAME
+        from wattle.tools.base import Tool
+        from wattle.tui import WattleApp
+
+
+        class SlowSecondWriteTool(Tool):
+            name = "write"
+            description = "Fast first write, slow second write."
+            input_schema = {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "content": {"type": "string"},
+                },
+            }
+
+            def run(self, path, content):
+                if path == "src/slow.py":
+                    time.sleep(1.0)
+                return "\\n".join(
+                    [
+                        f"Wrote {len(content)} bytes to {path}",
+                        f"--- {path} (before)",
+                        f"+++ {path} (after)",
+                        "@@ -0,0 +1,1 @@",
+                        f"+{content.rstrip()}",
+                    ]
+                )
+
+
+        TOOLS_BY_NAME["write"] = SlowSecondWriteTool()
+
+
+        class TwoWriteProvider(Provider):
+            def __init__(self):
+                self.calls = 0
+
+            def complete(self, request):
+                return CompletionResponse(
+                    content=[TextBlock(text="done")],
+                    stop_reason="end_turn",
+                    usage={},
+                )
+
+            def stream(self, request):
+                self.calls += 1
+                if self.calls == 1:
+                    yield ToolUseDelta(id="write_fast", name="write", partial_json=None)
+                    yield ToolUseDelta(id="write_slow", name="write", partial_json=None)
+                    yield StreamComplete(
+                        CompletionResponse(
+                            content=[
+                                ToolUseBlock(
+                                    id="write_fast",
+                                    name="write",
+                                    input={"path": "src/fast.py", "content": "FAST_SENTINEL\\n"},
+                                ),
+                                ToolUseBlock(
+                                    id="write_slow",
+                                    name="write",
+                                    input={"path": "src/slow.py", "content": "SLOW_SENTINEL\\n"},
+                                ),
+                            ],
+                            stop_reason="tool_use",
+                            usage={},
+                        )
+                    )
+                    return
+                yield TextDelta(text="done")
+                yield StreamComplete(
+                    CompletionResponse(
+                        content=[TextBlock(text="done")],
+                        stop_reason="end_turn",
+                        usage={},
+                    )
+                )
+
+
+        args = argparse.Namespace(
+            provider="openai_responses",
+            model="gpt-5.5",
+            max_tokens=4096,
+            thinking=False,
+            effort=None,
+            prompt="render slow writes",
+            persist_session=False,
+            permission_mode=PermissionMode.YOLO,
+        )
+        raise SystemExit(WattleApp(args, TwoWriteProvider()).run())
+        """
+    )
+
+
 def _grouped_edit_child_code() -> str:
     return textwrap.dedent(
         """
@@ -951,6 +1060,25 @@ def test_pty_research_tool_calls_render_aggregate(tmp_path: Path) -> None:
         assert "Read other.txt" in screen_text
         assert "Read third.txt" in screen_text
         assert "read ok - notes.txt" not in screen_text
+
+
+def test_pty_resize_preserves_completed_inflight_diff_rendering(tmp_path: Path) -> None:
+    with PtySession.spawn_python(
+        _slow_second_write_child_code(),
+        cwd=tmp_path,
+        cols=120,
+        rows=36,
+    ) as session:
+        session.read_until("Added src/fast.py", timeout=4)
+
+        session.resize(cols=80, rows=36)
+        session.read_for(0.35)
+
+        resized_screen_text = session.screen.text()
+        assert "Added src/fast.py (+1 -0)" in resized_screen_text
+        assert "    1 +FAST_SENTINEL" in resized_screen_text
+        assert "tool result" not in resized_screen_text
+        assert "Wrote 14 bytes to src/fast.py" not in resized_screen_text
 
 
 def test_pty_tool_rendering_uses_distinct_command_and_diff_styles(tmp_path: Path) -> None:

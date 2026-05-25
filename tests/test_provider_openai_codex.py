@@ -10,6 +10,7 @@ from typing import Any
 from wattle.providers import (
     CompletionRequest,
     CompletionResponse,
+    IncompleteStreamError,
     Message,
     OpenAICodexResponsesProvider,
     StreamComplete,
@@ -76,6 +77,20 @@ class _FakeSSE:
         chunk = self._payload[self._offset : end + 1]
         self._offset += len(chunk)
         return chunk
+
+
+class _FakeJsonResponse:
+    def __init__(self, payload: dict[str, Any]) -> None:
+        self._payload = json.dumps(payload).encode("utf-8")
+
+    def __enter__(self) -> _FakeJsonResponse:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+    def read(self, _size: int = -1) -> bytes:
+        return self._payload
 
 
 class _LineOnlySSE(_FakeSSE):
@@ -250,6 +265,52 @@ def test_codex_provider_reads_streamed_rate_limit_event_into_usage() -> None:
 
     assert response.usage["quota_5h_remaining_percent"] == 72
     assert response.usage["quota_1w_remaining_percent"] == 90
+
+
+def test_codex_provider_fetches_quota_usage_from_chatgpt_backend() -> None:
+    captured: list[urllib.request.Request] = []
+
+    def urlopen(req: urllib.request.Request) -> _FakeJsonResponse:
+        captured.append(req)
+        return _FakeJsonResponse(
+            {
+                "plan_type": "pro",
+                "rate_limit": {
+                    "allowed": True,
+                    "limit_reached": False,
+                    "primary_window": {
+                        "used_percent": 28,
+                        "limit_window_seconds": 18_000,
+                        "reset_after_seconds": 10,
+                        "reset_at": 1_700_000_000,
+                    },
+                    "secondary_window": {
+                        "used_percent": 7,
+                        "limit_window_seconds": 604_800,
+                        "reset_after_seconds": 20,
+                        "reset_at": 1_700_000_001,
+                    },
+                },
+            }
+        )
+
+    provider = OpenAICodexResponsesProvider(
+        bearer_token=_token(),
+        urlopen=urlopen,
+    )
+
+    assert provider.fetch_quota_usage() == {
+        "quota_5h_remaining_percent": 72,
+        "quota_1w_remaining_percent": 93,
+    }
+
+    req = captured[0]
+    assert req.full_url == "https://chatgpt.com/backend-api/wham/usage"
+    assert req.get_method() == "GET"
+    headers = dict(req.header_items())
+    assert headers["Authorization"] == f"Bearer {_token()}"
+    assert headers["Chatgpt-account-id"] == "acct_123"
+    assert headers["Originator"] == "wattle"
 
 
 def test_codex_provider_is_stateless_and_resends_full_history() -> None:
@@ -472,6 +533,30 @@ def test_codex_provider_reads_sse_incrementally_by_line() -> None:
             )
         ),
     ]
+
+
+def test_codex_provider_raises_retryable_error_for_incomplete_stream() -> None:
+    provider = OpenAICodexResponsesProvider(
+        bearer_token=_token(),
+        urlopen=lambda _req: _FakeSSE(
+            [{"type": "response.output_text.delta", "delta": "partial"}]
+        ),
+    )
+
+    try:
+        list(
+            provider.stream(
+                CompletionRequest(
+                    model="gpt-5.5",
+                    max_tokens=512,
+                    messages=[Message(role="user", content=[TextBlock(text="hello")])],
+                )
+            )
+        )
+    except IncompleteStreamError as exc:
+        assert "without a completion event" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("expected incomplete stream to raise")
 
 
 def test_codex_provider_uses_streamed_text_when_final_output_is_empty() -> None:

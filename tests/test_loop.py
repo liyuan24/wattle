@@ -5,11 +5,13 @@ from __future__ import annotations
 from collections import deque
 from collections.abc import Iterable, Iterator
 
+from wattle import request_preparation
 from wattle.loop import run, run_streaming
 from wattle.permissions import PermissionGate, PermissionMode
 from wattle.providers import (
     CompletionRequest,
     CompletionResponse,
+    IncompleteStreamError,
     Message,
     Provider,
     StreamComplete,
@@ -489,6 +491,50 @@ def test_run_streaming_drives_tools_and_forwards_events() -> None:
     assert tool_result.tool_use_id == "call_1"
     assert tool_result.is_error is False
     assert "hello" in tool_result.content
+
+
+def test_run_streaming_retries_incomplete_stream_without_saving_partial(
+    monkeypatch,
+) -> None:
+    class IncompleteThenSuccessProvider(Provider):
+        def __init__(self) -> None:
+            self.requests: list[CompletionRequest] = []
+
+        def complete(self, request: CompletionRequest) -> CompletionResponse:  # pragma: no cover
+            raise NotImplementedError
+
+        def stream(self, request: CompletionRequest) -> Iterator[StreamEvent]:
+            self.requests.append(request)
+            if len(self.requests) == 1:
+                yield TextDelta(text="partial")
+                raise IncompleteStreamError("stream closed before response.completed")
+            response = CompletionResponse(
+                content=[TextBlock(text="final")],
+                stop_reason="end_turn",
+            )
+            yield TextDelta(text="final")
+            yield StreamComplete(response=response)
+
+    monkeypatch.setattr(request_preparation, "_stream_retry_delay", lambda _attempt: 0.0)
+    provider = IncompleteThenSuccessProvider()
+    captured: list[StreamEvent] = []
+
+    result = run_streaming(
+        provider=provider,
+        tools_by_name={},
+        system=None,
+        user_input="hello",
+        model="stub-model",
+        on_event=captured.append,
+    )
+
+    assert result.content == [TextBlock(text="final")]
+    assert len(provider.requests) == 2
+    assert provider.requests[0].messages == provider.requests[1].messages
+    assert [event.text for event in captured if isinstance(event, TextDelta)] == [
+        "partial",
+        "final",
+    ]
 
 
 def cast_request_text(request: CompletionRequest) -> str:

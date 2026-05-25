@@ -204,6 +204,146 @@ def test_compaction_updates_previous_summary_with_new_middle_messages() -> None:
     assert "user:\nnew middle" not in cast_text(provider.requests[1].messages[0])
 
 
+def test_existing_compaction_reuses_summary_when_projection_is_below_threshold() -> None:
+    provider = _ScriptedProvider(
+        [
+            CompletionResponse(
+                content=[TextBlock(text="initial summary")],
+                stop_reason="end_turn",
+            ),
+            CompletionResponse(
+                content=[TextBlock(text="unexpected refresh")],
+                stop_reason="end_turn",
+            ),
+        ]
+    )
+    messages = [_message(i, "x" * 80) for i in range(50)]
+    request_messages, state = maybe_compact_messages(
+        provider=provider,
+        model="test-model",
+        system=None,
+        messages=messages,
+        tools=[],
+        max_tokens=10,
+        context_window=1_000,
+        state=None,
+    )
+    assert state is not None
+    assert "initial summary" in cast_text(request_messages[0])
+    initial_requests = list(provider.requests)
+    initial_reset_count = provider.reset_count
+
+    extended = [*messages, _message(50, "new small tail"), _message(51, "another small tail")]
+    request_messages, next_state = maybe_compact_messages(
+        provider=provider,
+        model="test-model",
+        system=None,
+        messages=extended,
+        tools=[],
+        max_tokens=10,
+        context_window=1_000,
+        state=state,
+    )
+
+    assert next_state == state
+    assert provider.requests == initial_requests
+    assert provider.reset_count == initial_reset_count
+    assert "initial summary" in cast_text(request_messages[0])
+    assert request_messages[1:] == extended[state.first_kept_index :]
+
+
+def test_existing_compaction_refreshes_when_projection_crosses_threshold() -> None:
+    provider = _ScriptedProvider(
+        [
+            CompletionResponse(
+                content=[TextBlock(text="initial summary")],
+                stop_reason="end_turn",
+            ),
+            CompletionResponse(
+                content=[TextBlock(text="updated summary")],
+                stop_reason="end_turn",
+            ),
+        ]
+    )
+    messages = [_message(i, "x" * 80) for i in range(50)]
+    _request_messages, state = maybe_compact_messages(
+        provider=provider,
+        model="test-model",
+        system=None,
+        messages=messages,
+        tools=[],
+        max_tokens=10,
+        context_window=1_000,
+        state=None,
+    )
+    assert state is not None
+
+    extended = [*messages, *[_message(i, "y" * 80) for i in range(50, 80)]]
+    request_messages, next_state = maybe_compact_messages(
+        provider=provider,
+        model="test-model",
+        system=None,
+        messages=extended,
+        tools=[],
+        max_tokens=10,
+        context_window=1_000,
+        state=state,
+    )
+
+    assert next_state is not None
+    assert next_state != state
+    assert next_state.summary == "updated summary"
+    assert next_state.summarized_until > state.summarized_until
+    assert "updated summary" in cast_text(request_messages[0])
+    assert len(provider.requests) == 2
+
+
+def test_forced_existing_compaction_refreshes_even_when_projection_is_below_threshold() -> None:
+    provider = _ScriptedProvider(
+        [
+            CompletionResponse(
+                content=[TextBlock(text="initial summary")],
+                stop_reason="end_turn",
+            ),
+            CompletionResponse(
+                content=[TextBlock(text="forced summary")],
+                stop_reason="end_turn",
+            ),
+        ]
+    )
+    messages = [_message(i, "x" * 80) for i in range(50)]
+    _request_messages, state = maybe_compact_messages(
+        provider=provider,
+        model="test-model",
+        system=None,
+        messages=messages,
+        tools=[],
+        max_tokens=10,
+        context_window=1_000,
+        state=None,
+    )
+    assert state is not None
+
+    extended = [*messages, _message(50, "new small tail")]
+    request_messages, next_state = maybe_compact_messages(
+        provider=provider,
+        model="test-model",
+        system=None,
+        messages=extended,
+        tools=[],
+        max_tokens=10,
+        context_window=1_000,
+        state=state,
+        force=True,
+    )
+
+    assert next_state is not None
+    assert next_state != state
+    assert next_state.summary == "forced summary"
+    assert "forced summary" in cast_text(request_messages[0])
+    assert len(provider.requests) == 2
+
+
 def cast_text(message: Message) -> str:
     block = message.content[0]
     assert isinstance(block, TextBlock)

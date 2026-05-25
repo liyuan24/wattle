@@ -320,6 +320,10 @@ class StreamComplete:
 StreamEvent = TextDelta | ThinkingDelta | ToolUseDelta | StreamComplete
 
 
+class IncompleteStreamError(RuntimeError):
+    """Raised when a provider stream closes before its terminal completion event."""
+
+
 # ---------------------------------------------------------------------------
 # Provider ABC
 # ---------------------------------------------------------------------------

@@ -9,6 +9,7 @@ provider is a one-line change to ``_PROVIDER_DISPATCH``.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -188,28 +189,41 @@ def run_agent(
         KeyError: If the vendor's entry is missing or malformed (from
             :mod:`wattle.auth`).
     """
-    provider, built_system = _build_provider_and_system(provider_name, permission_mode)
-
-    if permission_mode == PermissionMode.YOLO:
-        return loop.run(
-            provider,
-            TOOLS_BY_NAME,
-            built_system,
-            user_input,
+    return asyncio.run(
+        arun_agent(
+            provider_name,
             model,
-            max_tokens,
+            user_input,
+            max_tokens=max_tokens,
+            permission_mode=permission_mode,
             thinking=thinking,
             effort=effort,
         )
+    )
 
-    return loop.run(
+
+async def arun_agent(
+    provider_name: str,
+    model: str,
+    user_input: str,
+    *,
+    max_tokens: int = 4096,
+    permission_mode: PermissionMode = PermissionMode.YOLO,
+    thinking: bool = False,
+    effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None,
+) -> CompletionResponse:
+    """Async implementation of :func:`run_agent`."""
+    provider, built_system = _build_provider_and_system(provider_name, permission_mode)
+    return await loop.arun(
         provider,
         TOOLS_BY_NAME,
         built_system,
         user_input,
         model,
         max_tokens,
-        permission_gate=PermissionGate(permission_mode),
+        permission_gate=(
+            None if permission_mode == PermissionMode.YOLO else PermissionGate(permission_mode)
+        ),
         thinking=thinking,
         effort=effort,
     )
@@ -226,33 +240,44 @@ def run_agent_with_history(
     effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None,
 ) -> AgentRunResult:
     """Run the headless agent and return the full transcript for persistence."""
+    return asyncio.run(
+        arun_agent_with_history(
+            provider_name,
+            model,
+            user_input,
+            max_tokens=max_tokens,
+            permission_mode=permission_mode,
+            thinking=thinking,
+            effort=effort,
+        )
+    )
+
+
+async def arun_agent_with_history(
+    provider_name: str,
+    model: str,
+    user_input: str,
+    *,
+    max_tokens: int = 4096,
+    permission_mode: PermissionMode = PermissionMode.YOLO,
+    thinking: bool = False,
+    effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None,
+) -> AgentRunResult:
+    """Async headless agent runner returning the full transcript."""
     provider, built_system = _build_provider_and_system(provider_name, permission_mode)
     messages: list[Message] = []
-
-    if permission_mode == PermissionMode.YOLO:
-        response = loop.run(
-            provider,
-            TOOLS_BY_NAME,
-            built_system,
-            user_input,
-            model,
-            max_tokens,
-            thinking=thinking,
-            effort=effort,
-            messages_out=messages,
-        )
-    else:
-        response = loop.run(
-            provider,
-            TOOLS_BY_NAME,
-            built_system,
-            user_input,
-            model,
-            max_tokens,
-            permission_gate=PermissionGate(permission_mode),
-            thinking=thinking,
-            effort=effort,
-            messages_out=messages,
-        )
-
+    response = await loop.arun(
+        provider,
+        TOOLS_BY_NAME,
+        built_system,
+        user_input,
+        model,
+        max_tokens,
+        permission_gate=(
+            None if permission_mode == PermissionMode.YOLO else PermissionGate(permission_mode)
+        ),
+        thinking=thinking,
+        effort=effort,
+        messages_out=messages,
+    )
     return AgentRunResult(response=response, messages=messages, system=built_system)

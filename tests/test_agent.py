@@ -10,7 +10,7 @@ from __future__ import annotations
 import sys
 from collections.abc import Generator
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 # If the auth module hasn't landed yet (parallel branch), inject a stub so the
 # `from wattle.auth import get_credential` at the top of `wattle.agent` succeeds
@@ -54,11 +54,11 @@ from wattle.providers import Message, TextBlock
 
 
 @pytest.fixture
-def loop_run_sentinel() -> Generator[MagicMock, None, None]:
-    """A patched loop.run that returns a sentinel CompletionResponse."""
+def loop_run_sentinel() -> Generator[AsyncMock, None, None]:
+    """A patched loop.arun that returns a sentinel CompletionResponse."""
     sentinel = object()
     with (
-        patch.object(agent.loop, "run", return_value=sentinel) as mock_run,
+        patch.object(agent.loop, "arun", new_callable=AsyncMock, return_value=sentinel) as mock_run,
         patch.object(agent, "build_system_prompt", return_value="built system"),
     ):
         mock_run.sentinel = sentinel  # type: ignore[attr-defined]
@@ -122,6 +122,7 @@ def test_anthropic_provider_wires_anthropic_vendor_key(
         "hi",
         "claude-x",
         512,
+        permission_gate=None,
         thinking=False,
         effort=None,
     )
@@ -208,6 +209,7 @@ def test_openai_completions_provider_wires_openai_vendor_key(
         "hello",
         "gpt-x",
         4096,
+        permission_gate=None,
         thinking=False,
         effort=None,
     )
@@ -324,7 +326,12 @@ def test_run_agent_with_history_returns_response_messages_and_system() -> None:
         patch.object(agent.anthropic, "AsyncAnthropic", return_value=object()),
         patch.object(agent, "AnthropicProvider", return_value=fake_provider),
         patch.object(agent, "build_system_prompt", return_value="built system"),
-        patch.object(agent.loop, "run", side_effect=fake_loop_run) as mock_run,
+        patch.object(
+            agent.loop,
+            "arun",
+            new_callable=AsyncMock,
+            side_effect=fake_loop_run,
+        ) as mock_run,
     ):
         result = agent.run_agent_with_history(
             "anthropic",

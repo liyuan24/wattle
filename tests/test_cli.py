@@ -46,7 +46,7 @@ def test_apply_settings_defaults_when_cli_flags_are_absent(
         [],
         WattleSettings(
             provider="openai_responses",
-            model="gpt-5.4",
+            model="custom-platform-model",
             max_tokens=1234,
             thinking=True,
             effort="high",
@@ -59,7 +59,7 @@ def test_apply_settings_defaults_when_cli_flags_are_absent(
     )
 
     assert args.provider == "openai_responses"
-    assert args.model == "gpt-5.4"
+    assert args.model == "custom-platform-model"
     assert args.max_tokens == 1234
     assert args.thinking is True
     assert args.effort == "high"
@@ -68,6 +68,23 @@ def test_apply_settings_defaults_when_cli_flags_are_absent(
     assert args.statusline_fields == ()
     assert args.enabled_models == ("gpt-5.4",)
     assert args.compaction_keep_recent_tokens == 5000
+
+
+def test_apply_settings_defaults_prefers_catalog_provider_for_known_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parser = cli._build_parser()
+    args = parser.parse_args([])
+    monkeypatch.setattr(cli, "_provider_auth_available", lambda _provider: True)
+
+    cli._apply_settings_defaults(
+        args,
+        [],
+        WattleSettings(provider="openai_responses", model="gpt-5.5"),
+    )
+
+    assert args.provider == "openai_codex"
+    assert args.model == "gpt-5.5"
 
 
 def test_apply_settings_defaults_ignores_saved_provider_without_auth(

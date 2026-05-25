@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import io
+import json
 import os
 import re
 import threading
@@ -15,7 +17,7 @@ from typing import Any
 
 import pytest
 
-from wattle import auth, cli, session, settings, tui
+from wattle import auth, cli, request_preparation, session, settings, tui
 from wattle.command_summary import CommandSummary, CommandSummaryKind
 from wattle.models import ModelChoice
 from wattle.providers import (
@@ -23,6 +25,7 @@ from wattle.providers import (
     CompletionResponse,
     ImageBlock,
     Message,
+    OpenAICodexResponsesProvider,
     Provider,
     StreamComplete,
     TextBlock,
@@ -78,6 +81,51 @@ class _RaisingStreamProvider(Provider):
         self.requests.append(request)
         raise self.error
         yield  # pragma: no cover
+
+
+class _IncompleteThenSuccessStreamProvider(Provider):
+    def __init__(self) -> None:
+        self.requests: list[CompletionRequest] = []
+
+    def complete(self, request: CompletionRequest) -> CompletionResponse:  # pragma: no cover
+        raise NotImplementedError
+
+    def stream(self, request: CompletionRequest) -> Iterator[Any]:
+        self.requests.append(request)
+        if len(self.requests) == 1:
+            yield TextDelta(text="partial")
+            raise request_preparation.IncompleteStreamError(
+                "stream closed before response.completed"
+            )
+        response = CompletionResponse(content=[TextBlock(text="final")], stop_reason="end_turn")
+        yield TextDelta(text="final")
+        yield StreamComplete(response=response)
+
+
+class _FakeJsonResponse:
+    def __init__(self, payload: dict[str, Any]) -> None:
+        self._payload = json.dumps(payload).encode("utf-8")
+
+    def __enter__(self) -> _FakeJsonResponse:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+    def read(self, _size: int = -1) -> bytes:
+        return self._payload
+
+
+def _codex_token() -> str:
+    def encode(data: dict[str, Any]) -> str:
+        raw = json.dumps(data).encode("utf-8")
+        return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+    return (
+        f"{encode({'alg': 'none'})}."
+        f"{encode({'https://api.openai.com/auth': {'chatgpt_account_id': 'acct_123'}})}."
+        "sig"
+    )
 
 
 class _ParentChildProvider(Provider):
@@ -330,6 +378,24 @@ def test_basic_tui_provider_error_returns_to_prompt() -> None:
     assert "[error] Codex error: policy warning" in out
     assert "RuntimeError(" not in out
     assert "Goodbye." in out
+
+
+def test_basic_tui_retries_incomplete_stream_and_reports_reconnect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(request_preparation, "_stream_retry_delay", lambda _attempt: 0.0)
+    provider = _IncompleteThenSuccessStreamProvider()
+
+    out, app = _drive(provider, ["run the task", "/exit"])
+
+    assert len(provider.requests) == 2
+    assert provider.requests[0].messages == provider.requests[1].messages
+    assert [message.role for message in app.messages] == ["user", "assistant"]
+    assert app.messages[-1].content == [TextBlock(text="final")]
+    assert "partial" in out
+    assert "[status] Reconnecting... 1/3 after stream interruption." in out
+    assert "final" in out
+    assert "Codex stream ended without" not in out
 
 
 def _session_record(
@@ -5021,6 +5087,57 @@ def test_terminal_compaction_uses_projection_but_persists_full_history(
     assert saved.compactions[0].created_after_message_index == 25
 
 
+def test_terminal_compaction_does_not_retrigger_for_small_projected_history(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(tui, "_context_window_for_model", lambda _model: 9_500)
+    prior_messages = [_text_message(index, "history " + ("x" * 80)) for index in range(90)]
+    summary_response = CompletionResponse(
+        content=[TextBlock(text="middle summary")],
+        stop_reason="end_turn",
+    )
+    first_response = CompletionResponse(
+        content=[TextBlock(text="first answer")],
+        stop_reason="end_turn",
+    )
+    second_response = CompletionResponse(
+        content=[TextBlock(text="second answer")],
+        stop_reason="end_turn",
+    )
+    provider = _ResettableScriptedStreamProvider(
+        [
+            [StreamComplete(response=summary_response)],
+            [StreamComplete(response=first_response)],
+            [StreamComplete(response=second_response)],
+        ]
+    )
+    inputs = iter(["first request", "second request", "/exit"])
+
+    def input_func(_prompt: str = "") -> str:
+        try:
+            return next(inputs)
+        except StopIteration as exc:
+            raise EOFError from exc
+
+    out = io.StringIO()
+    app = tui.WattleApp(
+        _make_args(max_tokens=10),
+        provider,
+        state={"messages": list(prior_messages)},
+        input_func=input_func,
+        out=out,
+    )
+
+    assert app.run() == 0
+
+    rendered = out.getvalue()
+    assert rendered.count("[status] Auto-compacting...") == 1
+    assert len(provider.requests) == 3
+    second_request = provider.requests[2]
+    assert "middle summary" in _message_text(second_request.messages[0])
+    assert any("second request" in _message_text(message) for message in second_request.messages)
+
+
 def test_resumed_compaction_rebuilds_projected_context() -> None:
     record = _session_record("sess_compacted", text="old question")
     messages = [
@@ -5402,6 +5519,50 @@ def test_tui_statusline_fields_load_from_settings_section(
     assert app._status_text() == (
         "gpt-5.5 | thinking: medium | remaining: 271.9k tok | 5h quota: unknown"
     )
+
+
+def test_tui_prefetches_codex_quota_for_startup_statusline() -> None:
+    captured: list[Any] = []
+
+    def urlopen(req: Any) -> _FakeJsonResponse:
+        captured.append(req)
+        return _FakeJsonResponse(
+            {
+                "plan_type": "pro",
+                "rate_limit": {
+                    "allowed": True,
+                    "limit_reached": False,
+                    "primary_window": {
+                        "used_percent": 28,
+                        "limit_window_seconds": 18_000,
+                        "reset_after_seconds": 10,
+                        "reset_at": 1_700_000_000,
+                    },
+                    "secondary_window": {
+                        "used_percent": 7,
+                        "limit_window_seconds": 604_800,
+                        "reset_after_seconds": 20,
+                        "reset_at": 1_700_000_001,
+                    },
+                },
+            }
+        )
+
+    provider = OpenAICodexResponsesProvider(
+        bearer_token=_codex_token(),
+        urlopen=urlopen,
+    )
+    app = tui.WattleApp(
+        _make_args(
+            provider="openai_codex",
+            statusline_fields=("model", "quota_5h", "quota_1w"),
+        ),
+        provider,
+        out=io.StringIO(),
+    )
+
+    assert app._status_text() == "gpt-5.5 | 5h 72% | weekly 93%"
+    assert captured[0].full_url == "https://chatgpt.com/backend-api/wham/usage"
 
 
 def test_live_statusline_selector_toggles_and_persists(

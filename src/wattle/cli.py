@@ -24,6 +24,7 @@ import openai
 
 from wattle.agent import AgentRunResult, _ProviderSpec, run_agent, run_agent_with_history
 from wattle.auth import get_api_key_credential, get_credential, get_openai_codex_credential
+from wattle.models import MODEL_CHOICES_BY_MODEL
 from wattle.permissions import PermissionMode
 from wattle.providers import (
     AnthropicProvider,
@@ -307,14 +308,17 @@ def _apply_settings_defaults(
     argv: list[str],
     settings: WattleSettings,
 ) -> None:
-    if (
-        not _has_flag(argv, "--provider")
-        and settings.provider in _PROVIDER_DISPATCH
-        and _provider_auth_available(settings.provider)
-    ):
-        args.provider = settings.provider
     if not _has_flag(argv, "--model"):
         args.model = settings.model
+    if not _has_flag(argv, "--provider"):
+        provider = _default_provider_for_model(args.model) or settings.provider
+        if provider in _PROVIDER_DISPATCH and _provider_auth_available(provider):
+            args.provider = provider
+        elif (
+            settings.provider in _PROVIDER_DISPATCH
+            and _provider_auth_available(settings.provider)
+        ):
+            args.provider = settings.provider
     if not _has_flag(argv, "--max-tokens"):
         args.max_tokens = settings.max_tokens
     if not _has_flag(argv, "--thinking") and not _has_flag(argv, "--effort"):
@@ -331,6 +335,11 @@ def _apply_settings_defaults(
     args.statusline = bool(args.statusline_fields)
     args.enabled_models = settings.enabled_models
     args.compaction_keep_recent_tokens = settings.compaction_keep_recent_tokens
+
+
+def _default_provider_for_model(model: str) -> str | None:
+    choice = MODEL_CHOICES_BY_MODEL.get(model)
+    return choice.provider if choice is not None else None
 
 
 def _has_flag(argv: list[str], flag: str) -> bool:

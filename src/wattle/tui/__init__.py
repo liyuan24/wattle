@@ -72,6 +72,7 @@ from wattle.providers import (
     ContentBlock,
     ImageBlock,
     Message,
+    OpenAICodexResponsesProvider,
     Provider,
     StreamComplete,
     TextBlock,
@@ -2320,6 +2321,7 @@ class WattleApp:
 
         if state is not None:
             self._restore_state(state)
+        self._prefetch_startup_quota()
 
         if bool(getattr(args, "persist_session", False)):
             resume_record = cast(
@@ -2352,12 +2354,16 @@ class WattleApp:
 
     def _run_basic(self) -> int:
         """Portable append-only loop used for tests and non-TTY stdio."""
+        return asyncio.run(self._arun_basic())
+
+    async def _arun_basic(self) -> int:
+        """Async implementation of the portable append-only loop."""
         self._write_welcome_card()
         self._write_resume_history_if_pending()
-        self._continue_resumed_turn_if_needed()
+        await self._acontinue_resumed_turn_if_needed()
         positional_prompt = self._positional_prompt_text()
         if positional_prompt and self._submit_user_text(positional_prompt, render=True):
-            self._run_turn_recovering()
+            await self._arun_turn_recovering()
         while True:
             try:
                 user_input = self.input_func(self._prompt())
@@ -2372,12 +2378,12 @@ class WattleApp:
             if not text:
                 continue
             if self._expand_skill_text(text) is None and _should_route_slash_command(text):
-                if self._handle_slash(text):
+                if await self._ahandle_slash(text):
                     break
                 continue
 
             if self._submit_user_text(text, render=True):
-                self._run_turn_recovering()
+                await self._arun_turn_recovering()
 
         self._write_line("Goodbye.")
         return 0
@@ -2591,12 +2597,15 @@ class WattleApp:
         )
 
     def _run_turn(self, *, started_at: float | None = None) -> None:
+        asyncio.run(self._arun_turn(started_at=started_at))
+
+    async def _arun_turn(self, *, started_at: float | None = None) -> None:
         if started_at is None:
             started_at = time.monotonic()
         self._configure_subagents()
         preparer = self._request_preparer()
         while True:
-            response = self._drive_stream_with_recovery(preparer)
+            response = await self._adrive_stream_with_recovery(preparer)
             self._record_usage(response)
 
             has_tool_uses = any(isinstance(block, ToolUseBlock) for block in response.content)
@@ -2604,7 +2613,7 @@ class WattleApp:
                 self._write_separator()
                 self._append_assistant_response(response)
                 tool_results = (
-                    self._dispatch_tools(response)
+                    await self._adispatch_tools(response)
                     if response.stop_reason == "tool_use"
                     else []
                 )
@@ -2632,9 +2641,12 @@ class WattleApp:
                 return
 
     def _run_turn_recovering(self) -> None:
+        asyncio.run(self._arun_turn_recovering())
+
+    async def _arun_turn_recovering(self) -> None:
         started_at = time.monotonic()
         try:
-            self._run_turn(started_at=started_at)
+            await self._arun_turn(started_at=started_at)
         except Exception as exc:  # noqa: BLE001
             self._write_turn_error(exc)
             self._write_worked_duration(started_at)
@@ -2660,6 +2672,7 @@ class WattleApp:
         provider: Provider | None = None,
         on_compaction_start: Callable[[], None] | None = None,
         on_compaction_end: Callable[[], None] | None = None,
+        on_stream_retry: Callable[[int, int, BaseException, float], None] | None = None,
     ) -> RequestPreparer:
         return RequestPreparer(
             provider=provider or self.provider,
@@ -2677,6 +2690,7 @@ class WattleApp:
             on_compaction_end=on_compaction_end,
             on_compaction_record=self._record_compaction_checkpoint,
             compaction_keep_recent_tokens=self.compaction_keep_recent_tokens,
+            on_stream_retry=on_stream_retry or self._write_stream_retry_status,
         )
 
     def _configure_subagents(self, *, provider: Provider | None = None) -> None:
@@ -2692,25 +2706,21 @@ class WattleApp:
             effort=cast(Any, self.effort),
         )
 
-    def _messages_for_request(
-        self,
-        *,
-        on_compaction_start: Callable[[], None] | None = None,
-        on_compaction_end: Callable[[], None] | None = None,
-    ) -> list[Message]:
-        preparer = self._request_preparer(
-            on_compaction_start=on_compaction_start,
-            on_compaction_end=on_compaction_end,
-        )
-        prepared = preparer.prepare(self.messages)
-        self._compaction_state = preparer.state
-        return prepared.request.messages
-
     def _write_auto_compacting_status(self) -> None:
         self._write_panel("status", "Auto-compacting...", STATUS_STYLE)
 
-    def _drive_stream_with_recovery(self, preparer: RequestPreparer) -> CompletionResponse:
-        return asyncio.run(self._adrive_stream_with_recovery(preparer))
+    def _write_stream_retry_status(
+        self,
+        attempt: int,
+        max_retries: int,
+        _exc: BaseException,
+        _delay: float,
+    ) -> None:
+        self._write_panel(
+            "status",
+            f"Reconnecting... {attempt}/{max_retries} after stream interruption.",
+            STATUS_STYLE,
+        )
 
     async def _adrive_stream_with_recovery(
         self,
@@ -2769,9 +2779,6 @@ class WattleApp:
         if final_response is None:
             raise RuntimeError("provider.stream() ended without StreamComplete")
         return final_response
-
-    def _dispatch_tools(self, response: CompletionResponse) -> list[ContentBlock]:
-        return asyncio.run(self._adispatch_tools(response))
 
     async def _adispatch_tools(self, response: CompletionResponse) -> list[ContentBlock]:
         results: list[ContentBlock] = []
@@ -3197,6 +3204,19 @@ class WattleApp:
         self._write_panel("error", f"Unknown command: {cmd}", ERROR_STYLE)
         return False
 
+    async def _ahandle_slash(self, text: str) -> bool:
+        cmd, _, rest = text.partition(" ")
+        rest = rest.strip()
+        if cmd in ("/exit", "/quit"):
+            return True
+        if cmd == "/clear":
+            await self._ahandle_clear()
+            return False
+        if cmd == "/compact":
+            await self._ahandle_compact(rest)
+            return False
+        return self._handle_slash(text)
+
     def _handle_branch(self) -> None:
         if self._session_record is None:
             self._session_record = new_session(
@@ -3521,7 +3541,33 @@ class WattleApp:
                 STATUS_STYLE,
             )
         )
-        prepared = preparer.prepare(
+        prepared = asyncio.run(
+            preparer.aprepare(
+                self.messages,
+                force_compaction=True,
+                reset_provider=False,
+                compaction_instructions=rest or None,
+            )
+        )
+        self._compaction_state = preparer.state
+        self._write_panel(
+            "compact",
+            f"Compacted request projection to {prepared.context_tokens} token estimate.",
+            STATUS_STYLE,
+        )
+
+    async def _ahandle_compact(self, rest: str) -> None:
+        if not self.messages:
+            self._write_panel("compact", "No conversation history to compact.", STATUS_STYLE)
+            return
+        preparer = self._request_preparer(
+            on_compaction_start=lambda: self._write_panel(
+                "compact",
+                "Compacting...",
+                STATUS_STYLE,
+            )
+        )
+        prepared = await preparer.aprepare(
             self.messages,
             force_compaction=True,
             reset_provider=False,
@@ -3606,12 +3652,24 @@ class WattleApp:
         self._total_cached_tokens += cached_tokens
         self._total_output_tokens += output_tokens
         self._last_context_tokens = input_tokens if input_tokens > 0 else None
-        quota_5h = _optional_percent(response.usage.get("quota_5h_remaining_percent"))
-        quota_1w = _optional_percent(response.usage.get("quota_1w_remaining_percent"))
+        self._record_quota_usage(response.usage)
+
+    def _record_quota_usage(self, usage: Mapping[str, int]) -> None:
+        quota_5h = _optional_percent(usage.get("quota_5h_remaining_percent"))
+        quota_1w = _optional_percent(usage.get("quota_1w_remaining_percent"))
         if quota_5h is not None:
             self._quota_5h_remaining_percent = quota_5h
         if quota_1w is not None:
             self._quota_1w_remaining_percent = quota_1w
+
+    def _prefetch_startup_quota(self) -> None:
+        if not isinstance(self.provider, OpenAICodexResponsesProvider):
+            return
+        try:
+            usage = self.provider.fetch_quota_usage()
+        except Exception:
+            return
+        self._record_quota_usage(usage)
 
     def _handle_clear(self) -> None:
         previous_usage = self._previous_session_usage_text()
@@ -3627,6 +3685,37 @@ class WattleApp:
         self._quota_5h_remaining_percent = None
         self._quota_1w_remaining_percent = None
         self.provider.reset_conversation()
+
+        if self._session_record is not None:
+            self._session_record = new_session(
+                provider=self.current_provider_name,
+                model=self.current_model,
+                system=self.system,
+                max_tokens=self.max_tokens,
+                thinking=self.thinking,
+                effort=cast(Any, self.effort),
+            )
+            self._session_path = default_session_path(self._session_record.metadata.id)
+            self._persist_session()
+
+        self._cleared_empty_screen_active = True
+        self._clear_screen_notice = previous_usage
+        self._write_cleared_session_screen()
+
+    async def _ahandle_clear(self) -> None:
+        previous_usage = self._previous_session_usage_text()
+        self._persist_session()
+        self.messages = []
+        self._compaction_state = None
+        self._resume_history_pending = False
+        self._last_transcript_was_separator = False
+        self._last_context_tokens = None
+        self._total_input_tokens = 0
+        self._total_cached_tokens = 0
+        self._total_output_tokens = 0
+        self._quota_5h_remaining_percent = None
+        self._quota_1w_remaining_percent = None
+        await self.provider.areset_conversation()
 
         if self._session_record is not None:
             self._session_record = new_session(
@@ -3713,6 +3802,15 @@ class WattleApp:
                 STATUS_STYLE,
             )
             self._run_turn()
+
+    async def _acontinue_resumed_turn_if_needed(self) -> None:
+        if _history_ends_with_tool_results(self.messages):
+            self._write_panel(
+                "resumed",
+                "Continuing from saved tool result.",
+                STATUS_STYLE,
+            )
+            await self._arun_turn()
 
     def _write_history_transcript(self) -> None:
         self._write_history_messages(self.messages, with_separators=True)
@@ -4117,6 +4215,7 @@ class _LiveTerminal:
         self.stream_text: list[str] = []
         self.stream_thinking: list[str] = []
         self.stream_tool_names: list[str] = []
+        self.inflight_tool_results: list[ContentBlock] = []
         self.active_tool_status: str | None = None
         self.active_turn_id = 0
         self.model_picker_choices: list[ModelChoice] | None = None
@@ -4963,6 +5062,7 @@ class _LiveTerminal:
         self.in_text = False
         self.in_thinking = False
         self.seen_tools = set()
+        self.inflight_tool_results = []
         self._clear_stream_buffers()
         turn_id = self.active_turn_id
         provider = self.app.provider
@@ -4982,6 +5082,9 @@ class _LiveTerminal:
             provider=provider,
             on_compaction_start=lambda: self.events.put((turn_id, "compact_start", None)),
             on_compaction_end=lambda: self.events.put((turn_id, "compact_end", None)),
+            on_stream_retry=lambda attempt, max_retries, exc, delay: self.events.put(
+                (turn_id, "stream_retry", (attempt, max_retries, exc, delay))
+            ),
         )
         messages = list(self.app.messages)
         try:
@@ -5033,6 +5136,14 @@ class _LiveTerminal:
             elif kind == "compact_end":
                 self.compacting = False
                 self._draw_prompt()
+            elif kind == "stream_retry":
+                self._clear_prompt()
+                self._flush_stream_buffer()
+                attempt, max_retries, exc, delay = cast(
+                    tuple[int, int, BaseException, float],
+                    payload,
+                )
+                self.app._write_stream_retry_status(attempt, max_retries, exc, delay)
             if self.running and kind != "stream":
                 self._draw_prompt()
 
@@ -5088,6 +5199,7 @@ class _LiveTerminal:
         if has_tool_uses:
             self.app._write_separator()
             self.app._append_assistant_response(response)
+        self.inflight_tool_results = []
         tool_results = (
             self._dispatch_tools_with_prompt(response)
             if response.stop_reason == "tool_use"
@@ -5096,6 +5208,7 @@ class _LiveTerminal:
         if not self.streaming:
             if has_tool_uses and tool_results:
                 self.app._append_followup_user(list(tool_results))
+            self.inflight_tool_results = []
             self._remember_worked_duration()
             return
         pending_monitor_texts = self.pending_monitor_inputs
@@ -5142,10 +5255,12 @@ class _LiveTerminal:
             self.app._persist_session()
             continue_running = step.continue_running
         if continue_running:
+            self.inflight_tool_results = []
             if tool_results:
                 self.app._write_separator()
             self._start_worker()
         else:
+            self.inflight_tool_results = []
             self.streaming = False
             self.working_started_at = None
             self.app._write_status_snapshot()
@@ -5180,6 +5295,7 @@ class _LiveTerminal:
             if not isinstance(block, ToolUseBlock):
                 continue
             blocks = self._dispatch_tool_with_animated_prompt(block)
+            self.inflight_tool_results.extend(blocks)
             result = _first_tool_result(block, blocks)
             edit_item = _edit_render_item(block, result)
             summary = _research_summary_for_success(block, result)
@@ -5568,7 +5684,13 @@ class _LiveTerminal:
         self.app._write(VISIBLE_SCREEN_CLEAR)
         self.app._write(TERMINAL_HISTORY_CLEAR)
         self.app._write_welcome_card()
-        self.app._write_history_messages(self.app.messages, with_separators=False)
+        messages = self.app.messages
+        if self.inflight_tool_results:
+            messages = [
+                *messages,
+                Message(role="user", content=list(self.inflight_tool_results)),
+            ]
+        self.app._write_history_messages(messages, with_separators=False)
         self.app._last_transcript_was_separator = False
 
     def _clear_prompt(self) -> None:
@@ -5802,40 +5924,68 @@ def _run_resume_picker(
         tty.setcbreak(fd)
         draw()
         while True:
-            data = os.read(fd, 8).decode(errors="ignore")
-            if data in ("\r", "\n"):
-                if state.filtered_entries:
-                    return state.filtered_entries[state.selected]
-            elif data == "\x03":
-                return None
-            elif data == "\x1b":
-                if state.query:
-                    state.query = ""
-                    _apply_resume_picker_filter(state)
-                else:
+            data = os.read(fd, 32).decode(errors="ignore")
+            should_draw = False
+            while data:
+                sequence = None
+                for candidate in (
+                    "\x1b[5~",
+                    "\x1b[6~",
+                    "\x1b[A",
+                    "\x1bOA",
+                    "\x1b[B",
+                    "\x1bOB",
+                    "\x1b[H",
+                    "\x1bOH",
+                    "\x1b[F",
+                    "\x1bOF",
+                ):
+                    if data.startswith(candidate):
+                        sequence = candidate
+                        break
+                if sequence is not None:
+                    data = data[len(sequence) :]
+                    if sequence in ("\x1b[A", "\x1bOA"):
+                        _move_resume_picker_selection(state, -1)
+                    elif sequence in ("\x1b[B", "\x1bOB"):
+                        _move_resume_picker_selection(state, 1)
+                    elif sequence == "\x1b[5~":
+                        _move_resume_picker_selection(state, -state.rows)
+                    elif sequence == "\x1b[6~":
+                        _move_resume_picker_selection(state, state.rows)
+                    elif sequence in ("\x1b[H", "\x1bOH"):
+                        state.selected = 0
+                        _clamp_resume_picker_scroll(state)
+                    elif sequence in ("\x1b[F", "\x1bOF"):
+                        state.selected = max(0, len(state.filtered_entries) - 1)
+                        _clamp_resume_picker_scroll(state)
+                    should_draw = True
+                    continue
+
+                char, data = data[0], data[1:]
+                if char in ("\r", "\n"):
+                    if state.filtered_entries:
+                        return state.filtered_entries[state.selected]
+                elif char == "\x03":
                     return None
-            elif data in ("\x7f", "\b"):
-                if state.query:
-                    state.query = state.query[:-1]
+                elif char == "\x1b":
+                    if state.query:
+                        state.query = ""
+                        _apply_resume_picker_filter(state)
+                        should_draw = True
+                    else:
+                        return None
+                elif char in ("\x7f", "\b"):
+                    if state.query:
+                        state.query = state.query[:-1]
+                        _apply_resume_picker_filter(state)
+                        should_draw = True
+                elif char.isprintable():
+                    state.query += char
                     _apply_resume_picker_filter(state)
-            elif data in ("\x1b[A", "\x1bOA"):
-                _move_resume_picker_selection(state, -1)
-            elif data in ("\x1b[B", "\x1bOB"):
-                _move_resume_picker_selection(state, 1)
-            elif data == "\x1b[5~":
-                _move_resume_picker_selection(state, -state.rows)
-            elif data == "\x1b[6~":
-                _move_resume_picker_selection(state, state.rows)
-            elif data in ("\x1b[H", "\x1bOH"):
-                state.selected = 0
-                _clamp_resume_picker_scroll(state)
-            elif data in ("\x1b[F", "\x1bOF"):
-                state.selected = max(0, len(state.filtered_entries) - 1)
-                _clamp_resume_picker_scroll(state)
-            elif data.isprintable():
-                state.query += data
-                _apply_resume_picker_filter(state)
-            draw()
+                    should_draw = True
+            if should_draw:
+                draw()
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
         sys.stdout.write("\x1b[0m\x1b[?25h\x1b[2J\x1b[H")

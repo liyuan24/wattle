@@ -27,6 +27,7 @@ from .base import (
     CompletionRequest,
     CompletionResponse,
     ContentBlock,
+    IncompleteStreamError,
     Provider,
     StopReason,
     StreamComplete,
@@ -126,6 +127,29 @@ class OpenAICodexResponsesProvider(Provider):
             detail = exc.read().decode("utf-8", errors="replace")
             raise RuntimeError(_codex_error_message(exc.code, detail)) from exc
 
+    def fetch_quota_usage(self) -> dict[str, int]:
+        """Fetch current Codex usage limits without starting a model turn."""
+
+        http_request = urllib.request.Request(
+            _codex_usage_url(self.base_url),
+            headers=_build_api_headers(self.bearer_token),
+            method="GET",
+        )
+        try:
+            with self.urlopen(http_request) as response:
+                body = response.read().decode("utf-8", errors="replace")
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(_codex_error_message(exc.code, detail)) from exc
+        try:
+            payload = json.loads(body)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"Codex quota response was not JSON: {body}") from exc
+        if not isinstance(payload, dict):
+            return {}
+        snapshot = _rate_limit_snapshot_from_usage_payload(payload)
+        return _quota_usage_from_rate_limits(snapshot) if snapshot is not None else {}
+
     def _build_body(self, request: CompletionRequest) -> dict[str, Any]:
         body: dict[str, Any] = {
             "model": request.model,
@@ -176,6 +200,26 @@ def _codex_responses_url(base_url: str) -> str:
     if normalized.endswith("/codex"):
         return f"{normalized}/responses"
     return f"{normalized}/codex/responses"
+
+
+def _codex_usage_url(base_url: str) -> str:
+    normalized = base_url.rstrip("/")
+    if normalized.endswith("/codex/responses"):
+        normalized = normalized[: -len("/codex/responses")]
+    elif normalized.endswith("/codex"):
+        normalized = normalized[: -len("/codex")]
+    if normalized.endswith("/backend-api"):
+        return f"{normalized}/wham/usage"
+    return f"{normalized}/api/codex/usage"
+
+
+def _build_api_headers(token: str) -> dict[str, str]:
+    return {
+        "Authorization": f"Bearer {token}",
+        "chatgpt-account-id": _extract_account_id(token),
+        "originator": "wattle",
+        "User-Agent": _user_agent(),
+    }
 
 
 def _build_headers(token: str, *, session_id: str, thread_id: str) -> dict[str, str]:
@@ -259,7 +303,7 @@ def _events_from_sse(
                 )
                 return
 
-    raise RuntimeError("Codex stream ended without a completion event.")
+    raise IncompleteStreamError("Codex stream ended without a completion event.")
 
 
 def _iter_sse_events(response: Any) -> Iterator[str]:
@@ -550,6 +594,55 @@ def _quota_usage_from_rate_limits(snapshot: _RateLimitSnapshot) -> dict[str, int
         elif label == "weekly":
             usage["quota_1w_remaining_percent"] = remaining
     return usage
+
+
+def _rate_limit_snapshot_from_usage_payload(
+    payload: dict[str, Any],
+) -> _RateLimitSnapshot | None:
+    rate_limit = payload.get("rate_limit")
+    if isinstance(rate_limit, dict):
+        snapshot = _rate_limit_snapshot_from_usage_details(rate_limit)
+        if snapshot is not None:
+            return snapshot
+    additional = payload.get("additional_rate_limits")
+    if isinstance(additional, list):
+        for item in additional:
+            if not isinstance(item, dict):
+                continue
+            if item.get("metered_feature") != "codex":
+                continue
+            rate_limit = item.get("rate_limit")
+            if isinstance(rate_limit, dict):
+                return _rate_limit_snapshot_from_usage_details(rate_limit)
+    return None
+
+
+def _rate_limit_snapshot_from_usage_details(
+    details: dict[str, Any],
+) -> _RateLimitSnapshot | None:
+    primary = _rate_limit_window_from_usage_payload(details.get("primary_window"))
+    secondary = _rate_limit_window_from_usage_payload(details.get("secondary_window"))
+    if primary is None and secondary is None:
+        return None
+    return _RateLimitSnapshot(primary=primary, secondary=secondary)
+
+
+def _rate_limit_window_from_usage_payload(value: object) -> _RateLimitWindow | None:
+    if not isinstance(value, dict):
+        return None
+    used_percent = value.get("used_percent")
+    if not isinstance(used_percent, int | float):
+        return None
+    window_seconds = value.get("limit_window_seconds")
+    window_minutes = None
+    if isinstance(window_seconds, int):
+        window_minutes = max(1, round(window_seconds / 60))
+    reset_at = value.get("reset_at")
+    return _RateLimitWindow(
+        used_percent=float(used_percent),
+        window_minutes=window_minutes,
+        resets_at=reset_at if isinstance(reset_at, int) else None,
+    )
 
 
 def _rate_limit_snapshot_from_headers(response: Any) -> _RateLimitSnapshot | None:

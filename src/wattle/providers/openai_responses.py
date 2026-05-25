@@ -96,6 +96,7 @@ from .base import (
     CompletionResponse,
     ContentBlock,
     ImageBlock,
+    IncompleteStreamError,
     Message,
     Provider,
     StopReason,
@@ -256,7 +257,7 @@ class OpenAIResponsesProvider(Provider):
             # etc.) carry no Wattle-visible signal during streaming.
 
         if final_response is None:
-            raise RuntimeError(
+            raise IncompleteStreamError(
                 "Responses stream ended without a `response.completed` event."
             )
 
