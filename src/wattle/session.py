@@ -92,6 +92,8 @@ class SessionEntry:
 
     path: Path
     record: SessionRecord
+    preview: str = ""
+    search_text: str = ""
 
 
 def new_session(
@@ -158,8 +160,36 @@ def resolve_session_path(selector: str) -> Path:
     return default_session_path(selector)
 
 
-def list_sessions(*, limit: int = 20) -> list[SessionEntry]:
-    """Return recent loadable sessions, newest ``updated_at`` first."""
+def session_preview(record: SessionRecord, limit: int = 80) -> str:
+    """Return a compact human label for search and resume pickers."""
+    candidates = [record.metadata.title]
+    for role in ("user", "assistant"):
+        candidates.append(_first_text_for_role(record, role))
+    for candidate in candidates:
+        text = _compact_session_text(candidate)
+        if text:
+            return text if len(text) <= limit else text[: limit - 3] + "..."
+    return "(untitled)"
+
+
+def session_search_text(entry: SessionEntry) -> str:
+    """Return normalized fields searched by startup resume selection."""
+    record = entry.record
+    metadata = record.metadata
+    fields = [
+        metadata.id,
+        metadata.title,
+        entry.preview or session_preview(record),
+        metadata.cwd,
+        record.settings.provider,
+        record.settings.model,
+        metadata.parent_session_id,
+    ]
+    return " ".join(_compact_session_text(field) for field in fields if field).lower()
+
+
+def list_session_entries(*, limit: int | None = None) -> list[SessionEntry]:
+    """Return loadable sessions, newest ``updated_at`` first."""
     directory = default_session_dir()
     if not directory.exists():
         return []
@@ -170,13 +200,53 @@ def list_sessions(*, limit: int = 20) -> list[SessionEntry]:
             record = load_session(path)
         except (OSError, ValueError, json.JSONDecodeError):
             continue
-        entries.append(SessionEntry(path=path, record=record))
+        preview = session_preview(record)
+        entry = SessionEntry(path=path, record=record, preview=preview)
+        entries.append(
+            SessionEntry(
+                path=path,
+                record=record,
+                preview=preview,
+                search_text=session_search_text(entry),
+            )
+        )
 
     entries.sort(
         key=lambda entry: (entry.record.metadata.updated_at, entry.path.name),
         reverse=True,
     )
-    return entries[:limit]
+    return entries if limit is None else entries[:limit]
+
+
+def filter_session_entries(entries: list[SessionEntry], query: str) -> list[SessionEntry]:
+    """Filter sessions with case-insensitive all-token matching."""
+    tokens = [token.lower() for token in query.split()]
+    if not tokens:
+        return entries
+    return [
+        entry
+        for entry in entries
+        if all(token in (entry.search_text or session_search_text(entry)) for token in tokens)
+    ]
+
+
+def list_sessions(*, limit: int = 20) -> list[SessionEntry]:
+    """Return recent loadable sessions, newest ``updated_at`` first."""
+    return list_session_entries(limit=limit)
+
+
+def _first_text_for_role(record: SessionRecord, role: Role) -> str | None:
+    for message in record.messages:
+        if message.role != role:
+            continue
+        for block in message.content:
+            if isinstance(block, TextBlock) and block.text.strip():
+                return block.text
+    return None
+
+
+def _compact_session_text(text: object | None) -> str:
+    return " ".join(str(text).split()) if text is not None else ""
 
 
 def save_session(record: SessionRecord, path: str | Path | None = None) -> Path:

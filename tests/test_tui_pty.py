@@ -72,6 +72,78 @@ def _slow_wattle_child_code(
     )
 
 
+def _resume_search_child_code() -> str:
+    return textwrap.dedent(
+        """
+        import argparse
+        from pathlib import Path
+
+        from wattle import session
+        from wattle.permissions import PermissionMode
+        from wattle.providers import Message, TextBlock
+        from wattle.tui import run_tui
+
+
+        def write_record(session_id, *, title, text, updated_at):
+            record = session.SessionRecord(
+                metadata=session.SessionMetadata(
+                    id=session_id,
+                    created_at="2026-05-09T09:00:00Z",
+                    updated_at=updated_at,
+                    title=title,
+                    cwd=str(Path.cwd()),
+                ),
+                settings=session.SessionSettings(
+                    provider="openai_responses",
+                    model="gpt-5.5",
+                    max_tokens=4096,
+                ),
+                messages=[Message(role="user", content=[TextBlock(text=text)])],
+            )
+            path = session.default_session_path(session_id)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                "\\n".join(session.session_to_jsonl_lines(record)) + "\\n",
+                encoding="utf-8",
+            )
+
+
+        write_record(
+            "newest",
+            title="Newest Session",
+            text="recent unrelated work",
+            updated_at="2026-05-09T12:00:00Z",
+        )
+        write_record(
+            "older_quota",
+            title="Quota Investigation",
+            text="inspect weekly limits",
+            updated_at="2026-05-09T10:00:00Z",
+        )
+        write_record(
+            "oldest",
+            title="Old Resize",
+            text="fix prompt redraw",
+            updated_at="2026-05-09T08:00:00Z",
+        )
+
+
+        args = argparse.Namespace(
+            provider="openai_responses",
+            model="gpt-5.5",
+            max_tokens=4096,
+            thinking=False,
+            effort=None,
+            prompt=None,
+            resume="",
+            system=None,
+            permission_mode=PermissionMode.YOLO,
+        )
+        raise SystemExit(run_tui(args))
+        """
+    )
+
+
 def _history_tool_child_code() -> str:
     return textwrap.dedent(
         """
@@ -792,6 +864,42 @@ def test_pty_update_plan_renders_semantic_cell_without_tool_result(tmp_path: Pat
         assert "- [ ] Run PTY coverage" in screen_text
         assert "Plan updated" not in screen_text
         assert "update_plan ok" not in screen_text
+
+
+def test_pty_startup_resume_picker_filters_query_and_resumes_match(tmp_path: Path) -> None:
+    with PtySession.spawn_python(
+        _resume_search_child_code(),
+        cwd=tmp_path,
+        cols=120,
+        rows=36,
+        env={"WATTLE_SESSION_DIR": str(tmp_path / "sessions")},
+    ) as session:
+        session.read_until("Resume Wattle Session", timeout=4)
+        session.read_until("Newest Session", timeout=4)
+        session.write("quota")
+        session.read_until("Search: quota", timeout=4)
+        session.read_until("Quota Investigation", timeout=4)
+
+        screen_text = session.screen.text()
+        assert "Quota Investigation" in screen_text
+        assert "Newest Session" not in screen_text
+
+        session.write("\x7f")
+        session.read_until("Search: quot", timeout=4)
+        session.write("a")
+        session.read_until("Search: quota", timeout=4)
+        session.write("\x1b")
+        session.read_until("Search:", timeout=4)
+        session.read_until("Newest Session", timeout=4)
+        session.write("quota")
+        session.read_until("Quota Investigation", timeout=4)
+        session.write("\n")
+        session.read_until("Loaded 1 saved message(s)", timeout=4)
+        session.read_until("inspect weekly limits", timeout=4)
+
+        final_text = session.screen.text()
+        assert "inspect weekly limits" in final_text
+        assert "recent unrelated work" not in final_text
 
 
 def test_pty_history_tool_replay_and_resize_use_semantic_rendering(tmp_path: Path) -> None:

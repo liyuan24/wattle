@@ -94,7 +94,8 @@ from wattle.session import (
     SessionSettings,
     default_session_dir,
     default_session_path,
-    list_sessions,
+    filter_session_entries,
+    list_session_entries,
     load_session,
     new_session,
     resolve_session_path,
@@ -1740,14 +1741,24 @@ def _short_session_id(entry: SessionEntry) -> str:
 
 def _session_label(entry: SessionEntry) -> str:
     metadata = entry.record.metadata
-    title = metadata.title or _first_user_text(entry.record) or "(untitled)"
+    preview = entry.preview or metadata.title or _first_user_text(entry.record) or "(untitled)"
+    cwd = _short_session_cwd(metadata.cwd)
     return (
         f"{_short_session_id(entry):<12} "
         f"{entry.record.settings.model:<18} "
         f"{len(entry.record.messages):>3} msgs  "
         f"{metadata.updated_at}  "
-        f"{title}"
+        f"{cwd}  "
+        f"{preview}"
     )
+
+
+def _short_session_cwd(cwd: str | None) -> str:
+    if not cwd:
+        return "-"
+    path = Path(cwd).expanduser()
+    name = path.name
+    return name or str(path)
 
 
 def _first_user_text(record: SessionRecord, *, limit: int = 48) -> str | None:
@@ -5578,42 +5589,149 @@ def _apply_resumed_session(
 
 
 def _load_resume_arg(selector: str) -> tuple[SessionRecord, Path]:
-    path = resolve_session_path(selector)
+    try:
+        path = resolve_session_path(selector)
+    except ValueError:
+        path = None
+    if path is not None and path.exists():
+        return load_session(path), path
+    match = _resolve_resume_selector(selector)
+    if match is not None:
+        return match.record, match.path
+    if path is None:
+        path = resolve_session_path(selector)
     return load_session(path), path
+
+
+def _resolve_resume_selector(selector: str) -> SessionEntry | None:
+    entries = list_session_entries()
+    exact_title = [entry for entry in entries if entry.record.metadata.title == selector]
+    if len(exact_title) == 1:
+        return exact_title[0]
+    matches = filter_session_entries(entries, selector)
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        if _resume_picker_tty_available():
+            return _run_resume_picker(entries, initial_query=selector)
+        raise ValueError(_ambiguous_resume_selector_message(selector, matches))
+    return None
+
+
+def _ambiguous_resume_selector_message(selector: str, matches: list[SessionEntry]) -> str:
+    shown = ", ".join(
+        f"{_short_session_id(entry)} ({entry.preview or '(untitled)'})"
+        for entry in matches[:5]
+    )
+    suffix = "" if len(matches) <= 5 else f", +{len(matches) - 5} more"
+    return f"ambiguous resume selector {selector!r}: {shown}{suffix}"
+
+
+def _resume_picker_tty_available() -> bool:
+    return (
+        hasattr(sys.stdin, "isatty")
+        and sys.stdin.isatty()
+        and hasattr(sys.stdout, "isatty")
+        and sys.stdout.isatty()
+    )
 
 
 def _select_resume_session(entries: list[SessionEntry]) -> SessionEntry | None:
     if not entries:
         return None
-    if not (
-        hasattr(sys.stdin, "isatty")
-        and sys.stdin.isatty()
-        and hasattr(sys.stdout, "isatty")
-        and sys.stdout.isatty()
-    ):
+    if not _resume_picker_tty_available():
         return entries[0]
     return _run_resume_picker(entries)
 
 
-def _run_resume_picker(entries: list[SessionEntry]) -> SessionEntry | None:
-    width = max(72, shutil.get_terminal_size((88, 24)).columns)
-    selected = 0
-    rows = min(len(entries), max(1, shutil.get_terminal_size((88, 24)).lines - 6))
+@dataclass
+class _ResumePickerState:
+    all_entries: list[SessionEntry]
+    filtered_entries: list[SessionEntry]
+    selected: int = 0
+    scroll_top: int = 0
+    query: str = ""
+    rows: int = 1
+    width: int = 72
+
+
+def _new_resume_picker_state(
+    entries: list[SessionEntry],
+    *,
+    initial_query: str = "",
+) -> _ResumePickerState:
+    terminal_size = shutil.get_terminal_size((88, 24))
+    state = _ResumePickerState(
+        all_entries=entries,
+        filtered_entries=[],
+        query=initial_query,
+        rows=max(1, terminal_size.lines - 7),
+        width=max(72, terminal_size.columns),
+    )
+    _apply_resume_picker_filter(state)
+    return state
+
+
+def _apply_resume_picker_filter(state: _ResumePickerState) -> None:
+    previous_entry = (
+        state.filtered_entries[state.selected]
+        if 0 <= state.selected < len(state.filtered_entries)
+        else None
+    )
+    state.filtered_entries = filter_session_entries(state.all_entries, state.query)
+    if not state.filtered_entries:
+        state.selected = 0
+        state.scroll_top = 0
+        return
+    if previous_entry in state.filtered_entries:
+        state.selected = state.filtered_entries.index(previous_entry)
+    else:
+        state.selected = min(state.selected, len(state.filtered_entries) - 1)
+    _clamp_resume_picker_scroll(state)
+
+
+def _move_resume_picker_selection(state: _ResumePickerState, delta: int) -> None:
+    if not state.filtered_entries:
+        return
+    state.selected = max(0, min(len(state.filtered_entries) - 1, state.selected + delta))
+    _clamp_resume_picker_scroll(state)
+
+
+def _clamp_resume_picker_scroll(state: _ResumePickerState) -> None:
+    if state.selected < state.scroll_top:
+        state.scroll_top = state.selected
+    elif state.selected >= state.scroll_top + state.rows:
+        state.scroll_top = state.selected - state.rows + 1
+    max_scroll = max(0, len(state.filtered_entries) - state.rows)
+    state.scroll_top = max(0, min(state.scroll_top, max_scroll))
+
+
+def _run_resume_picker(
+    entries: list[SessionEntry],
+    *,
+    initial_query: str = "",
+) -> SessionEntry | None:
+    state = _new_resume_picker_state(entries, initial_query=initial_query)
 
     def draw() -> None:
-        offset = min(max(0, selected - rows + 1), max(0, len(entries) - rows))
         sys.stdout.write("\x1b[?25l\x1b[2J\x1b[H")
         sys.stdout.write("Resume Wattle Session\n")
-        sys.stdout.write("Enter resumes the highlighted session. Esc starts a new session.\n\n")
-        for visible_idx, entry in enumerate(entries[offset : offset + rows]):
-            idx = offset + visible_idx
-            marker = ">" if idx == selected else " "
+        sys.stdout.write(f"Search: {state.query}\n")
+        sys.stdout.write("Enter resume  Esc clear/cancel  ↑↓ move\n\n")
+        if not state.filtered_entries:
+            sys.stdout.write("  No sessions match your search.\n")
+            sys.stdout.flush()
+            return
+        visible = state.filtered_entries[state.scroll_top : state.scroll_top + state.rows]
+        for visible_idx, entry in enumerate(visible):
+            idx = state.scroll_top + visible_idx
+            marker = ">" if idx == state.selected else " "
             text = _session_label(entry)
-            if len(text) > width - 4:
-                text = text[: width - 7] + "..."
-            if idx == selected:
+            if len(text) > state.width - 4:
+                text = text[: state.width - 7] + "..."
+            if idx == state.selected:
                 sys.stdout.write(
-                    f"{SELECTED_ROW_STYLE} {marker} {text.ljust(width - 4)} {RESET}\n"
+                    f"{SELECTED_ROW_STYLE} {marker} {text.ljust(state.width - 4)} {RESET}\n"
                 )
             else:
                 sys.stdout.write(f" {marker} {text}\n")
@@ -5627,15 +5745,38 @@ def _run_resume_picker(entries: list[SessionEntry]) -> SessionEntry | None:
         while True:
             data = os.read(fd, 8).decode(errors="ignore")
             if data in ("\r", "\n"):
-                return entries[selected]
-            if data == "\x1b":
+                if state.filtered_entries:
+                    return state.filtered_entries[state.selected]
+            elif data == "\x03":
                 return None
-            if data in ("\x1b[A", "\x1bOA"):
-                selected = max(0, selected - 1)
-                draw()
+            elif data == "\x1b":
+                if state.query:
+                    state.query = ""
+                    _apply_resume_picker_filter(state)
+                else:
+                    return None
+            elif data in ("\x7f", "\b"):
+                if state.query:
+                    state.query = state.query[:-1]
+                    _apply_resume_picker_filter(state)
+            elif data in ("\x1b[A", "\x1bOA"):
+                _move_resume_picker_selection(state, -1)
             elif data in ("\x1b[B", "\x1bOB"):
-                selected = min(len(entries) - 1, selected + 1)
-                draw()
+                _move_resume_picker_selection(state, 1)
+            elif data == "\x1b[5~":
+                _move_resume_picker_selection(state, -state.rows)
+            elif data == "\x1b[6~":
+                _move_resume_picker_selection(state, state.rows)
+            elif data in ("\x1b[H", "\x1bOH"):
+                state.selected = 0
+                _clamp_resume_picker_scroll(state)
+            elif data in ("\x1b[F", "\x1bOF"):
+                state.selected = max(0, len(state.filtered_entries) - 1)
+                _clamp_resume_picker_scroll(state)
+            elif data.isprintable():
+                state.query += data
+                _apply_resume_picker_filter(state)
+            draw()
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
         sys.stdout.write("\x1b[0m\x1b[?25h\x1b[2J\x1b[H")
@@ -5650,7 +5791,7 @@ def _resolve_resume(args: argparse.Namespace) -> dict[str, object] | None:
         record, path = _load_resume_arg(str(resume))
         return _apply_resumed_session(args, record, path)
 
-    selected = _select_resume_session(list_sessions())
+    selected = _select_resume_session(list_session_entries())
     if selected is None:
         return None
     return _apply_resumed_session(args, selected.record, selected.path)

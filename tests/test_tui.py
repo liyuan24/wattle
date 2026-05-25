@@ -686,7 +686,7 @@ def test_run_tui_resume_picker_uses_latest_session_when_not_interactive(
             updated_at="2026-05-09T10:00:00Z",
         ),
     )
-    monkeypatch.setattr(tui, "list_sessions", lambda: [latest, older])
+    monkeypatch.setattr(tui, "list_session_entries", lambda: [latest, older])
     monkeypatch.setattr("wattle.cli._build_provider", lambda _name: object())
 
     instances: list[Any] = []
@@ -718,8 +718,107 @@ def test_run_tui_resume_picker_uses_latest_session_when_not_interactive(
     assert instances[0].state["current_model"] == "claude-sonnet-4-6"
 
 
+def test_resume_picker_state_filters_and_clears_query() -> None:
+    alpha = tui.SessionEntry(
+        path=Path("/tmp/alpha.jsonl"),
+        record=_session_record("alpha", text="inspect quota usage"),
+        preview="inspect quota usage",
+        search_text="alpha inspect quota usage openai_responses gpt-5.5 /tmp/project",
+    )
+    beta = tui.SessionEntry(
+        path=Path("/tmp/beta.jsonl"),
+        record=_session_record("beta", text="fix tui resize"),
+        preview="fix tui resize",
+        search_text="beta fix tui resize openai_responses gpt-5.5 /tmp/project",
+    )
+
+    state = tui._ResumePickerState(
+        all_entries=[alpha, beta],
+        filtered_entries=[alpha, beta],
+        selected=1,
+        query="quota",
+        rows=10,
+        width=100,
+    )
+    tui._apply_resume_picker_filter(state)
+
+    assert state.filtered_entries == [alpha]
+    assert state.selected == 0
+    state.query = ""
+    tui._apply_resume_picker_filter(state)
+    assert state.filtered_entries == [alpha, beta]
+
+
+def test_run_tui_resume_exact_title_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(session.SESSION_DIR_ENV, str(tmp_path / "sessions"))
+    record = _session_record("sess_named", text="old question")
+    record = session.SessionRecord(
+        metadata=session.SessionMetadata(
+            id=record.metadata.id,
+            created_at=record.metadata.created_at,
+            updated_at=record.metadata.updated_at,
+            title="Named Debug Session",
+            cwd=record.metadata.cwd,
+        ),
+        settings=record.settings,
+        messages=record.messages,
+    )
+    path = session.default_session_path(record.metadata.id)
+    session.save_session(record, path)
+    monkeypatch.setattr("wattle.cli._build_provider", lambda _name: object())
+
+    instances: list[Any] = []
+
+    class FakeWattleApp:
+        def __init__(
+            self,
+            args: argparse.Namespace,
+            built_provider: object,
+            *,
+            inline_mode: bool,
+            state: dict[str, object] | None,
+        ) -> None:
+            self.args = args
+            self.state = state
+            instances.append(self)
+
+        def run(self) -> int:
+            return 0
+
+    monkeypatch.setattr(tui, "WattleApp", FakeWattleApp)
+
+    args = _make_args(resume="Named Debug Session")
+    assert tui.run_tui(args) == 0
+
+    assert args._resume_session_path == path
+    assert instances[0].state is not None
+
+
+def test_run_tui_resume_ambiguous_search_fails_non_tty(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv(session.SESSION_DIR_ENV, str(tmp_path / "sessions"))
+    first = _session_record("sess_a", text="debug alpha")
+    second = _session_record("sess_b", text="debug beta")
+    session.save_session(first, session.default_session_path(first.metadata.id))
+    session.save_session(second, session.default_session_path(second.metadata.id))
+
+    args = _make_args(resume="debug")
+    assert tui.run_tui(args) == 1
+
+    captured = capsys.readouterr()
+    assert "ambiguous resume selector 'debug'" in captured.err
+    assert "sess_a" in captured.err
+    assert "sess_b" in captured.err
+
+
 def test_run_tui_resume_without_sessions_starts_new(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(tui, "list_sessions", lambda: [])
+    monkeypatch.setattr(tui, "list_session_entries", lambda: [])
     monkeypatch.setattr("wattle.cli._build_provider", lambda _name: object())
 
     instances: list[Any] = []
@@ -973,7 +1072,7 @@ def test_status_text_uses_last_provider_input_tokens_not_heuristic() -> None:
 
     rendered = app._status_text()
 
-    assert "Context 0.1% used | window: 1.1M tok" in rendered
+    assert "Context 0.3% used | window: 272.0k tok" in rendered
     assert "input: 900.0k tok" in rendered
     assert "cached total: 300.0k tok" in rendered
     assert "output: 100.0k tok" in rendered

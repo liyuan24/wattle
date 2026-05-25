@@ -262,6 +262,122 @@ def test_new_session_captures_settings_and_empty_history(tmp_path: Path) -> None
     assert record.messages == []
 
 
+def _search_record(
+    session_id: str,
+    *,
+    updated_at: str,
+    title: str | None = None,
+    cwd: str = "/tmp/project",
+    provider: str = "openai_responses",
+    model: str = "gpt-5.5",
+    parent_session_id: str | None = None,
+    user_text: str | None = None,
+    assistant_text: str | None = None,
+) -> session.SessionRecord:
+    messages: list[Message] = []
+    if user_text is not None:
+        messages.append(Message(role="user", content=[TextBlock(text=user_text)]))
+    if assistant_text is not None:
+        messages.append(Message(role="assistant", content=[TextBlock(text=assistant_text)]))
+    return session.SessionRecord(
+        metadata=session.SessionMetadata(
+            id=session_id,
+            created_at="2026-05-01T00:00:00Z",
+            updated_at=updated_at,
+            title=title,
+            cwd=cwd,
+            parent_session_id=parent_session_id,
+        ),
+        settings=session.SessionSettings(provider=provider, model=model),
+        messages=messages,
+    )
+
+
+def _write_session_record(record: session.SessionRecord, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(session.session_to_jsonl_lines(record)) + "\n", encoding="utf-8")
+
+
+def test_list_session_entries_is_uncapped_sorted_and_skips_invalid(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(session.SESSION_DIR_ENV, str(tmp_path))
+    old = _search_record("old", updated_at="2026-05-01T00:00:00Z")
+    newest = _search_record("newest", updated_at="2026-05-03T00:00:00Z")
+    middle = _search_record("middle", updated_at="2026-05-02T00:00:00Z")
+    _write_session_record(old, tmp_path / "old.jsonl")
+    _write_session_record(newest, tmp_path / "newest.jsonl")
+    _write_session_record(middle, tmp_path / "middle.jsonl")
+    (tmp_path / "broken.jsonl").write_text("not json", encoding="utf-8")
+
+    entries = session.list_session_entries()
+
+    assert [entry.record.metadata.id for entry in entries] == ["newest", "middle", "old"]
+    assert [entry.record.metadata.id for entry in session.list_sessions(limit=2)] == [
+        "newest",
+        "middle",
+    ]
+
+
+def test_session_preview_prefers_title_then_user_then_assistant() -> None:
+    titled = _search_record(
+        "titled",
+        updated_at="2026-05-01T00:00:00Z",
+        title="Named Investigation",
+        user_text="first user",
+    )
+    user_only = _search_record(
+        "user",
+        updated_at="2026-05-01T00:00:00Z",
+        user_text="  first\nuser   message  ",
+    )
+    assistant_only = _search_record(
+        "assistant",
+        updated_at="2026-05-01T00:00:00Z",
+        assistant_text="assistant summary",
+    )
+    empty = _search_record("empty", updated_at="2026-05-01T00:00:00Z")
+
+    assert session.session_preview(titled) == "Named Investigation"
+    assert session.session_preview(user_only) == "first user message"
+    assert session.session_preview(assistant_only) == "assistant summary"
+    assert session.session_preview(empty) == "(untitled)"
+
+
+def test_filter_session_entries_searches_all_fields_and_requires_all_tokens() -> None:
+    record = _search_record(
+        "sess-search-123",
+        updated_at="2026-05-01T00:00:00Z",
+        title="Quota Debugging",
+        cwd="/Users/me/repos/wattle",
+        provider="anthropic",
+        model="claude-sonnet-4-6",
+        parent_session_id="parent-456",
+        user_text="investigate weekly limits",
+    )
+    preview = session.session_preview(record)
+    entry = session.SessionEntry(
+        path=Path("quota.jsonl"),
+        record=record,
+        preview=preview,
+        search_text=session.session_search_text(
+            session.SessionEntry(path=Path("quota.jsonl"), record=record, preview=preview)
+        ),
+    )
+    other = session.SessionEntry(
+        path=Path("other.jsonl"),
+        record=_search_record("other", updated_at="2026-05-01T00:00:00Z", title="Other"),
+    )
+    entries = [entry, other]
+
+    assert session.filter_session_entries(entries, "quota") == [entry]
+    assert session.filter_session_entries(entries, "WATTLE anthropic") == [entry]
+    assert session.filter_session_entries(entries, "sonnet parent-456") == [entry]
+    assert session.filter_session_entries(entries, "weekly missing") == []
+    assert session.filter_session_entries(entries, "") == entries
+
+
 def test_load_rejects_unknown_schema_version(tmp_path: Path) -> None:
     path = tmp_path / "session.jsonl"
     path.write_text(
