@@ -31,7 +31,7 @@ from dataclasses import dataclass, replace
 from functools import lru_cache
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, TextIO, cast
+from typing import Any, Literal, TextIO, cast
 from urllib.parse import unquote, urlparse
 
 from pygments import lex as pygments_lex
@@ -323,6 +323,15 @@ SUBAGENT_STATUS_GLYPHS = {
 }
 SUBAGENT_STATUS_ORDER = ("completed", "failed", "running", "pending", "closing")
 _EDIT_HUNK_SEPARATOR_ROW = "      ..."
+_DIFF_CONTEXT_MARKER_ROW = "      ⋮ old/new line numbers"
+
+
+@dataclass(frozen=True)
+class _DiffPreviewRow:
+    kind: Literal["add", "delete", "context", "meta"]
+    old_line: int | None
+    new_line: int | None
+    text: str
 
 
 @dataclass
@@ -1001,63 +1010,121 @@ def _diff_starts_from_empty_old_file(diff_lines: list[str]) -> bool:
 def _diff_preview_lines(
     diff_lines: list[str], *, max_changes: int | None = 12
 ) -> list[tuple[str, str]]:
-    rows: list[tuple[str, str]] = []
+    return [
+        (row.kind, _format_diff_preview_row(row))
+        for row in _diff_preview_rows(diff_lines, max_changes=max_changes)
+    ]
+
+
+def _diff_preview_rows(
+    diff_lines: list[str], *, max_changes: int | None = 12
+) -> list[_DiffPreviewRow]:
+    rows: list[_DiffPreviewRow] = []
     old_line = 0
     new_line = 0
     shown_changes = 0
     omitted_changes = 0
+    last_visible_changed_row: _DiffPreviewRow | None = None
     for line in diff_lines:
         if line.startswith("@@"):
             parts = line.split()
             if len(parts) >= 3:
                 old_line = _parse_hunk_start(parts[1])
                 new_line = _parse_hunk_start(parts[2])
+            last_visible_changed_row = None
             continue
         if line.startswith("---") or line.startswith("+++"):
             continue
         if line.startswith("+"):
-            shown_changes, omitted_changes = _append_diff_row(
+            row = _DiffPreviewRow(
+                kind="add",
+                old_line=None,
+                new_line=new_line,
+                text=line[1:],
+            )
+            shown_changes, omitted_changes, appended = _append_diff_row(
                 rows,
                 shown_changes=shown_changes,
                 omitted_changes=omitted_changes,
                 max_changes=max_changes,
-                kind="add",
-                line=f"{new_line:>5} +{line[1:]}",
+                row=row,
+                previous_visible_changed_row=last_visible_changed_row,
             )
+            if appended:
+                last_visible_changed_row = row
             new_line += 1
         elif line.startswith("-"):
-            shown_changes, omitted_changes = _append_diff_row(
+            row = _DiffPreviewRow(
+                kind="delete",
+                old_line=old_line,
+                new_line=None,
+                text=line[1:],
+            )
+            shown_changes, omitted_changes, appended = _append_diff_row(
                 rows,
                 shown_changes=shown_changes,
                 omitted_changes=omitted_changes,
                 max_changes=max_changes,
-                kind="delete",
-                line=f"{old_line:>5} -{line[1:]}",
+                row=row,
+                previous_visible_changed_row=last_visible_changed_row,
             )
+            if appended:
+                last_visible_changed_row = row
             old_line += 1
         elif line.startswith(" "):
             old_line += 1
             new_line += 1
     if omitted_changes:
-        rows.append(("meta", f"... +{omitted_changes} changed lines"))
+        rows.append(
+            _DiffPreviewRow(
+                kind="meta",
+                old_line=None,
+                new_line=None,
+                text=f"... +{omitted_changes} changed lines",
+            )
+        )
     return rows
 
 
 def _append_diff_row(
-    rows: list[tuple[str, str]],
+    rows: list[_DiffPreviewRow],
     *,
     shown_changes: int,
     omitted_changes: int,
     max_changes: int | None,
-    kind: str,
-    line: str,
-) -> tuple[int, int]:
-    if max_changes is None or shown_changes < max_changes:
-        rows.append((kind, line))
-        shown_changes += 1
-    else:
-        omitted_changes += 1
-    return shown_changes, omitted_changes
+    row: _DiffPreviewRow,
+    previous_visible_changed_row: _DiffPreviewRow | None,
+) -> tuple[int, int, bool]:
+    if max_changes is not None and shown_changes >= max_changes:
+        return shown_changes, omitted_changes + 1, False
+    if _needs_diff_context_marker(previous_visible_changed_row, row):
+        rows.append(
+            _DiffPreviewRow(
+                kind="meta",
+                old_line=None,
+                new_line=None,
+                text=_DIFF_CONTEXT_MARKER_ROW,
+            )
+        )
+    rows.append(row)
+    return shown_changes + 1, omitted_changes, True
+
+
+def _needs_diff_context_marker(
+    previous: _DiffPreviewRow | None,
+    current: _DiffPreviewRow,
+) -> bool:
+    return previous is not None and previous.kind == "add" and current.kind == "delete"
+
+
+def _format_diff_preview_row(row: _DiffPreviewRow) -> str:
+    if row.kind == "add":
+        line_number = row.new_line if row.new_line is not None else 0
+        return f"{line_number:>5} +{row.text}"
+    if row.kind == "delete":
+        line_number = row.old_line if row.old_line is not None else 0
+        return f"{line_number:>5} -{row.text}"
+    return row.text
 
 
 def _parse_hunk_start(token: str) -> int:

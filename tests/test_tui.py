@@ -4288,6 +4288,68 @@ def test_write_added_cpp_file_uses_pygments_diff_syntax() -> None:
     assert f"{tui.DIFF_ADD_SYNTAX_KEYWORD_STYLE}return" in rendered
 
 
+def test_diff_preview_simple_replacement_keeps_changed_line_rows() -> None:
+    rows = tui._diff_preview_lines(
+        [
+            "@@ -100,1 +100,1 @@",
+            "-old",
+            "+new",
+        ],
+        max_changes=None,
+    )
+
+    assert rows == [("delete", "  100 -old"), ("add", "  100 +new")]
+
+
+def test_diff_preview_marks_add_to_delete_old_new_transition() -> None:
+    rows = tui._diff_preview_lines(
+        [
+            "@@ -10,4 +10,8 @@",
+            " context",
+            "+added 1",
+            "+added 2",
+            "+added 3",
+            "+added 4",
+            "-removed",
+            " after",
+        ],
+        max_changes=None,
+    )
+
+    assert rows == [
+        ("add", "   11 +added 1"),
+        ("add", "   12 +added 2"),
+        ("add", "   13 +added 3"),
+        ("add", "   14 +added 4"),
+        ("meta", tui._DIFF_CONTEXT_MARKER_ROW),
+        ("delete", "   11 -removed"),
+    ]
+
+
+def test_diff_preview_added_and_deleted_files_do_not_show_old_new_marker() -> None:
+    added_rows = tui._diff_preview_lines(
+        [
+            "@@ -0,0 +1,2 @@",
+            "+new 1",
+            "+new 2",
+        ],
+        max_changes=None,
+    )
+    deleted_rows = tui._diff_preview_lines(
+        [
+            "@@ -1,2 +0,0 @@",
+            "-old 1",
+            "-old 2",
+        ],
+        max_changes=None,
+    )
+
+    assert added_rows == [("add", "    1 +new 1"), ("add", "    2 +new 2")]
+    assert deleted_rows == [("delete", "    1 -old 1"), ("delete", "    2 -old 2")]
+    assert ("meta", tui._DIFF_CONTEXT_MARKER_ROW) not in added_rows
+    assert ("meta", tui._DIFF_CONTEXT_MARKER_ROW) not in deleted_rows
+
+
 def test_edit_tool_result_renders_full_diff_preview() -> None:
     out = _TTYBuffer()
     app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
