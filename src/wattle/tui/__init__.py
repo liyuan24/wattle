@@ -25,7 +25,7 @@ import termios
 import threading
 import time as _time
 import tty
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from functools import lru_cache
@@ -223,10 +223,10 @@ class _UnavailableProvider(Provider):
     def __init__(self, message: str) -> None:
         self.message = message
 
-    def complete(self, request: CompletionRequest) -> CompletionResponse:
+    async def acomplete(self, request: CompletionRequest) -> CompletionResponse:
         raise RuntimeError(self.message)
 
-    def stream(self, request: CompletionRequest) -> Iterator[StreamComplete]:
+    async def astream(self, request: CompletionRequest) -> AsyncIterator[StreamComplete]:
         raise RuntimeError(self.message)
         yield  # pragma: no cover
 
@@ -1167,13 +1167,11 @@ def _format_diff_preview_rows(
     rows: Sequence[_DiffPreviewRow],
 ) -> list[tuple[_DiffPreviewRow, str]]:
     formatted: list[tuple[_DiffPreviewRow, str]] = []
-    previous_line_number = 0
     for row in rows:
         if row.kind == "meta":
             formatted.append((row, row.text))
             continue
-        line_number = _display_diff_line_number(row, previous_line_number)
-        previous_line_number = line_number
+        line_number = _display_diff_line_number(row)
         if row.kind == "add":
             formatted.append((row, f"{line_number:>5} +{row.text}"))
         elif row.kind == "delete":
@@ -1183,9 +1181,12 @@ def _format_diff_preview_rows(
     return formatted
 
 
-def _display_diff_line_number(row: _DiffPreviewRow, previous: int) -> int:
-    candidates = [number for number in (row.old_line, row.new_line) if number is not None]
-    return max([previous, *candidates])
+def _display_diff_line_number(row: _DiffPreviewRow) -> int:
+    if row.kind == "add":
+        return row.new_line or 0
+    if row.kind == "delete":
+        return row.old_line or 0
+    return row.new_line or row.old_line or 0
 
 
 def _parse_hunk_start(token: str) -> int:
@@ -2777,7 +2778,7 @@ class WattleApp:
         if wrote_content:
             self._write(f"{RESET}\n" if self._styles_enabled() else "\n")
         if final_response is None:
-            raise RuntimeError("provider.stream() ended without StreamComplete")
+            raise RuntimeError("provider stream ended without StreamComplete")
         return final_response
 
     async def _adispatch_tools(self, response: CompletionResponse) -> list[ContentBlock]:
@@ -3684,7 +3685,7 @@ class WattleApp:
         self._total_output_tokens = 0
         self._quota_5h_remaining_percent = None
         self._quota_1w_remaining_percent = None
-        self.provider.reset_conversation()
+        asyncio.run(self.provider.areset_conversation())
 
         if self._session_record is not None:
             self._session_record = new_session(
@@ -5094,7 +5095,7 @@ class _LiveTerminal:
                 if isinstance(event, StreamComplete):
                     final = event.response
             if final is None:
-                raise RuntimeError("provider.stream() ended without StreamComplete")
+                raise RuntimeError("provider stream ended without StreamComplete")
             self.events.put((turn_id, "complete", final))
         except Exception as exc:  # noqa: BLE001
             self.events.put((turn_id, "error", exc))

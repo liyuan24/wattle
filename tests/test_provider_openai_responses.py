@@ -7,6 +7,7 @@ Responses API wire shape.
 
 from __future__ import annotations
 
+import anyio
 import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -27,6 +28,18 @@ from wattle.providers import (
     ToolUseBlock,
     ToolUseDelta,
 )
+
+
+def _complete(provider, request):
+    return anyio.run(provider.acomplete, request)
+
+
+async def _collect_stream(provider, request):
+    return [event async for event in provider.astream(request)]
+
+
+def _stream(provider, request):
+    return anyio.run(_collect_stream, provider, request)
 
 
 def _canned_response(
@@ -113,7 +126,7 @@ def test_first_call_translation_full_round_trip() -> None:
     )
     provider, client = _make_provider(_canned_response())
 
-    provider.complete(request)
+    _complete(provider, request)
 
     kwargs = client.responses.create.call_args.kwargs
     assert kwargs["model"] == "gpt-5"
@@ -184,7 +197,7 @@ def test_user_image_block_translates_to_input_image(tmp_path) -> None:
     )
     provider, client = _make_provider(_canned_response())
 
-    provider.complete(request)
+    _complete(provider, request)
 
     assert client.responses.create.call_args.kwargs["input"] == [
         {
@@ -214,7 +227,7 @@ def test_system_none_omits_instructions() -> None:
     )
     provider, client = _make_provider(_canned_response())
 
-    provider.complete(request)
+    _complete(provider, request)
 
     kwargs = client.responses.create.call_args.kwargs
     assert "instructions" not in kwargs
@@ -228,7 +241,7 @@ def test_empty_tools_omits_tools_kwarg() -> None:
     )
     provider, client = _make_provider(_canned_response())
 
-    provider.complete(request)
+    _complete(provider, request)
 
     kwargs = client.responses.create.call_args.kwargs
     assert "tools" not in kwargs
@@ -254,7 +267,7 @@ def test_tool_result_is_error_prefixes_output() -> None:
     )
     provider, client = _make_provider(_canned_response())
 
-    provider.complete(request)
+    _complete(provider, request)
 
     kwargs = client.responses.create.call_args.kwargs
     assert kwargs["input"] == [
@@ -286,7 +299,7 @@ def test_stateful_chain_only_sends_delta_after_first_call() -> None:
     user_msg = Message(role="user", content=[TextBlock(text="run a tool")])
     client.responses.create.return_value = _canned_response(response_id="resp_1")
 
-    provider.complete(
+    _complete(provider,
         CompletionRequest(
             model="gpt-5",
             max_tokens=64,
@@ -322,7 +335,7 @@ def test_stateful_chain_only_sends_delta_after_first_call() -> None:
     )
     client.responses.create.return_value = _canned_response(response_id="resp_2")
 
-    provider.complete(
+    _complete(provider,
         CompletionRequest(
             model="gpt-5",
             max_tokens=64,
@@ -357,7 +370,7 @@ def test_stateful_chain_only_sends_delta_after_first_call() -> None:
     )
     client.responses.create.return_value = _canned_response(response_id="resp_3")
 
-    provider.complete(
+    _complete(provider,
         CompletionRequest(
             model="gpt-5",
             max_tokens=64,
@@ -390,7 +403,7 @@ def test_state_is_per_instance() -> None:
     client_a = MagicMock()
     client_a.responses.create.return_value = _canned_response(response_id="resp_A")
     provider_a = OpenAIResponsesProvider(async_client=client_a)
-    provider_a.complete(
+    _complete(provider_a, 
         CompletionRequest(
             model="gpt-5",
             max_tokens=64,
@@ -407,7 +420,7 @@ def test_state_is_per_instance() -> None:
     assert provider_b._previous_response_id is None
     assert provider_b._seen_messages_count == 0
 
-    provider_b.complete(
+    _complete(provider_b, 
         CompletionRequest(
             model="gpt-5",
             max_tokens=64,
@@ -446,7 +459,7 @@ def test_response_translation_text_and_tool_use() -> None:
         max_tokens=64,
         messages=[Message(role="user", content=[TextBlock(text="weather?")])],
     )
-    result = provider.complete(request)
+    result = _complete(provider, request)
 
     assert len(result.content) == 2
     text_block, tool_block = result.content
@@ -464,7 +477,7 @@ def test_usage_includes_cached_tokens_when_reported() -> None:
     response = _canned_response(input_tokens=100, output_tokens=5, cached_tokens=64)
     provider, _client = _make_provider(response)
 
-    result = provider.complete(
+    result = _complete(provider,
         CompletionRequest(
             model="gpt-5",
             max_tokens=64,
@@ -497,7 +510,7 @@ def test_stop_reason_tool_use_when_function_call_present() -> None:
         max_tokens=64,
         messages=[Message(role="user", content=[TextBlock(text="hi")])],
     )
-    result = provider.complete(request)
+    result = _complete(provider, request)
 
     assert result.stop_reason == "tool_use"
 
@@ -517,7 +530,7 @@ def test_stop_reason_max_tokens_when_incomplete_due_to_output_limit() -> None:
         max_tokens=64,
         messages=[Message(role="user", content=[TextBlock(text="hi")])],
     )
-    result = provider.complete(request)
+    result = _complete(provider, request)
 
     assert result.stop_reason == "max_tokens"
 
@@ -536,7 +549,7 @@ def test_stop_reason_end_turn_for_ordinary_completion() -> None:
         max_tokens=64,
         messages=[Message(role="user", content=[TextBlock(text="hi")])],
     )
-    result = provider.complete(request)
+    result = _complete(provider, request)
 
     assert result.stop_reason == "end_turn"
 
@@ -590,7 +603,7 @@ def test_stop_reason_priority_table(
         max_tokens=64,
         messages=[Message(role="user", content=[TextBlock(text="hi")])],
     )
-    result = provider.complete(request)
+    result = _complete(provider, request)
 
     assert result.stop_reason == expected
 
@@ -627,7 +640,7 @@ def test_thinking_block_outgoing_emits_reasoning_input_item() -> None:
             ),
         ],
     )
-    provider.complete(request)
+    _complete(provider, request)
 
     kwargs = client.responses.create.call_args.kwargs
     assert kwargs["input"] == [
@@ -669,7 +682,7 @@ def test_thinking_block_without_signature_is_dropped() -> None:
             ),
         ],
     )
-    provider.complete(request)
+    _complete(provider, request)
 
     kwargs = client.responses.create.call_args.kwargs
     assert all(item["type"] != "reasoning" for item in kwargs["input"])
@@ -700,7 +713,7 @@ def test_thinking_ordering_interleaved_with_function_calls_and_messages() -> Non
             ),
         ],
     )
-    provider.complete(request)
+    _complete(provider, request)
 
     kwargs = client.responses.create.call_args.kwargs
     types_in_order = [item["type"] for item in kwargs["input"]]
@@ -728,7 +741,7 @@ def test_thinking_ordering_interleaved_with_function_calls_and_messages() -> Non
 def test_budget_buckets_to_effort(budget: int, expected_effort: str) -> None:
     provider, client = _make_provider(_canned_response())
 
-    provider.complete(
+    _complete(provider,
         CompletionRequest(
             model="gpt-5",
             max_tokens=64,
@@ -745,7 +758,7 @@ def test_budget_buckets_to_effort(budget: int, expected_effort: str) -> None:
 def test_thinking_false_omits_reasoning_kwarg() -> None:
     provider, client = _make_provider(_canned_response())
 
-    provider.complete(
+    _complete(provider,
         CompletionRequest(
             model="gpt-5",
             max_tokens=64,
@@ -760,7 +773,7 @@ def test_thinking_false_omits_reasoning_kwarg() -> None:
 def test_effort_passes_through(effort: str) -> None:
     provider, client = _make_provider(_canned_response())
 
-    provider.complete(
+    _complete(provider,
         CompletionRequest(
             model="gpt-5",
             max_tokens=64,
@@ -777,7 +790,7 @@ def test_effort_passes_through(effort: str) -> None:
 def test_effort_max_clamps_to_xhigh() -> None:
     provider, client = _make_provider(_canned_response())
 
-    provider.complete(
+    _complete(provider,
         CompletionRequest(
             model="gpt-5",
             max_tokens=64,
@@ -794,7 +807,7 @@ def test_effort_max_clamps_to_xhigh() -> None:
 def test_effort_takes_precedence_over_budget() -> None:
     provider, client = _make_provider(_canned_response())
 
-    provider.complete(
+    _complete(provider,
         CompletionRequest(
             model="gpt-5",
             max_tokens=64,
@@ -812,7 +825,7 @@ def test_effort_takes_precedence_over_budget() -> None:
 def test_thinking_true_no_effort_no_budget_omits_reasoning() -> None:
     provider, client = _make_provider(_canned_response())
 
-    provider.complete(
+    _complete(provider,
         CompletionRequest(
             model="gpt-5",
             max_tokens=64,
@@ -842,7 +855,7 @@ def test_reasoning_response_item_becomes_thinking_block() -> None:
     response = _canned_response(output=[reasoning_item, message_item])
     provider, _client = _make_provider(response)
 
-    result = provider.complete(
+    result = _complete(provider,
         CompletionRequest(
             model="gpt-5",
             max_tokens=64,
@@ -869,7 +882,7 @@ def test_reasoning_response_without_encrypted_content() -> None:
     response = _canned_response(output=[reasoning_item])
     provider, _client = _make_provider(response)
 
-    result = provider.complete(
+    result = _complete(provider,
         CompletionRequest(
             model="gpt-5",
             max_tokens=64,
@@ -910,7 +923,7 @@ def test_reasoning_items_not_replayed_in_chained_delta() -> None:
     provider = OpenAIResponsesProvider(async_client=client)
 
     user_msg = Message(role="user", content=[TextBlock(text="go")])
-    first = provider.complete(
+    first = _complete(provider,
         CompletionRequest(
             model="gpt-5",
             max_tokens=64,
@@ -927,7 +940,7 @@ def test_reasoning_items_not_replayed_in_chained_delta() -> None:
     # delta must contain ONLY the function_call_output — no reasoning item,
     # no replayed assistant content, no replayed user input.
     client.responses.create.return_value = _canned_response(response_id="resp_chain_2")
-    provider.complete(
+    _complete(provider,
         CompletionRequest(
             model="gpt-5",
             max_tokens=64,
@@ -1013,7 +1026,7 @@ def test_stream_text_only_emits_deltas_then_complete() -> None:
     provider, client = _stream_responses_provider(events)
 
     emitted = list(
-        provider.stream(
+        _stream(provider,
             CompletionRequest(
                 model="gpt-5",
                 max_tokens=64,
@@ -1056,7 +1069,7 @@ def test_stream_function_call_emits_start_then_arg_continuations() -> None:
     provider, _client = _stream_responses_provider(events)
 
     emitted = list(
-        provider.stream(
+        _stream(provider,
             CompletionRequest(
                 model="gpt-5",
                 max_tokens=64,
@@ -1105,7 +1118,7 @@ def test_stream_reasoning_summary_delta_emits_thinking_delta() -> None:
     provider, _client = _stream_responses_provider(events)
 
     emitted = list(
-        provider.stream(
+        _stream(provider,
             CompletionRequest(
                 model="gpt-5",
                 max_tokens=64,
@@ -1144,7 +1157,7 @@ def test_stream_reasoning_text_delta_also_emits_thinking_delta() -> None:
     provider, _client = _stream_responses_provider(events)
 
     emitted = list(
-        provider.stream(
+        _stream(provider,
             CompletionRequest(
                 model="gpt-5",
                 max_tokens=64,
@@ -1186,7 +1199,7 @@ def test_stream_stateful_chain_advances_across_two_streams() -> None:
 
     user_msg = Message(role="user", content=[TextBlock(text="go")])
     events_1 = list(
-        provider.stream(
+        _stream(provider,
             CompletionRequest(
                 model="gpt-5",
                 max_tokens=64,
@@ -1231,7 +1244,7 @@ def test_stream_stateful_chain_advances_across_two_streams() -> None:
         content=[ToolResultBlock(tool_use_id="call_1", content="ok")],
     )
     list(
-        provider.stream(
+        _stream(provider,
             CompletionRequest(
                 model="gpt-5",
                 max_tokens=64,

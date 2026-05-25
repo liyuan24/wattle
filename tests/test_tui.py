@@ -11,7 +11,7 @@ import re
 import threading
 import time
 from collections import deque
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -50,14 +50,15 @@ class _ScriptedStreamProvider(Provider):
         self._scripts: deque[list[Any]] = deque(scripts)
         self.requests: list[CompletionRequest] = []
 
-    def complete(self, request: CompletionRequest) -> CompletionResponse:  # pragma: no cover
+    async def acomplete(self, request: CompletionRequest) -> CompletionResponse:  # pragma: no cover
         raise NotImplementedError
 
-    def stream(self, request: CompletionRequest) -> Iterator[Any]:
+    async def astream(self, request: CompletionRequest) -> AsyncIterator[Any]:
         self.requests.append(request)
         if not self._scripts:
             raise RuntimeError("provider exhausted")
-        yield from self._scripts.popleft()
+        for event in self._scripts.popleft():
+            yield event
 
 
 class _ResettableScriptedStreamProvider(_ScriptedStreamProvider):
@@ -65,7 +66,7 @@ class _ResettableScriptedStreamProvider(_ScriptedStreamProvider):
         super().__init__(scripts)
         self.reset_count = 0
 
-    def reset_conversation(self) -> None:
+    async def areset_conversation(self) -> None:
         self.reset_count += 1
 
 
@@ -74,10 +75,10 @@ class _RaisingStreamProvider(Provider):
         self.error = error
         self.requests: list[CompletionRequest] = []
 
-    def complete(self, request: CompletionRequest) -> CompletionResponse:  # pragma: no cover
+    async def acomplete(self, request: CompletionRequest) -> CompletionResponse:  # pragma: no cover
         raise NotImplementedError
 
-    def stream(self, request: CompletionRequest) -> Iterator[Any]:
+    async def astream(self, request: CompletionRequest) -> AsyncIterator[Any]:
         self.requests.append(request)
         raise self.error
         yield  # pragma: no cover
@@ -87,10 +88,10 @@ class _IncompleteThenSuccessStreamProvider(Provider):
     def __init__(self) -> None:
         self.requests: list[CompletionRequest] = []
 
-    def complete(self, request: CompletionRequest) -> CompletionResponse:  # pragma: no cover
+    async def acomplete(self, request: CompletionRequest) -> CompletionResponse:  # pragma: no cover
         raise NotImplementedError
 
-    def stream(self, request: CompletionRequest) -> Iterator[Any]:
+    async def astream(self, request: CompletionRequest) -> AsyncIterator[Any]:
         self.requests.append(request)
         if len(self.requests) == 1:
             yield TextDelta(text="partial")
@@ -167,18 +168,19 @@ class _ParentChildProvider(Provider):
     def fork(self) -> _ParentChildProvider:
         return self
 
-    def complete(self, request: CompletionRequest) -> CompletionResponse:
+    async def acomplete(self, request: CompletionRequest) -> CompletionResponse:
         self.child_requests.append(request)
         return CompletionResponse(
             content=[TextBlock(text="child done")],
             stop_reason="end_turn",
         )
 
-    def stream(self, request: CompletionRequest) -> Iterator[Any]:
+    async def astream(self, request: CompletionRequest) -> AsyncIterator[Any]:
         self.requests.append(request)
         if not self._stream_turns:
             raise RuntimeError("provider exhausted")
-        yield from self._stream_turns.popleft()
+        for event in self._stream_turns.popleft():
+            yield event
 
 
 class _RecordingTool(Tool):
@@ -4505,7 +4507,7 @@ def test_diff_preview_simple_replacement_keeps_changed_line_rows() -> None:
     assert rows == [("delete", "  100 -old"), ("add", "  100 +new")]
 
 
-def test_diff_preview_renders_context_and_monotonic_line_numbers() -> None:
+def test_diff_preview_renders_context_and_old_new_line_numbers() -> None:
     rows = tui._diff_preview_lines(
         [
             "@@ -10,4 +10,8 @@",
@@ -4526,9 +4528,73 @@ def test_diff_preview_renders_context_and_monotonic_line_numbers() -> None:
         ("add", "   12 +added 2"),
         ("add", "   13 +added 3"),
         ("add", "   14 +added 4"),
-        ("delete", "   14 -removed"),
+        ("delete", "   11 -removed"),
         ("context", "   15  after"),
     ]
+
+
+def test_diff_preview_keeps_intra_hunk_context_visible_between_change_blocks() -> None:
+    rows = tui._diff_preview_lines(
+        [
+            "@@ -229,30 +256,36 @@",
+            "+async def arun_agent_with_history(",
+            "+    provider_name: str,",
+            "+    model: str,",
+            "+    user_input: str,",
+            "+    *,",
+            "+    max_tokens: int = 4096,",
+            "+    permission_mode: PermissionMode = PermissionMode.YOLO,",
+            "+    thinking: bool = False,",
+            "+    effort: Literal[\"low\", \"medium\", \"high\", \"xhigh\", \"max\"] | None = None,",
+            "+) -> AgentRunResult:",
+            "+    \"\"\"Async headless agent runner returning the full transcript.\"\"\"",
+            "     provider, built_system = _build_provider_and_system(provider_name, permission_mode)",
+            "     messages: list[Message] = []",
+            "-",
+            "-    if permission_mode == PermissionMode.YOLO:",
+            "-        response = loop.run(",
+            "-            provider,",
+            "-            TOOLS_BY_NAME,",
+            "-            built_system,",
+            "-            user_input,",
+            "-            model,",
+            "-            max_tokens,",
+            "-            thinking=thinking,",
+            "-            effort=effort,",
+            "-            messages_out=messages,",
+            "-        )",
+            "-    else:",
+            "-        response = loop.run(",
+            "-            provider,",
+            "-            TOOLS_BY_NAME,",
+            "-            built_system,",
+            "-            user_input,",
+            "-            model,",
+            "-            max_tokens,",
+            "-            permission_gate=PermissionGate(permission_mode),",
+            "-            thinking=thinking,",
+            "-            effort=effort,",
+            "-            messages_out=messages,",
+            "-        )",
+            "-",
+            "+    response = await loop.arun(",
+            "+        provider,",
+        ],
+        max_changes=None,
+    )
+
+    assert (
+        "add",
+        "  266 +    \"\"\"Async headless agent runner returning the full transcript.\"\"\"",
+    ) in rows
+    assert (
+        "context",
+        "  267      provider, built_system = _build_provider_and_system("
+        "provider_name, permission_mode)",
+    ) in rows
+    assert ("context", "  268      messages: list[Message] = []") in rows
+    assert ("delete", "  232 -    if permission_mode == PermissionMode.YOLO:") in rows
+    assert ("add", "  269 +    response = await loop.arun(") in rows
 
 
 def test_diff_preview_marks_non_contiguous_hunk_boundary() -> None:

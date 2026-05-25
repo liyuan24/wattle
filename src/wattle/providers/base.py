@@ -28,10 +28,8 @@ Design notes:
 
 from __future__ import annotations
 
-import asyncio
-import threading
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any, Literal, Self
 
@@ -351,70 +349,16 @@ class Provider(ABC):
         return self
 
     @abstractmethod
-    def complete(self, request: CompletionRequest) -> CompletionResponse:
+    async def acomplete(self, request: CompletionRequest) -> CompletionResponse:
         """Run one round-trip against the underlying LLM API."""
         ...
 
-    async def acomplete(self, request: CompletionRequest) -> CompletionResponse:
-        """Async completion hook.
-
-        Provider plugins with async-native SDK clients should override this.
-        The default keeps sync-only providers usable while the rest of Wattle
-        runs on the async orchestration path.
-        """
-
-        return await asyncio.to_thread(self.complete, request)
-
     @abstractmethod
-    def stream(self, request: CompletionRequest) -> Iterator[StreamEvent]:
-        """Stream the response. Yields deltas for incremental rendering and
-        ends with exactly one StreamComplete carrying the fully assembled
-        response. State updates (e.g. previous_response_id chaining for the
-        Responses provider) happen on stream completion, identically to
-        complete().
-        """
+    async def astream(self, request: CompletionRequest) -> AsyncIterator[StreamEvent]:
+        """Stream the response, ending with one StreamComplete event."""
         ...
 
-    async def astream(self, request: CompletionRequest) -> AsyncIterator[StreamEvent]:
-        """Async streaming hook.
-
-        Provider plugins with async-native streaming should override this.
-        Sync-only providers are drained in a worker thread and bridged through
-        an async queue so streaming remains incremental.
-        """
-
-        loop = asyncio.get_running_loop()
-        queue: asyncio.Queue[StreamEvent | BaseException | None] = asyncio.Queue()
-
-        def drain() -> None:
-            try:
-                for event in self.stream(request):
-                    loop.call_soon_threadsafe(queue.put_nowait, event)
-            except BaseException as exc:  # noqa: BLE001
-                loop.call_soon_threadsafe(queue.put_nowait, exc)
-            finally:
-                loop.call_soon_threadsafe(queue.put_nowait, None)
-
-        threading.Thread(target=drain, name="wattle-provider-stream", daemon=True).start()
-
-        while True:
-            item = await queue.get()
-            if item is None:
-                return
-            if isinstance(item, BaseException):
-                raise item
-            event = item
-            yield event
-
-    def reset_conversation(self) -> None:
-        """Forget provider-side continuation state, if any.
-
-        Stateless providers can ignore this. Stateful providers use it when
-        Wattle replaces the raw transcript with a compacted request projection.
-        """
-        return
-
     async def areset_conversation(self) -> None:
-        """Async counterpart to ``reset_conversation``."""
+        """Forget provider-side continuation state, if any."""
 
-        await asyncio.to_thread(self.reset_conversation)
+        return

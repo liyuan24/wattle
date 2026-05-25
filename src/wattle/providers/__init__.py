@@ -1,8 +1,8 @@
 """LLM-provider abstraction.
 
 The full surface that provider plugins (Anthropic / OpenAI Completion / OpenAI
-Responses) target lives here. Plugins implement `Provider.complete()`;
-everything else is provider-agnostic.
+Responses) target lives here. Plugins implement async `Provider.acomplete()` and
+`Provider.astream()`; everything else is provider-agnostic.
 """
 
 from .anthropic import AnthropicProvider

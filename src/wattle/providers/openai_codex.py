@@ -11,11 +11,12 @@ with the account id extracted from the OAuth JWT and sent in
 
 from __future__ import annotations
 
+import asyncio
 import json
 import platform
 import urllib.error
 import urllib.request
-from collections.abc import Callable, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from dataclasses import dataclass
 from typing import Any, Literal
 from uuid import uuid4
@@ -95,16 +96,21 @@ class OpenAICodexResponsesProvider(Provider):
             urlopen=self.urlopen,
         )
 
-    def complete(self, request: CompletionRequest) -> CompletionResponse:
+    async def acomplete(self, request: CompletionRequest) -> CompletionResponse:
         response: CompletionResponse | None = None
-        for event in self.stream(request):
+        async for event in self.astream(request):
             if isinstance(event, StreamComplete):
                 response = event.response
         if response is None:
             raise RuntimeError("Codex stream ended without a StreamComplete event.")
         return response
 
-    def stream(self, request: CompletionRequest) -> Iterator[StreamEvent]:
+    async def astream(self, request: CompletionRequest) -> AsyncIterator[StreamEvent]:
+        events = await asyncio.to_thread(lambda: list(self._stream_blocking(request)))
+        for event in events:
+            yield event
+
+    def _stream_blocking(self, request: CompletionRequest) -> Iterator[StreamEvent]:
         body = self._build_body(request)
         http_request = urllib.request.Request(
             _codex_responses_url(self.base_url),

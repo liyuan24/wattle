@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Iterator
+from collections.abc import AsyncIterator
 from typing import Any
 
-from wattle.compaction import maybe_compact_messages
+import anyio
+
+from wattle.compaction import amaybe_compact_messages
 from wattle.providers import (
     CompletionRequest,
     CompletionResponse,
@@ -22,14 +24,14 @@ class _ScriptedProvider(Provider):
         self.requests: list[CompletionRequest] = []
         self.reset_count = 0
 
-    def complete(self, request: CompletionRequest) -> CompletionResponse:
+    async def acomplete(self, request: CompletionRequest) -> CompletionResponse:
         raise NotImplementedError
 
-    def stream(self, request: CompletionRequest) -> Iterator[Any]:
+    async def astream(self, request: CompletionRequest) -> AsyncIterator[Any]:
         self.requests.append(request)
         yield StreamComplete(response=self.responses.popleft())
 
-    def reset_conversation(self) -> None:
+    async def areset_conversation(self) -> None:
         self.reset_count += 1
 
 
@@ -38,6 +40,14 @@ def _message(index: int, text: str | None = None) -> Message:
         role="user" if index % 2 else "assistant",
         content=[TextBlock(text=text or f"message {index}")],
     )
+
+
+async def _call_compact(kwargs: dict[str, object]) -> tuple[list[Message], object]:
+    return await amaybe_compact_messages(**kwargs)  # type: ignore[arg-type]
+
+
+def _compact(**kwargs: object) -> tuple[list[Message], object]:
+    return anyio.run(_call_compact, kwargs)
 
 
 def test_compaction_keeps_summary_and_last_messages() -> None:
@@ -51,7 +61,7 @@ def test_compaction_keeps_summary_and_last_messages() -> None:
     )
     messages = [_message(i, "x" * 80) for i in range(25)]
 
-    request_messages, state = maybe_compact_messages(
+    request_messages, state = _compact(
         provider=provider,
         model="test-model",
         system="system prompt",
@@ -76,7 +86,7 @@ def test_compaction_waits_until_threshold() -> None:
     provider = _ScriptedProvider([])
     messages = [_message(i, "small") for i in range(25)]
 
-    request_messages, state = maybe_compact_messages(
+    request_messages, state = _compact(
         provider=provider,
         model="test-model",
         system=None,
@@ -105,7 +115,7 @@ def test_compaction_does_not_mutate_saved_history() -> None:
     messages = [_message(i, "y" * 80) for i in range(25)]
     original = list(messages)
 
-    maybe_compact_messages(
+    _compact(
         provider=provider,
         model="test-model",
         system=None,
@@ -140,7 +150,7 @@ def test_compaction_tracks_read_and_modified_files() -> None:
         *[_message(i, "q" * 80) for i in range(25)],
     ]
 
-    _request_messages, state = maybe_compact_messages(
+    _request_messages, state = _compact(
         provider=provider,
         model="test-model",
         system=None,
@@ -170,7 +180,7 @@ def test_compaction_updates_previous_summary_with_new_middle_messages() -> None:
         ]
     )
     messages = [_message(i, "z" * 80) for i in range(25)]
-    _request_messages, state = maybe_compact_messages(
+    _request_messages, state = _compact(
         provider=provider,
         model="test-model",
         system=None,
@@ -183,7 +193,7 @@ def test_compaction_updates_previous_summary_with_new_middle_messages() -> None:
     assert state is not None
 
     extended = [*messages, _message(25, "new middle"), _message(26, "new last")]
-    request_messages, state = maybe_compact_messages(
+    request_messages, state = _compact(
         provider=provider,
         model="test-model",
         system=None,
@@ -218,7 +228,7 @@ def test_existing_compaction_reuses_summary_when_projection_is_below_threshold()
         ]
     )
     messages = [_message(i, "x" * 80) for i in range(50)]
-    request_messages, state = maybe_compact_messages(
+    request_messages, state = _compact(
         provider=provider,
         model="test-model",
         system=None,
@@ -234,7 +244,7 @@ def test_existing_compaction_reuses_summary_when_projection_is_below_threshold()
     initial_reset_count = provider.reset_count
 
     extended = [*messages, _message(50, "new small tail"), _message(51, "another small tail")]
-    request_messages, next_state = maybe_compact_messages(
+    request_messages, next_state = _compact(
         provider=provider,
         model="test-model",
         system=None,
@@ -266,7 +276,7 @@ def test_existing_compaction_refreshes_when_projection_crosses_threshold() -> No
         ]
     )
     messages = [_message(i, "x" * 80) for i in range(50)]
-    _request_messages, state = maybe_compact_messages(
+    _request_messages, state = _compact(
         provider=provider,
         model="test-model",
         system=None,
@@ -279,7 +289,7 @@ def test_existing_compaction_refreshes_when_projection_crosses_threshold() -> No
     assert state is not None
 
     extended = [*messages, *[_message(i, "y" * 80) for i in range(50, 80)]]
-    request_messages, next_state = maybe_compact_messages(
+    request_messages, next_state = _compact(
         provider=provider,
         model="test-model",
         system=None,
@@ -312,7 +322,7 @@ def test_forced_existing_compaction_refreshes_even_when_projection_is_below_thre
         ]
     )
     messages = [_message(i, "x" * 80) for i in range(50)]
-    _request_messages, state = maybe_compact_messages(
+    _request_messages, state = _compact(
         provider=provider,
         model="test-model",
         system=None,
@@ -325,7 +335,7 @@ def test_forced_existing_compaction_refreshes_even_when_projection_is_below_thre
     assert state is not None
 
     extended = [*messages, _message(50, "new small tail")]
-    request_messages, next_state = maybe_compact_messages(
+    request_messages, next_state = _compact(
         provider=provider,
         model="test-model",
         system=None,

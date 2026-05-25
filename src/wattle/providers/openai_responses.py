@@ -79,11 +79,10 @@ When `True`, the effort is resolved in this order:
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import inspect
 import json
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any, Literal
 
@@ -171,39 +170,12 @@ class OpenAIResponsesProvider(Provider):
     def fork(self) -> OpenAIResponsesProvider:
         return OpenAIResponsesProvider(async_client=self._async_client)
 
-    def complete(self, request: CompletionRequest) -> CompletionResponse:
-        return _run_async(self.acomplete(request))
-
     async def acomplete(self, request: CompletionRequest) -> CompletionResponse:
         kwargs = self._build_kwargs(request)
         response = await _maybe_await(self.async_client.responses.create(**kwargs))
         completion = _completion_from_response(response)
         self._advance_state(response, request)
         return completion
-
-    def stream(self, request: CompletionRequest) -> Iterator[StreamEvent]:
-        """Stream a turn against the Responses API.
-
-        Calls ``client.responses.create(stream=True, ...)`` with the same
-        stateful kwargs ``complete()`` uses (``previous_response_id``,
-        ``store=True``) and translates server events:
-
-          * ``response.output_text.delta`` -> ``TextDelta``
-          * ``response.reasoning_summary_text.delta`` and
-            ``response.reasoning_text.delta`` -> ``ThinkingDelta`` (the SDK
-            emits one or the other depending on the reasoning surface;
-            both translate to the same Wattle event).
-          * ``response.output_item.added`` for a ``function_call`` item ->
-            start ``ToolUseDelta`` (id + name).
-          * ``response.function_call_arguments.delta`` -> continuation
-            ``ToolUseDelta`` for the most recently started function_call.
-          * ``response.completed`` -> assemble the final
-            ``CompletionResponse`` from ``event.response`` and yield
-            ``StreamComplete``. Stateful chaining
-            (``_previous_response_id`` / ``_seen_messages_count``) advances
-            here, identically to ``complete()``.
-        """
-        yield from _run_async_iter(self.astream(request))
 
     async def astream(self, request: CompletionRequest) -> AsyncIterator[StreamEvent]:
         """Async-native streaming path backed by ``openai.AsyncOpenAI``."""
@@ -315,7 +287,7 @@ class OpenAIResponsesProvider(Provider):
         # assistant message (typically the user tool_result message).
         self._seen_messages_count = len(request.messages) + 1
 
-    def reset_conversation(self) -> None:
+    async def areset_conversation(self) -> None:
         self._previous_response_id = None
         self._seen_messages_count = 0
 
@@ -334,22 +306,6 @@ async def _aiter(iterable: Any) -> AsyncIterator[Any]:
     for item in iterable:
         yield item
 
-
-def _run_async(awaitable: Any) -> Any:
-    return asyncio.run(awaitable)
-
-
-def _run_async_iter(async_iter: AsyncIterator[Any]) -> Iterator[Any]:
-    loop = asyncio.new_event_loop()
-    try:
-        while True:
-            try:
-                yield loop.run_until_complete(anext(async_iter))
-            except StopAsyncIteration:
-                return
-    finally:
-        loop.run_until_complete(async_iter.aclose())
-        loop.close()
 
 
 # Any: SDK Response object — we read `.usage.input_tokens`, `.output`,

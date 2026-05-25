@@ -6,7 +6,6 @@ only builds a compacted projection for provider requests.
 
 from __future__ import annotations
 
-import asyncio
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -45,43 +44,6 @@ class RuntimeCompaction:
     modified_files: tuple[str, ...] = ()
 
 
-def maybe_compact_messages(
-    *,
-    provider: Provider,
-    model: str,
-    system: str | None,
-    messages: list[Message],
-    tools: list[dict[str, object]],
-    max_tokens: int,
-    context_window: int | None,
-    state: RuntimeCompaction | None,
-    on_start: Callable[[], None] | None = None,
-    on_end: Callable[[], None] | None = None,
-    force: bool = False,
-    keep_recent_tokens: int = DEFAULT_KEEP_RECENT_TOKENS,
-    compaction_instructions: str | None = None,
-) -> tuple[list[Message], RuntimeCompaction | None]:
-    """Synchronous compatibility wrapper around async compaction."""
-
-    return asyncio.run(
-        amaybe_compact_messages(
-            provider=provider,
-            model=model,
-            system=system,
-            messages=messages,
-            tools=tools,
-            max_tokens=max_tokens,
-            context_window=context_window,
-            state=state,
-            on_start=on_start,
-            on_end=on_end,
-            force=force,
-            keep_recent_tokens=keep_recent_tokens,
-            compaction_instructions=compaction_instructions,
-        )
-    )
-
-
 async def amaybe_compact_messages(
     *,
     provider: Provider,
@@ -117,13 +79,16 @@ async def amaybe_compact_messages(
             state.first_kept_index,
             state.summary,
         )
-        if not _should_start_compaction(
+        projected_tokens = estimate_request_context_tokens(
             system=system,
             messages=projected_messages,
             tools=tools,
-            max_tokens=max_tokens,
-            context_window=context_window,
-        ):
+        )
+        if context_window is None or context_window <= 0:
+            projected_overflow = False
+        else:
+            projected_overflow = projected_tokens + max_tokens >= context_window
+        if not projected_overflow:
             return projected_messages, state
         first_end, last_start = _compaction_bounds(
             messages,

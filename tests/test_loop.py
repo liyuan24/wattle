@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Iterable, Iterator
+from collections.abc import AsyncIterator, Iterable
 
 from wattle import request_preparation
 from wattle.loop import run, run_streaming
@@ -131,7 +131,7 @@ def test_loop_retries_context_length_error_with_compacted_history() -> None:
             self.complete_requests: list[CompletionRequest] = []
             self.summary_requests: list[CompletionRequest] = []
 
-        def complete(self, request: CompletionRequest) -> CompletionResponse:
+        async def acomplete(self, request: CompletionRequest) -> CompletionResponse:
             self.complete_requests.append(request)
             if len(self.complete_requests) == 1:
                 return CompletionResponse(
@@ -145,7 +145,7 @@ def test_loop_retries_context_length_error_with_compacted_history() -> None:
                 stop_reason="end_turn",
             )
 
-        def stream(self, request: CompletionRequest) -> Iterator[StreamEvent]:
+        async def astream(self, request: CompletionRequest) -> AsyncIterator[StreamEvent]:
             self.summary_requests.append(request)
             yield StreamComplete(
                 response=CompletionResponse(
@@ -403,7 +403,7 @@ def test_loop_preserves_thinking_blocks_in_history() -> None:
 class StubStreamProvider(Provider):
     """Replays a scripted list of `(events, terminal_response)` per turn.
 
-    Each entry is a list of `StreamEvent`s; the loop's `stream()` yields
+    Each entry is a list of `StreamEvent`s; the loop's `astream()` yields
     them in order and ends with the explicit terminal `StreamComplete` that
     carries the assembled `CompletionResponse`. Tests inject the terminal
     `StreamComplete` themselves so they control both the per-turn deltas
@@ -414,17 +414,18 @@ class StubStreamProvider(Provider):
         self._scripted: deque[list[StreamEvent]] = deque(scripted)
         self.requests: list[CompletionRequest] = []
 
-    def complete(self, request: CompletionRequest) -> CompletionResponse:  # pragma: no cover
-        raise NotImplementedError("StubStreamProvider only supports stream().")
+    async def acomplete(self, request: CompletionRequest) -> CompletionResponse:  # pragma: no cover
+        raise NotImplementedError("StubStreamProvider only supports astream().")
 
-    def stream(self, request: CompletionRequest) -> Iterator[StreamEvent]:
+    async def astream(self, request: CompletionRequest) -> AsyncIterator[StreamEvent]:
         self.requests.append(request)
         if not self._scripted:
             raise RuntimeError(
                 "StubStreamProvider exhausted: loop made more calls than the test scripted."
             )
         events = self._scripted.popleft()
-        yield from events
+        for event in events:
+            yield event
 
 
 def test_run_streaming_drives_tools_and_forwards_events() -> None:
@@ -500,10 +501,10 @@ def test_run_streaming_retries_incomplete_stream_without_saving_partial(
         def __init__(self) -> None:
             self.requests: list[CompletionRequest] = []
 
-        def complete(self, request: CompletionRequest) -> CompletionResponse:  # pragma: no cover
+        async def acomplete(self, request: CompletionRequest) -> CompletionResponse:  # pragma: no cover
             raise NotImplementedError
 
-        def stream(self, request: CompletionRequest) -> Iterator[StreamEvent]:
+        async def astream(self, request: CompletionRequest) -> AsyncIterator[StreamEvent]:
             self.requests.append(request)
             if len(self.requests) == 1:
                 yield TextDelta(text="partial")

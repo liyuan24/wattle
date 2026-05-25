@@ -6,6 +6,7 @@ exercise the request/response translation logic.
 
 from __future__ import annotations
 
+import anyio
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -26,6 +27,18 @@ from wattle.providers import (
     ToolUseBlock,
     ToolUseDelta,
 )
+
+
+def _complete(provider, request):
+    return anyio.run(provider.acomplete, request)
+
+
+async def _collect_stream(provider, request):
+    return [event async for event in provider.astream(request)]
+
+
+def _stream(provider, request):
+    return anyio.run(_collect_stream, provider, request)
 
 
 def _canned_response(
@@ -101,7 +114,7 @@ def test_request_translation_full_round_trip() -> None:
     )
     provider, client = _make_provider(_canned_response())
 
-    provider.complete(request)
+    _complete(provider, request)
 
     kwargs = client.messages.create.call_args.kwargs
     assert kwargs["model"] == "claude-opus-4-7"
@@ -168,7 +181,7 @@ def test_user_image_block_translates_to_anthropic_image(tmp_path) -> None:
     )
     provider, client = _make_provider(_canned_response())
 
-    provider.complete(request)
+    _complete(provider, request)
 
     assert client.messages.create.call_args.kwargs["messages"] == [
         {
@@ -197,7 +210,7 @@ def test_system_none_is_omitted_from_kwargs() -> None:
     )
     provider, client = _make_provider(_canned_response())
 
-    provider.complete(request)
+    _complete(provider, request)
 
     kwargs = client.messages.create.call_args.kwargs
     assert kwargs["cache_control"] == {"type": "ephemeral"}
@@ -228,7 +241,7 @@ def test_response_translation_text_and_tool_use() -> None:
         max_tokens=64,
         messages=[Message(role="user", content=[TextBlock(text="weather?")])],
     )
-    result = provider.complete(request)
+    result = _complete(provider, request)
 
     assert len(result.content) == 2
     text_block, tool_block = result.content
@@ -262,7 +275,7 @@ def test_stop_reason_passthrough(stop_reason: str) -> None:
         max_tokens=64,
         messages=[Message(role="user", content=[TextBlock(text="hi")])],
     )
-    result = provider.complete(request)
+    result = _complete(provider, request)
 
     assert result.stop_reason == stop_reason
 
@@ -297,7 +310,7 @@ def test_thinking_block_round_trip_in_outgoing_messages() -> None:
             ),
         ],
     )
-    provider.complete(request)
+    _complete(provider, request)
 
     kwargs = client.messages.create.call_args.kwargs
     assistant_msg = kwargs["messages"][1]
@@ -315,7 +328,7 @@ def test_thinking_block_round_trip_in_outgoing_messages() -> None:
 def test_manual_thinking_propagates_to_kwargs() -> None:
     provider, client = _make_provider(_canned_response())
 
-    provider.complete(
+    _complete(provider,
         CompletionRequest(
             model="claude-opus-4-7",
             max_tokens=64,
@@ -333,7 +346,7 @@ def test_manual_thinking_propagates_to_kwargs() -> None:
 def test_thinking_false_omits_thinking_kwarg() -> None:
     provider, client = _make_provider(_canned_response())
 
-    provider.complete(
+    _complete(provider,
         CompletionRequest(
             model="claude-opus-4-7",
             max_tokens=64,
@@ -349,7 +362,7 @@ def test_thinking_false_omits_thinking_kwarg() -> None:
 def test_adaptive_thinking_with_effort_emits_output_config() -> None:
     provider, client = _make_provider(_canned_response())
 
-    provider.complete(
+    _complete(provider,
         CompletionRequest(
             model="claude-opus-4-7",
             max_tokens=64,
@@ -367,7 +380,7 @@ def test_adaptive_thinking_with_effort_emits_output_config() -> None:
 def test_adaptive_thinking_no_effort_omits_output_config() -> None:
     provider, client = _make_provider(_canned_response())
 
-    provider.complete(
+    _complete(provider,
         CompletionRequest(
             model="claude-opus-4-7",
             max_tokens=64,
@@ -384,7 +397,7 @@ def test_adaptive_thinking_no_effort_omits_output_config() -> None:
 def test_manual_thinking_ignores_effort() -> None:
     provider, client = _make_provider(_canned_response())
 
-    provider.complete(
+    _complete(provider,
         CompletionRequest(
             model="claude-opus-4-7",
             max_tokens=64,
@@ -404,7 +417,7 @@ def test_manual_thinking_ignores_effort() -> None:
 def test_adaptive_effort_literals_pass_through(effort: str) -> None:
     provider, client = _make_provider(_canned_response())
 
-    provider.complete(
+    _complete(provider,
         CompletionRequest(
             model="claude-opus-4-7",
             max_tokens=64,
@@ -430,7 +443,7 @@ def test_thinking_block_response_translation() -> None:
     response = _canned_response(content=[api_thinking, api_text])
     provider, _client = _make_provider(response)
 
-    result = provider.complete(
+    result = _complete(provider,
         CompletionRequest(
             model="claude-opus-4-7",
             max_tokens=64,
@@ -451,7 +464,7 @@ def test_redacted_thinking_round_trip() -> None:
     distinct type carrying the opaque `data` payload."""
     # Outgoing serialization.
     provider, client = _make_provider(_canned_response())
-    provider.complete(
+    _complete(provider,
         CompletionRequest(
             model="claude-opus-4-7",
             max_tokens=64,
@@ -473,7 +486,7 @@ def test_redacted_thinking_round_trip() -> None:
     api_redacted = SimpleNamespace(type="redacted_thinking", data="enc_in")
     response = _canned_response(content=[api_redacted])
     provider2, _ = _make_provider(response)
-    result = provider2.complete(
+    result = _complete(provider2, 
         CompletionRequest(
             model="claude-opus-4-7",
             max_tokens=64,
@@ -527,7 +540,7 @@ def test_thinking_with_tool_use_full_multi_turn_round_trip() -> None:
             ),
         ],
     )
-    provider.complete(request)
+    _complete(provider, request)
 
     kwargs = client.messages.create.call_args.kwargs
     assistant_blocks = kwargs["messages"][1]["content"]
@@ -617,7 +630,7 @@ def test_stream_text_only_emits_text_deltas_then_complete() -> None:
         messages=[Message(role="user", content=[TextBlock(text="hi")])],
     )
 
-    emitted = list(provider.stream(request))
+    emitted = _stream(provider, request)
 
     text_deltas = [e for e in emitted if isinstance(e, TextDelta)]
     assert [d.text for d in text_deltas] == ["Hello", ", world."]
@@ -659,7 +672,7 @@ def test_stream_tool_use_emits_start_then_input_json_continuations() -> None:
         messages=[Message(role="user", content=[TextBlock(text="run ls")])],
     )
 
-    emitted = list(provider.stream(request))
+    emitted = _stream(provider, request)
 
     tool_deltas = [e for e in emitted if isinstance(e, ToolUseDelta)]
     assert len(tool_deltas) == 3
@@ -713,7 +726,7 @@ def test_stream_thinking_delta_emitted_for_extended_thinking() -> None:
         messages=[Message(role="user", content=[TextBlock(text="think")])],
     )
 
-    emitted = list(provider.stream(request))
+    emitted = _stream(provider, request)
     thinking_deltas = [e for e in emitted if isinstance(e, ThinkingDelta)]
     assert [d.thinking for d in thinking_deltas] == ["Step 1.", " Step 2."]
 
@@ -741,7 +754,7 @@ def test_stream_redacted_thinking_yields_no_event_but_appears_in_response() -> N
     provider, _client = _stream_provider(events, final)
 
     emitted = list(
-        provider.stream(
+        _stream(provider,
             CompletionRequest(
                 model="claude-opus-4-7",
                 max_tokens=64,

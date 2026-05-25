@@ -178,7 +178,7 @@ def run_streaming(
     """Run the agent loop using streaming for each model turn.
 
     Same semantics as `run()`, but each model turn is driven through
-    `provider.stream()`. Every `StreamEvent` emitted by the provider is
+    `provider.astream()`. Every `StreamEvent` emitted by the provider is
     forwarded to `on_event` for incremental rendering. The terminal
     `StreamComplete.response` is used for tool dispatch and termination
     decisions, and is what this function ultimately returns.

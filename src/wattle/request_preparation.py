@@ -86,28 +86,6 @@ class RequestPreparer:
         self.stream_max_retries = max(0, stream_max_retries)
         self.on_stream_retry = on_stream_retry
 
-    def prepare(
-        self,
-        messages: list[Message],
-        *,
-        force_compaction: bool = False,
-        reset_provider: bool = True,
-        compaction_instructions: str | None = None,
-    ) -> PreparedRequest:
-        """Synchronous compatibility wrapper around :meth:`aprepare`.
-
-        Production execution should use the async request-preparation path.
-        """
-
-        return asyncio.run(
-            self.aprepare(
-                messages,
-                force_compaction=force_compaction,
-                reset_provider=reset_provider,
-                compaction_instructions=compaction_instructions,
-            )
-        )
-
     async def aprepare(
         self,
         messages: list[Message],
@@ -175,15 +153,6 @@ class RequestPreparer:
             ),
             compacted=compacted,
         )
-
-
-def complete_with_recovery(
-    preparer: RequestPreparer,
-    messages: list[Message],
-) -> CompletionResponse:
-    """Synchronous compatibility wrapper around async recovery."""
-
-    return asyncio.run(acomplete_with_recovery(preparer, messages))
 
 
 async def acomplete_with_recovery(

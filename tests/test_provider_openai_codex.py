@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import anyio
 import base64
 import json
 import urllib.request
@@ -20,6 +21,18 @@ from wattle.providers import (
     ToolUseBlock,
     ToolUseDelta,
 )
+
+
+def _complete(provider, request):
+    return anyio.run(provider.acomplete, request)
+
+
+async def _collect_stream(provider, request):
+    return [event async for event in provider.astream(request)]
+
+
+def _stream(provider, request):
+    return anyio.run(_collect_stream, provider, request)
 
 
 def _jwt(payload: dict[str, Any]) -> str:
@@ -127,7 +140,7 @@ def test_codex_provider_builds_chatgpt_backend_request() -> None:
         session_id="session_123",
         thread_id="thread_123",
     )
-    response = provider.complete(
+    response = _complete(provider,
         CompletionRequest(
             model="gpt-5.5",
             max_tokens=512,
@@ -206,7 +219,7 @@ def test_codex_provider_reads_rate_limit_headers_into_usage() -> None:
         ),
     )
 
-    response = provider.complete(
+    response = _complete(provider,
         CompletionRequest(
             model="gpt-5.5",
             max_tokens=512,
@@ -255,7 +268,7 @@ def test_codex_provider_reads_streamed_rate_limit_event_into_usage() -> None:
         ),
     )
 
-    response = provider.complete(
+    response = _complete(provider,
         CompletionRequest(
             model="gpt-5.5",
             max_tokens=512,
@@ -340,7 +353,7 @@ def test_codex_provider_is_stateless_and_resends_full_history() -> None:
     )
     user_msg = Message(role="user", content=[TextBlock(text="run a tool")])
 
-    first = provider.complete(
+    first = _complete(provider,
         CompletionRequest(
             model="gpt-5.5",
             max_tokens=512,
@@ -370,7 +383,7 @@ def test_codex_provider_is_stateless_and_resends_full_history() -> None:
         content=[ToolResultBlock(tool_use_id="call_1", content="ok")],
     )
 
-    second = provider.complete(
+    second = _complete(provider,
         CompletionRequest(
             model="gpt-5.5",
             max_tokens=512,
@@ -466,7 +479,7 @@ def test_codex_provider_streams_text_and_tool_calls() -> None:
     )
 
     emitted = list(
-        provider.stream(
+        _stream(provider,
             CompletionRequest(
                 model="gpt-5.5",
                 max_tokens=512,
@@ -514,7 +527,7 @@ def test_codex_provider_reads_sse_incrementally_by_line() -> None:
     )
 
     emitted = list(
-        provider.stream(
+        _stream(provider,
             CompletionRequest(
                 model="gpt-5.5",
                 max_tokens=512,
@@ -545,7 +558,7 @@ def test_codex_provider_raises_retryable_error_for_incomplete_stream() -> None:
 
     try:
         list(
-            provider.stream(
+            _stream(provider,
                 CompletionRequest(
                     model="gpt-5.5",
                     max_tokens=512,
@@ -578,7 +591,7 @@ def test_codex_provider_uses_streamed_text_when_final_output_is_empty() -> None:
         ),
     )
 
-    response = provider.complete(
+    response = _complete(provider,
         CompletionRequest(
             model="gpt-5.5",
             max_tokens=512,

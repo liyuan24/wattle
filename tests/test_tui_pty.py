@@ -36,7 +36,7 @@ def _slow_wattle_child_code(
             def __init__(self):
                 self.calls = 0
 
-            def complete(self, request):
+            async def acomplete(self, request):
                 self.calls += 1
                 return CompletionResponse(
                     content=[TextBlock(text=f"done {{self.calls}}")],
@@ -44,7 +44,7 @@ def _slow_wattle_child_code(
                     usage={{}},
                 )
 
-            def stream(self, request):
+            async def astream(self, request):
                 self.calls += 1
                 time.sleep({first_delay!r} if self.calls == 1 else {later_delay!r})
                 yield TextDelta(text=f"done {{self.calls}}")
@@ -157,10 +157,10 @@ def _history_tool_child_code() -> str:
 
 
         class IdleProvider(Provider):
-            def complete(self, request):
+            async def acomplete(self, request):
                 raise RuntimeError("provider should not be called")
 
-            def stream(self, request):
+            async def astream(self, request):
                 raise RuntimeError("provider should not be called")
                 yield
 
@@ -246,7 +246,7 @@ def _clear_wattle_child_code() -> str:
             def __init__(self):
                 self.calls = 0
 
-            def complete(self, request):
+            async def acomplete(self, request):
                 self.calls += 1
                 return CompletionResponse(
                     content=[TextBlock(text=f"done {self.calls}")],
@@ -254,7 +254,7 @@ def _clear_wattle_child_code() -> str:
                     usage={"input_tokens": 10 * self.calls, "output_tokens": self.calls},
                 )
 
-            def stream(self, request):
+            async def astream(self, request):
                 self.calls += 1
                 yield TextDelta(text=f"done {self.calls}")
                 yield StreamComplete(
@@ -345,14 +345,14 @@ def _tool_rendering_child_code() -> str:
             def __init__(self):
                 self.calls = 0
 
-            def complete(self, request):
+            async def acomplete(self, request):
                 return CompletionResponse(
                     content=[TextBlock(text="done")],
                     stop_reason="end_turn",
                     usage={},
                 )
 
-            def stream(self, request):
+            async def astream(self, request):
                 self.calls += 1
                 if self.calls == 1:
                     yield ToolUseDelta(id="bash_1", name="bash", partial_json=None)
@@ -459,14 +459,14 @@ def _slow_second_write_child_code() -> str:
             def __init__(self):
                 self.calls = 0
 
-            def complete(self, request):
+            async def acomplete(self, request):
                 return CompletionResponse(
                     content=[TextBlock(text="done")],
                     stop_reason="end_turn",
                     usage={},
                 )
 
-            def stream(self, request):
+            async def astream(self, request):
                 self.calls += 1
                 if self.calls == 1:
                     yield ToolUseDelta(id="write_fast", name="write", partial_json=None)
@@ -568,14 +568,14 @@ def _grouped_edit_child_code() -> str:
             def __init__(self):
                 self.calls = 0
 
-            def complete(self, request):
+            async def acomplete(self, request):
                 return CompletionResponse(
                     content=[TextBlock(text="done")],
                     stop_reason="end_turn",
                     usage={},
                 )
 
-            def stream(self, request):
+            async def astream(self, request):
                 self.calls += 1
                 if self.calls == 1:
                     yield ToolUseDelta(id="edit_1", name="edit", partial_json=None)
@@ -666,7 +666,7 @@ def _subagent_wait_child_code() -> str:
 
 
         class ChildProvider(Provider):
-            def complete(self, request):
+            async def acomplete(self, request):
                 time.sleep(0.8)
                 return CompletionResponse(
                     content=[TextBlock(text="child result")],
@@ -674,8 +674,8 @@ def _subagent_wait_child_code() -> str:
                     usage={},
                 )
 
-            def stream(self, request):
-                response = self.complete(request)
+            async def astream(self, request):
+                response = await self.acomplete(request)
                 yield TextDelta(text="child result")
                 yield StreamComplete(response)
 
@@ -687,14 +687,14 @@ def _subagent_wait_child_code() -> str:
             def fork(self):
                 return ChildProvider()
 
-            def complete(self, request):
+            async def acomplete(self, request):
                 return CompletionResponse(
                     content=[TextBlock(text="done")],
                     stop_reason="end_turn",
                     usage={},
                 )
 
-            def stream(self, request):
+            async def astream(self, request):
                 self.calls += 1
                 if self.calls == 1:
                     yield ToolUseDelta(id="spawn_1", name="spawn_agent", partial_json=None)
@@ -782,14 +782,14 @@ def _research_child_code() -> str:
             def __init__(self):
                 self.calls = 0
 
-            def complete(self, request):
+            async def acomplete(self, request):
                 return CompletionResponse(
                     content=[TextBlock(text="done")],
                     stop_reason="end_turn",
                     usage={},
                 )
 
-            def stream(self, request):
+            async def astream(self, request):
                 self.calls += 1
                 if self.calls == 1:
                     yield ToolUseDelta(id="read_1", name="read", partial_json=None)
@@ -888,14 +888,14 @@ def _plan_update_child_code() -> str:
             def __init__(self):
                 self.calls = 0
 
-            def complete(self, request):
+            async def acomplete(self, request):
                 return CompletionResponse(
                     content=[TextBlock(text="done")],
                     stop_reason="end_turn",
                     usage={},
                 )
 
-            def stream(self, request):
+            async def astream(self, request):
                 self.calls += 1
                 if self.calls == 1:
                     yield ToolUseDelta(id="plan_1", name="update_plan", partial_json=None)

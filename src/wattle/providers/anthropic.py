@@ -47,10 +47,9 @@ Anthropic prompt caching is enabled for every request:
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import inspect
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
@@ -101,37 +100,11 @@ class AnthropicProvider(Provider):
     def fork(self) -> AnthropicProvider:
         return AnthropicProvider(async_client=self._async_client)
 
-    def complete(self, request: CompletionRequest) -> CompletionResponse:
-        return _run_async(self.acomplete(request))
-
     async def acomplete(self, request: CompletionRequest) -> CompletionResponse:
         response = await _maybe_await(
             self.async_client.messages.create(**self._build_kwargs(request))
         )
         return _response_from_api(response)
-
-    def stream(self, request: CompletionRequest) -> Iterator[StreamEvent]:
-        """Stream a turn against the Anthropic Messages API.
-
-        Uses ``client.messages.stream(...)`` (a context manager exposing an
-        iterator of typed SDK events) and translates each SDK event into the
-        Wattle ``StreamEvent`` vocabulary:
-
-          * ``content_block_start`` for a ``tool_use`` block emits a
-            ``ToolUseDelta`` carrying the block id and tool name (start).
-          * ``content_block_delta`` of type ``text_delta`` emits a
-            ``TextDelta``; ``thinking_delta`` emits a ``ThinkingDelta``;
-            ``input_json_delta`` emits a continuation ``ToolUseDelta`` for
-            the most recently started tool_use block.
-          * ``redacted_thinking`` blocks emit no incremental event — they
-            still surface in the assembled response.
-
-        After the SDK stream is fully drained, a single ``StreamComplete``
-        is yielded carrying the same ``CompletionResponse`` shape that
-        ``complete()`` would have returned (assembled via
-        ``stream.get_final_message()``).
-        """
-        yield from _run_async_iter(self.astream(request))
 
     async def astream(self, request: CompletionRequest) -> AsyncIterator[StreamEvent]:
         """Async-native streaming path backed by ``anthropic.AsyncAnthropic``."""
@@ -200,22 +173,6 @@ async def _maybe_await(value: Any) -> Any:
         return await value
     return value
 
-
-def _run_async(awaitable: Any) -> Any:
-    return asyncio.run(awaitable)
-
-
-def _run_async_iter(async_iter: AsyncIterator[Any]) -> Iterator[Any]:
-    loop = asyncio.new_event_loop()
-    try:
-        while True:
-            try:
-                yield loop.run_until_complete(anext(async_iter))
-            except StopAsyncIteration:
-                return
-    finally:
-        loop.run_until_complete(async_iter.aclose())
-        loop.close()
 
 
 # Any: SDK Message/RawMessage object. We read `.content`, `.stop_reason`,

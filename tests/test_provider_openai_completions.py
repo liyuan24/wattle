@@ -11,6 +11,7 @@ is exercised in two directions:
 
 from __future__ import annotations
 
+import anyio
 import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -31,6 +32,18 @@ from wattle.providers import (
     ToolUseBlock,
     ToolUseDelta,
 )
+
+
+def _complete(provider, request):
+    return anyio.run(provider.acomplete, request)
+
+
+async def _collect_stream(provider, request):
+    return [event async for event in provider.astream(request)]
+
+
+def _stream(provider, request):
+    return anyio.run(_collect_stream, provider, request)
 
 
 def _fake_response(
@@ -106,7 +119,7 @@ def test_request_translation_full_shape() -> None:
         ],
     )
 
-    provider.complete(request)
+    _complete(provider, request)
 
     client.chat.completions.create.assert_called_once()
     kwargs = client.chat.completions.create.call_args.kwargs
@@ -164,7 +177,7 @@ def test_user_image_block_translates_to_chat_image_part(tmp_path) -> None:
     client = _make_client(_fake_response(content="ok"))
     provider = OpenAICompletionsProvider(async_client=client)
 
-    provider.complete(
+    _complete(provider,
         CompletionRequest(
             model="gpt-4o-mini",
             max_tokens=64,
@@ -205,7 +218,7 @@ def test_user_text_blocks_are_separated_when_flattened() -> None:
     client = _make_client(_fake_response(content="ok"))
     provider = OpenAICompletionsProvider(async_client=client)
 
-    provider.complete(
+    _complete(provider,
         CompletionRequest(
             model="gpt-4o-mini",
             max_tokens=64,
@@ -242,7 +255,7 @@ def test_request_no_system_omits_system_message() -> None:
         system=None,
         messages=[Message(role="user", content=[TextBlock(text="hello")])],
     )
-    provider.complete(request)
+    _complete(provider, request)
 
     messages = client.chat.completions.create.call_args.kwargs["messages"]
     assert all(m["role"] != "system" for m in messages)
@@ -253,7 +266,7 @@ def test_request_no_tools_omits_tools_kwarg() -> None:
     client = _make_client(_fake_response(content="ok"))
     provider = OpenAICompletionsProvider(async_client=client)
 
-    provider.complete(
+    _complete(provider,
         CompletionRequest(
             model="gpt-4o-mini",
             max_tokens=64,
@@ -270,7 +283,7 @@ def test_assistant_tool_only_message_has_null_content() -> None:
     client = _make_client(_fake_response(content="ok"))
     provider = OpenAICompletionsProvider(async_client=client)
 
-    provider.complete(
+    _complete(provider,
         CompletionRequest(
             model="gpt-4o-mini",
             max_tokens=64,
@@ -298,7 +311,7 @@ def test_multiple_tool_results_lift_to_separate_wire_messages() -> None:
     client = _make_client(_fake_response(content="ok"))
     provider = OpenAICompletionsProvider(async_client=client)
 
-    provider.complete(
+    _complete(provider,
         CompletionRequest(
             model="gpt-4o-mini",
             max_tokens=64,
@@ -334,7 +347,7 @@ def test_user_text_can_follow_tool_results_in_same_wattle_message() -> None:
     client = _make_client(_fake_response(content="ok"))
     provider = OpenAICompletionsProvider(async_client=client)
 
-    provider.complete(
+    _complete(provider,
         CompletionRequest(
             model="gpt-4o-mini",
             max_tokens=64,
@@ -367,7 +380,7 @@ def test_is_error_prepends_error_marker() -> None:
     client = _make_client(_fake_response(content="ok"))
     provider = OpenAICompletionsProvider(async_client=client)
 
-    provider.complete(
+    _complete(provider,
         CompletionRequest(
             model="gpt-4o-mini",
             max_tokens=64,
@@ -425,7 +438,7 @@ def test_response_translation_text_and_tool_calls() -> None:
     )
     provider = OpenAICompletionsProvider(async_client=_make_client(response))
 
-    result = provider.complete(
+    result = _complete(provider,
         CompletionRequest(
             model="gpt-4o-mini",
             max_tokens=128,
@@ -461,7 +474,7 @@ def test_usage_includes_cached_tokens_when_reported() -> None:
     )
     provider = OpenAICompletionsProvider(async_client=_make_client(response))
 
-    result = provider.complete(
+    result = _complete(provider,
         CompletionRequest(
             model="gpt-4o-mini",
             max_tokens=64,
@@ -480,7 +493,7 @@ def test_response_with_only_text_no_tool_calls() -> None:
     response = _fake_response(content="all done", tool_calls=None, finish_reason="stop")
     provider = OpenAICompletionsProvider(async_client=_make_client(response))
 
-    result = provider.complete(
+    result = _complete(provider,
         CompletionRequest(
             model="gpt-4o-mini",
             max_tokens=64,
@@ -500,7 +513,7 @@ def test_response_with_only_tool_calls_no_text() -> None:
     response = _fake_response(content=None, tool_calls=[tool_call], finish_reason="tool_calls")
     provider = OpenAICompletionsProvider(async_client=_make_client(response))
 
-    result = provider.complete(
+    result = _complete(provider,
         CompletionRequest(
             model="gpt-4o-mini",
             max_tokens=64,
@@ -529,7 +542,7 @@ def test_finish_reason_mapping(finish_reason: str, expected: str) -> None:
     response = _fake_response(content="x", finish_reason=finish_reason)
     provider = OpenAICompletionsProvider(async_client=_make_client(response))
 
-    result = provider.complete(
+    result = _complete(provider,
         CompletionRequest(
             model="gpt-4o-mini",
             max_tokens=64,
@@ -550,7 +563,7 @@ def test_thinking_blocks_in_input_are_serialized_as_reasoning_content() -> None:
     client = _make_client(_fake_response(content="ok"))
     provider = OpenAICompletionsProvider(async_client=client)
 
-    provider.complete(
+    _complete(provider,
         CompletionRequest(
             model="gpt-4o-mini",
             max_tokens=64,
@@ -591,7 +604,7 @@ def test_assistant_message_with_only_thinking_blocks_is_skipped() -> None:
     client = _make_client(_fake_response(content="ok"))
     provider = OpenAICompletionsProvider(async_client=client)
 
-    provider.complete(
+    _complete(provider,
         CompletionRequest(
             model="gpt-4o-mini",
             max_tokens=64,
@@ -624,7 +637,7 @@ def test_response_reasoning_content_becomes_thinking_block() -> None:
     )
     provider = OpenAICompletionsProvider(async_client=_make_client(response))
 
-    result = provider.complete(
+    result = _complete(provider,
         CompletionRequest(
             model="gpt-4o-mini",
             max_tokens=64,
@@ -642,7 +655,7 @@ def test_response_without_reasoning_content_has_no_thinking_block() -> None:
     response = _fake_response(content="all done", finish_reason="stop")
     provider = OpenAICompletionsProvider(async_client=_make_client(response))
 
-    result = provider.complete(
+    result = _complete(provider,
         CompletionRequest(
             model="gpt-4o-mini",
             max_tokens=64,
@@ -659,7 +672,7 @@ def test_thinking_false_omits_reasoning_effort() -> None:
     client = _make_client(_fake_response(content="ok"))
     provider = OpenAICompletionsProvider(async_client=client)
 
-    provider.complete(
+    _complete(provider,
         CompletionRequest(
             model="gpt-4o-mini",
             max_tokens=64,
@@ -677,7 +690,7 @@ def test_effort_passes_through(effort: str) -> None:
     client = _make_client(_fake_response(content="ok"))
     provider = OpenAICompletionsProvider(async_client=client)
 
-    provider.complete(
+    _complete(provider,
         CompletionRequest(
             model="gpt-4o-mini",
             max_tokens=64,
@@ -696,7 +709,7 @@ def test_effort_max_clamps_to_xhigh() -> None:
     client = _make_client(_fake_response(content="ok"))
     provider = OpenAICompletionsProvider(async_client=client)
 
-    provider.complete(
+    _complete(provider,
         CompletionRequest(
             model="gpt-4o-mini",
             max_tokens=64,
@@ -724,7 +737,7 @@ def test_budget_buckets_to_effort(budget: int, expected: str) -> None:
     client = _make_client(_fake_response(content="ok"))
     provider = OpenAICompletionsProvider(async_client=client)
 
-    provider.complete(
+    _complete(provider,
         CompletionRequest(
             model="gpt-4o-mini",
             max_tokens=64,
@@ -743,7 +756,7 @@ def test_effort_takes_precedence_over_budget() -> None:
     client = _make_client(_fake_response(content="ok"))
     provider = OpenAICompletionsProvider(async_client=client)
 
-    provider.complete(
+    _complete(provider,
         CompletionRequest(
             model="gpt-4o-mini",
             max_tokens=64,
@@ -764,7 +777,7 @@ def test_thinking_true_no_effort_no_budget_omits_reasoning_effort() -> None:
     client = _make_client(_fake_response(content="ok"))
     provider = OpenAICompletionsProvider(async_client=client)
 
-    provider.complete(
+    _complete(provider,
         CompletionRequest(
             model="gpt-4o-mini",
             max_tokens=64,
@@ -835,7 +848,7 @@ def test_stream_text_emits_deltas_then_complete_with_usage() -> None:
     provider = OpenAICompletionsProvider(async_client=client)
 
     emitted = list(
-        provider.stream(
+        _stream(provider,
             CompletionRequest(
                 model="gpt-4o-mini",
                 max_tokens=64,
@@ -877,7 +890,7 @@ def test_stream_tool_calls_emit_start_then_argument_fragments() -> None:
     provider = OpenAICompletionsProvider(async_client=client)
 
     emitted = list(
-        provider.stream(
+        _stream(provider,
             CompletionRequest(
                 model="gpt-4o-mini",
                 max_tokens=64,
@@ -919,7 +932,7 @@ def test_stream_parallel_tool_calls_track_per_index_independently() -> None:
     provider = OpenAICompletionsProvider(async_client=client)
 
     emitted = list(
-        provider.stream(
+        _stream(provider,
             CompletionRequest(
                 model="gpt-4o-mini",
                 max_tokens=64,
@@ -953,7 +966,7 @@ def test_stream_finish_reason_length_maps_to_max_tokens() -> None:
     provider = OpenAICompletionsProvider(async_client=client)
 
     emitted = list(
-        provider.stream(
+        _stream(provider,
             CompletionRequest(
                 model="gpt-4o-mini",
                 max_tokens=2,
