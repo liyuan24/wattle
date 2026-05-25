@@ -1176,6 +1176,45 @@ def test_tui_attaches_local_image_from_user_text(tmp_path: Path) -> None:
     assert "[image] debug shot.png" not in rendered
 
 
+def test_history_replay_keeps_user_image_anchor_without_summary(tmp_path: Path) -> None:
+    image = tmp_path / "debug shot.png"
+    image.write_bytes(b"fake-png")
+    out = _TTYBuffer()
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+
+    content = app._user_content_blocks(f'check image at "{image}"')
+    message = Message(role="user", content=content)
+    app._write_history_message(message)
+
+    rendered = out.getvalue()
+    assert "check image at [image#1]" in rendered
+    assert "[image] debug shot.png" not in rendered
+    assert str(image) not in rendered
+
+
+def test_history_replay_renders_image_only_user_message_summary(tmp_path: Path) -> None:
+    image = tmp_path / "debug shot.png"
+    image.write_bytes(b"fake-png")
+    out = _TTYBuffer()
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    message = Message(
+        role="user",
+        content=[
+            ImageBlock(
+                path=str(image.resolve()),
+                media_type="image/png",
+                size_bytes=image.stat().st_size,
+                filename=image.name,
+            )
+        ],
+    )
+
+    app._write_history_message(message)
+
+    rendered = out.getvalue()
+    assert "[image] debug shot.png" in rendered
+
+
 def test_tui_numbers_multiple_local_images_in_user_text(tmp_path: Path) -> None:
     first = tmp_path / "left.png"
     second = tmp_path / "right.png"

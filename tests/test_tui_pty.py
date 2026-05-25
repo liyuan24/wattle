@@ -1046,6 +1046,31 @@ def test_pty_dragged_image_uses_anchor_while_queued_and_after_finish(tmp_path: P
         assert str(image) not in screen_text
 
 
+def test_pty_resize_keeps_user_image_history_as_anchor(tmp_path: Path) -> None:
+    image = tmp_path / "dragged image.png"
+    image.write_bytes(b"fake-png")
+    escaped_path = str(image).replace(" ", "\\ ")
+
+    with PtySession.spawn_python(
+        _slow_wattle_child_code(first_delay=0.1, later_delay=0.1, prompt=None),
+        cwd=tmp_path,
+        cols=100,
+        rows=30,
+    ) as session:
+        session.read_until("gpt-5.5 |", timeout=3)
+        session.write(f"check {escaped_path}\n")
+        session.read_until("check [image#1]", timeout=3)
+        session.read_until("done 1", timeout=3)
+
+        session.resize(cols=80, rows=36)
+        session.read_until("check [image#1]", timeout=3)
+
+        screen_text = session.screen.text()
+        assert "check [image#1]" in screen_text
+        assert "[image] dragged image.png" not in screen_text
+        assert str(image) not in screen_text
+
+
 def test_pty_queue_command_renders_end_turn_followup_panel(tmp_path: Path) -> None:
     with PtySession.spawn_python(
         _slow_wattle_child_code(first_delay=1.5, later_delay=0.1),

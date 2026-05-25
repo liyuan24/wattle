@@ -3725,7 +3725,7 @@ class WattleApp:
             displayed = True
 
         text = "\n".join(part for part in text_parts if part)
-        if images:
+        if images and (message.role != "user" or not text):
             image_text = "\n".join(_image_summary(block) for block in images)
             text = f"{text}\n{image_text}" if text else image_text
         if text:
