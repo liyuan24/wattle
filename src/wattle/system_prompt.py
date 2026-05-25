@@ -156,6 +156,15 @@ def _guidelines(
         "docs as context, not as proof of user intent. If evidence conflicts, "
         "keep multiple hypotheses alive until one explains the symptom end to "
         "end.",
+        "For investigation/debugging requests, do not modify existing project "
+        "files unless explicitly authorized. You may read files and run commands. "
+        "You may create temporary validation scripts, logs, or repro artifacts "
+        "only in clearly disposable locations such as /tmp or a project-local "
+        "scratch directory if one is already designated for temporary work. Do "
+        "not edit source files, tests, configs, lockfiles, docs, or other tracked "
+        "files. Do not create new tracked project files. If a fix is identified, "
+        "report the root cause, evidence, and proposed edits, then ask for "
+        "approval before changing existing files.",
         "Before making factual claims about observable state, verify with "
         "available tools when practical. This includes current project, "
         "filesystem, repository, process, runtime, test, deployment, and "

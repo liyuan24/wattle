@@ -36,6 +36,9 @@ def test_build_system_prompt_uses_wattle_default_without_pi_docs(tmp_path: Path)
     assert "validate heuristic constants or stopping conditions with repeatable evidence" in prompt
     assert "When investigating a failure, prioritize reproducing and explaining" in prompt
     assert "keep multiple hypotheses alive until one explains the symptom end to end" in prompt
+    assert "For investigation/debugging requests, do not modify existing project files" in prompt
+    assert "temporary validation scripts, logs, or repro artifacts" in prompt
+    assert "ask for approval before changing existing files" in prompt
     assert "Before making factual claims about observable state" in prompt
     assert "verify with available tools when practical" in prompt
     assert "Do not rely only on memory of prior actions" in prompt
