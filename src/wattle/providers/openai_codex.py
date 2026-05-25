@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import platform
+import re
 import urllib.error
 import urllib.request
 from collections.abc import AsyncIterator, Callable, Iterator
@@ -133,14 +134,17 @@ class OpenAICodexResponsesProvider(Provider):
                 )
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
-            error = _codex_error_message(exc.code, detail)
-            if _is_retryable_http_status(exc.code):
-                raise TransientProviderError(
-                    error,
-                    status_code=exc.code,
-                    retry_after=_retry_after_from_headers(getattr(exc, "headers", None)),
-                ) from exc
-            raise RuntimeError(error) from exc
+            error_payload = _codex_error_payload(detail)
+            try:
+                _raise_for_codex_http_error(
+                    exc.code,
+                    detail,
+                    getattr(exc, "headers", None),
+                    error_payload,
+                )
+            except BaseException as mapped:
+                raise mapped from exc
+            raise RuntimeError(_codex_error_message(exc.code, detail)) from exc
         except urllib.error.URLError as exc:
             raise TransientProviderError(
                 f"Codex request failed before a response: {exc.reason}",
@@ -384,13 +388,8 @@ def _map_event(
     if event_type == "error":
         raise RuntimeError(f"Codex error: {event.get('message') or event}")
     if event_type == "response.failed":
-        response = event.get("response")
-        message = None
-        if isinstance(response, dict):
-            error = response.get("error")
-            if isinstance(error, dict):
-                message = error.get("message")
-        raise RuntimeError(str(message or "Codex response failed"))
+        _raise_for_codex_response_error(_codex_response_error(event))
+        raise TransientProviderError("Codex response failed")
     if event_type == "response.output_text.delta":
         return TextDelta(text=str(event.get("delta", ""))), current_call_id, final_response
     if event_type in {
@@ -427,6 +426,12 @@ def _map_event(
         response = event.get("response")
         if not isinstance(response, dict):
             raise RuntimeError("Codex completion event did not include a response object.")
+        if (
+            event_type == "response.incomplete"
+            and _incomplete_reason(response) != "max_output_tokens"
+        ):
+            reason = _incomplete_reason(response) or "unknown"
+            raise IncompleteStreamError(f"Incomplete Codex response returned, reason: {reason}")
         return None, current_call_id, response
     return None, current_call_id, final_response
 
@@ -558,16 +563,24 @@ def _content_from_response(response: dict[str, Any]) -> list[ContentBlock]:
     return content
 
 
-def _stop_reason_from_response(
-    response: dict[str, Any], content: list[ContentBlock]
-) -> StopReason:
+def _stop_reason_from_response(response: dict[str, Any], content: list[ContentBlock]) -> StopReason:
     if any(isinstance(block, ToolUseBlock) for block in content):
         return "tool_use"
-    if response.get("status") == "incomplete":
-        details = response.get("incomplete_details")
-        if isinstance(details, dict) and details.get("reason") == "max_output_tokens":
-            return "max_tokens"
+    if (
+        response.get("status") == "incomplete"
+        and _incomplete_reason(response) == "max_output_tokens"
+    ):
+        return "max_tokens"
     return "end_turn"
+
+
+def _incomplete_reason(response: dict[str, Any]) -> str | None:
+    details = response.get("incomplete_details")
+    if isinstance(details, dict):
+        reason = details.get("reason")
+        if isinstance(reason, str):
+            return reason
+    return None
 
 
 def _usage_from_response(
@@ -766,17 +779,121 @@ def _header(response: Any, name: str) -> str | None:
 
 
 def _codex_error_message(status: int, detail: str) -> str:
+    error = _codex_error_payload(detail)
+    message = _codex_error_message_from_payload(error)
+    if message:
+        return message
+    return f"Codex request failed with HTTP {status}: {detail}"
+
+
+def _codex_error_payload(detail: str) -> dict[str, Any] | None:
     try:
         parsed = json.loads(detail)
     except json.JSONDecodeError:
-        return f"Codex request failed with HTTP {status}: {detail}"
-    if isinstance(parsed, dict):
-        error = parsed.get("error")
-        if isinstance(error, dict):
-            message = error.get("message")
-            if isinstance(message, str):
-                return message
-    return f"Codex request failed with HTTP {status}: {detail}"
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    error = parsed.get("error")
+    return error if isinstance(error, dict) else None
+
+
+def _codex_response_error(event: dict[str, Any]) -> dict[str, Any] | None:
+    response = event.get("response")
+    if not isinstance(response, dict):
+        return None
+    error = response.get("error")
+    return error if isinstance(error, dict) else None
+
+
+def _raise_for_codex_http_error(
+    status: int | None,
+    detail: str,
+    headers: Any,
+    error: dict[str, Any] | None,
+) -> None:
+    retry_after = _retry_after_from_headers(headers)
+    if error is not None:
+        _raise_for_codex_response_error(
+            error,
+            status_code=status,
+            retry_after=retry_after,
+            fallback_message=_codex_error_message(status or 0, detail),
+        )
+    if _is_retryable_http_status(status):
+        raise TransientProviderError(
+            _codex_error_message(status or 0, detail),
+            status_code=status,
+            retry_after=retry_after,
+        )
+
+
+def _raise_for_codex_response_error(
+    error: dict[str, Any] | None,
+    *,
+    status_code: int | None = None,
+    retry_after: float | None = None,
+    fallback_message: str = "Codex response failed",
+) -> None:
+    if error is None:
+        raise TransientProviderError(fallback_message, status_code=status_code)
+    code = _codex_error_code(error)
+    message = _codex_error_message_from_payload(error) or fallback_message
+    retry_after = (
+        retry_after if retry_after is not None else _retry_after_from_error_message(message)
+    )
+    if code == "context_length_exceeded":
+        raise RuntimeError(f"context_length_exceeded: {message}")
+    if code in {"server_is_overloaded", "slow_down", "rate_limit_exceeded"}:
+        raise TransientProviderError(
+            message,
+            status_code=status_code,
+            retry_after=retry_after,
+        )
+    if code in {"insufficient_quota", "usage_limit_reached"}:
+        raise RuntimeError(message or "Quota exceeded. Check your plan and billing details.")
+    if code == "usage_not_included":
+        raise RuntimeError(
+            message
+            or "To use Codex with your ChatGPT plan, upgrade to Plus: https://chatgpt.com/explore/plus."
+        )
+    if code == "cyber_policy":
+        raise RuntimeError(
+            message or "This request has been flagged for possible cybersecurity risk."
+        )
+    if code == "invalid_prompt":
+        raise RuntimeError(message or "Invalid request.")
+    raise TransientProviderError(message, status_code=status_code, retry_after=retry_after)
+
+
+def _codex_error_code(error: dict[str, Any]) -> str | None:
+    for key in ("code", "type"):
+        value = error.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _codex_error_message_from_payload(error: dict[str, Any] | None) -> str | None:
+    if error is None:
+        return None
+    message = error.get("message")
+    return message if isinstance(message, str) and message else None
+
+
+def _retry_after_from_error_message(message: str | None) -> float | None:
+    if not message:
+        return None
+    match = re.search(
+        r"(?i)try again in\s*(\d+(?:\.\d+)?)\s*(ms|s|seconds?)",
+        message,
+    )
+    if match is None:
+        return None
+    value = float(match.group(1))
+    unit = match.group(2).lower()
+    if unit == "ms":
+        return value / 1000
+    return value
 
 
 def _is_retryable_http_status(status: int | None) -> bool:

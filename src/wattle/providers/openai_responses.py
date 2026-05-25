@@ -82,6 +82,7 @@ from __future__ import annotations
 import base64
 import inspect
 import json
+import re
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any, Literal
@@ -319,6 +320,15 @@ async def _aiter(iterable: Any) -> AsyncIterator[Any]:
 
 def _raise_transient_openai_error(exc: BaseException) -> None:
     status_code = _status_code_from_exception(exc)
+    error_payload = _openai_error_payload(exc)
+    if error_payload is not None:
+        _raise_for_openai_error_payload(
+            error_payload,
+            status_code=status_code,
+            retry_after=_retry_after_from_exception(exc),
+            fallback_message=str(exc) or type(exc).__name__,
+        )
+
     if status_code in _RETRYABLE_STATUS_CODES:
         raise TransientProviderError(
             str(exc) or type(exc).__name__,
@@ -341,6 +351,102 @@ def _raise_transient_openai_error(exc: BaseException) -> None:
             status_code=status_code,
             retry_after=_retry_after_from_exception(exc),
         ) from exc
+
+
+def _openai_error_payload(exc: BaseException) -> dict[str, Any] | None:
+    for value in (
+        getattr(exc, "body", None),
+        getattr(exc, "response", None),
+    ):
+        payload = _error_payload_from_value(value)
+        if payload is not None:
+            return payload
+    return None
+
+
+def _error_payload_from_value(value: object) -> dict[str, Any] | None:
+    if isinstance(value, dict):
+        error = value.get("error")
+        if isinstance(error, dict):
+            return error
+        if any(isinstance(value.get(key), str) for key in ("code", "type", "message")):
+            return value
+    text = getattr(value, "text", None)
+    if isinstance(text, str):
+        return _error_payload_from_text(text)
+    content = getattr(value, "content", None)
+    if isinstance(content, (str, bytes)):
+        return _error_payload_from_text(
+            content.decode("utf-8", errors="replace") if isinstance(content, bytes) else content
+        )
+    return None
+
+
+def _error_payload_from_text(text: str) -> dict[str, Any] | None:
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    return _error_payload_from_value(parsed)
+
+
+def _raise_for_openai_error_payload(
+    error: dict[str, Any],
+    *,
+    status_code: int | None,
+    retry_after: float | None,
+    fallback_message: str,
+) -> None:
+    code = _openai_error_code(error)
+    message = _openai_error_message(error) or fallback_message
+    retry_after = retry_after if retry_after is not None else _retry_after_from_message(message)
+    if code == "context_length_exceeded":
+        raise RuntimeError(f"context_length_exceeded: {message}")
+    if code in {"server_is_overloaded", "slow_down", "rate_limit_exceeded"}:
+        raise TransientProviderError(
+            message,
+            status_code=status_code,
+            retry_after=retry_after,
+        )
+    if code in {"insufficient_quota", "usage_limit_reached"}:
+        raise RuntimeError(message or "Quota exceeded. Check your plan and billing details.")
+    if code == "usage_not_included":
+        raise RuntimeError(message or "Usage is not included for this plan.")
+    if code == "cyber_policy":
+        raise RuntimeError(
+            message or "This request has been flagged for possible cybersecurity risk."
+        )
+    if code == "invalid_prompt":
+        raise RuntimeError(message or "Invalid request.")
+
+
+def _openai_error_code(error: dict[str, Any]) -> str | None:
+    for key in ("code", "type"):
+        value = error.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _openai_error_message(error: dict[str, Any]) -> str | None:
+    value = error.get("message")
+    return value if isinstance(value, str) and value else None
+
+
+def _retry_after_from_message(message: str | None) -> float | None:
+    if not message:
+        return None
+    match = re.search(
+        r"(?i)try again in\s*(\d+(?:\.\d+)?)\s*(ms|s|seconds?)",
+        message,
+    )
+    if match is None:
+        return None
+    value = float(match.group(1))
+    unit = match.group(2).lower()
+    if unit == "ms":
+        return value / 1000
+    return value
 
 
 def _status_code_from_exception(exc: BaseException) -> int | None:
@@ -367,7 +473,6 @@ def _retry_after_from_exception(exc: BaseException) -> float | None:
     except (TypeError, ValueError):
         return None
     return retry_after if retry_after >= 0 else None
-
 
 
 # Any: SDK Response object — we read `.usage.input_tokens`, `.output`,
@@ -469,9 +574,7 @@ def _block_to_input_item(role: str, block: ContentBlock) -> dict[str, Any] | Non
             "arguments": json.dumps(block.input),
         }
     if isinstance(block, ToolResultBlock):
-        output = (
-            _ERROR_PREFIX + block.content if block.is_error else block.content
-        )
+        output = _ERROR_PREFIX + block.content if block.is_error else block.content
         return {
             "type": "function_call_output",
             "call_id": block.tool_use_id,
@@ -484,9 +587,7 @@ def _block_to_input_item(role: str, block: ContentBlock) -> dict[str, Any] | Non
             "type": "reasoning",
             "id": block.signature,
             "summary": (
-                [{"type": "summary_text", "text": block.thinking}]
-                if block.thinking
-                else []
+                [{"type": "summary_text", "text": block.thinking}] if block.thinking else []
             ),
         }
         if block.encrypted_content is not None:
@@ -523,9 +624,7 @@ def _content_from_response(response: Any) -> list[ContentBlock]:
             )
         elif item.type == "reasoning":
             summary_parts = getattr(item, "summary", None) or []
-            thinking = "".join(
-                part.text for part in summary_parts if part.type == "summary_text"
-            )
+            thinking = "".join(part.text for part in summary_parts if part.type == "summary_text")
             content.append(
                 ThinkingBlock(
                     thinking=thinking,
@@ -537,13 +636,13 @@ def _content_from_response(response: Any) -> list[ContentBlock]:
 
 
 # Any: SDK Response object — we only read `.status` and `.incomplete_details`.
-def _stop_reason_from_response(
-    response: Any, content: list[ContentBlock]
-) -> StopReason:
+def _stop_reason_from_response(response: Any, content: list[ContentBlock]) -> StopReason:
     if any(isinstance(b, ToolUseBlock) for b in content):
         return "tool_use"
     if response.status == "incomplete":
         details = response.incomplete_details
         if details is not None and details.reason == "max_output_tokens":
             return "max_tokens"
+        reason = getattr(details, "reason", None) or "unknown"
+        raise IncompleteStreamError(f"Incomplete Responses response returned, reason: {reason}")
     return "end_turn"

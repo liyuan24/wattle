@@ -7,6 +7,7 @@ import io
 import json
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from typing import Any
 
 import anyio
@@ -64,9 +65,9 @@ class _FakeSSE:
         *,
         headers: dict[str, str] | None = None,
     ) -> None:
-        self._payload = "".join(
-            f"data: {json.dumps(event)}\n\n" for event in events
-        ).encode("utf-8")
+        self._payload = "".join(f"data: {json.dumps(event)}\n\n" for event in events).encode(
+            "utf-8"
+        )
         self._offset = 0
         self.headers = headers or {}
 
@@ -144,7 +145,8 @@ def test_codex_provider_builds_chatgpt_backend_request() -> None:
         session_id="session_123",
         thread_id="thread_123",
     )
-    response = _complete(provider,
+    response = _complete(
+        provider,
         CompletionRequest(
             model="gpt-5.5",
             max_tokens=512,
@@ -157,7 +159,7 @@ def test_codex_provider_builds_chatgpt_backend_request() -> None:
                     "input_schema": {"type": "object"},
                 }
             ],
-        )
+        ),
     )
     assert response.usage == {"input_tokens": 1, "output_tokens": 2, "cached_tokens": 1}
 
@@ -223,12 +225,13 @@ def test_codex_provider_reads_rate_limit_headers_into_usage() -> None:
         ),
     )
 
-    response = _complete(provider,
+    response = _complete(
+        provider,
         CompletionRequest(
             model="gpt-5.5",
             max_tokens=512,
             messages=[Message(role="user", content=[TextBlock(text="hello")])],
-        )
+        ),
     )
 
     assert response.usage == {
@@ -272,12 +275,13 @@ def test_codex_provider_reads_streamed_rate_limit_event_into_usage() -> None:
         ),
     )
 
-    response = _complete(provider,
+    response = _complete(
+        provider,
         CompletionRequest(
             model="gpt-5.5",
             max_tokens=512,
             messages=[Message(role="user", content=[TextBlock(text="hello")])],
-        )
+        ),
     )
 
     assert response.usage["quota_5h_remaining_percent"] == 72
@@ -357,12 +361,13 @@ def test_codex_provider_is_stateless_and_resends_full_history() -> None:
     )
     user_msg = Message(role="user", content=[TextBlock(text="run a tool")])
 
-    first = _complete(provider,
+    first = _complete(
+        provider,
         CompletionRequest(
             model="gpt-5.5",
             max_tokens=512,
             messages=[user_msg],
-        )
+        ),
     )
 
     first_body = json.loads(captured[0].data.decode("utf-8"))  # type: ignore[union-attr]
@@ -387,12 +392,13 @@ def test_codex_provider_is_stateless_and_resends_full_history() -> None:
         content=[ToolResultBlock(tool_use_id="call_1", content="ok")],
     )
 
-    second = _complete(provider,
+    second = _complete(
+        provider,
         CompletionRequest(
             model="gpt-5.5",
             max_tokens=512,
             messages=[user_msg, assistant_msg, user_tool_result],
-        )
+        ),
     )
 
     second_body = json.loads(captured[1].data.decode("utf-8"))  # type: ignore[union-attr]
@@ -415,7 +421,7 @@ def test_codex_provider_is_stateless_and_resends_full_history() -> None:
             "type": "function_call_output",
             "call_id": "call_1",
             "output": "ok",
-        }
+        },
     ]
     assert second.usage == {"input_tokens": 10, "output_tokens": 20}
 
@@ -483,12 +489,13 @@ def test_codex_provider_streams_text_and_tool_calls() -> None:
     )
 
     emitted = list(
-        _stream(provider,
+        _stream(
+            provider,
             CompletionRequest(
                 model="gpt-5.5",
                 max_tokens=512,
                 messages=[Message(role="user", content=[TextBlock(text="hello")])],
-            )
+            ),
         )
     )
 
@@ -531,12 +538,13 @@ def test_codex_provider_reads_sse_incrementally_by_line() -> None:
     )
 
     emitted = list(
-        _stream(provider,
+        _stream(
+            provider,
             CompletionRequest(
                 model="gpt-5.5",
                 max_tokens=512,
                 messages=[Message(role="user", content=[TextBlock(text="hello")])],
-            )
+            ),
         )
     )
 
@@ -555,9 +563,7 @@ def test_codex_provider_reads_sse_incrementally_by_line() -> None:
 def test_codex_provider_raises_retryable_error_for_incomplete_stream() -> None:
     provider = OpenAICodexResponsesProvider(
         bearer_token=_token(),
-        urlopen=lambda _req: _FakeSSE(
-            [{"type": "response.output_text.delta", "delta": "partial"}]
-        ),
+        urlopen=lambda _req: _FakeSSE([{"type": "response.output_text.delta", "delta": "partial"}]),
     )
 
     try:
@@ -575,6 +581,174 @@ def test_codex_provider_raises_retryable_error_for_incomplete_stream() -> None:
         assert "without a completion event" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected incomplete stream to raise")
+
+
+def _request() -> CompletionRequest:
+    return CompletionRequest(
+        model="gpt-5.5",
+        max_tokens=512,
+        messages=[Message(role="user", content=[TextBlock(text="hello")])],
+    )
+
+
+def _provider_for_events(events: list[dict[str, Any]]) -> OpenAICodexResponsesProvider:
+    return OpenAICodexResponsesProvider(
+        bearer_token=_token(),
+        urlopen=lambda _req: _FakeSSE(events),
+    )
+
+
+def _response_failed_error(code: str, message: str | None = None) -> dict[str, Any]:
+    error: dict[str, Any] = {"code": code}
+    if message is not None:
+        error["message"] = message
+    return {"type": "response.failed", "response": {"error": error}}
+
+
+def test_codex_provider_response_failed_overload_is_retryable() -> None:
+    provider = _provider_for_events([_response_failed_error("server_is_overloaded", "server busy")])
+
+    try:
+        _stream(provider, _request())
+    except TransientProviderError as exc:
+        assert "server busy" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("expected overload to be retryable")
+
+
+def test_codex_provider_response_failed_slow_down_is_retryable() -> None:
+    provider = _provider_for_events([_response_failed_error("slow_down", "slow down")])
+
+    try:
+        _stream(provider, _request())
+    except TransientProviderError as exc:
+        assert "slow down" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("expected slow_down to be retryable")
+
+
+def test_codex_provider_response_failed_rate_limit_parses_retry_delay() -> None:
+    provider = _provider_for_events(
+        [
+            _response_failed_error(
+                "rate_limit_exceeded",
+                "Rate limit exceeded, please try again in 2s.",
+            )
+        ]
+    )
+
+    try:
+        _stream(provider, _request())
+    except TransientProviderError as exc:
+        assert exc.retry_after == 2
+        assert "Rate limit exceeded" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("expected rate_limit_exceeded to be retryable")
+
+
+def test_codex_provider_response_failed_context_length_keeps_recovery_signal() -> None:
+    provider = _provider_for_events(
+        [_response_failed_error("context_length_exceeded", "too much context")]
+    )
+
+    try:
+        _stream(provider, _request())
+    except RuntimeError as exc:
+        assert not isinstance(exc, TransientProviderError)
+        assert "context_length_exceeded" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("expected context_length_exceeded to raise")
+
+
+def test_codex_provider_response_failed_policy_is_not_retryable() -> None:
+    provider = _provider_for_events([_response_failed_error("cyber_policy", "blocked")])
+
+    try:
+        _stream(provider, _request())
+    except RuntimeError as exc:
+        assert not isinstance(exc, TransientProviderError)
+        assert "blocked" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("expected policy error to remain non-retryable")
+
+
+def test_codex_provider_response_incomplete_unknown_reason_is_retryable() -> None:
+    provider = _provider_for_events(
+        [
+            {
+                "type": "response.incomplete",
+                "response": {
+                    "id": "resp_1",
+                    "status": "incomplete",
+                    "incomplete_details": {"reason": "content_filter"},
+                    "output": [],
+                    "usage": {"input_tokens": 1, "output_tokens": 0},
+                },
+            }
+        ]
+    )
+
+    try:
+        _stream(provider, _request())
+    except IncompleteStreamError as exc:
+        assert "content_filter" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("expected non-token incomplete response to raise")
+
+
+def test_codex_provider_http_429_rate_limit_with_retry_after_is_retryable() -> None:
+    provider = OpenAICodexResponsesProvider(
+        bearer_token=_token(),
+        urlopen=_http_error_urlopen(
+            429,
+            {"error": {"code": "rate_limit_exceeded", "message": "try again in 3s"}},
+            headers={"retry-after": "5"},
+        ),
+    )
+
+    try:
+        _stream(provider, _request())
+    except TransientProviderError as exc:
+        assert exc.status_code == 429
+        assert exc.retry_after == 5
+    else:  # pragma: no cover
+        raise AssertionError("expected retryable HTTP 429 rate limit")
+
+
+def test_codex_provider_http_429_usage_limit_is_not_retryable() -> None:
+    provider = OpenAICodexResponsesProvider(
+        bearer_token=_token(),
+        urlopen=_http_error_urlopen(
+            429,
+            {"error": {"type": "usage_limit_reached", "message": "limit reached"}},
+        ),
+    )
+
+    try:
+        _stream(provider, _request())
+    except RuntimeError as exc:
+        assert not isinstance(exc, TransientProviderError)
+        assert "limit reached" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("expected usage limit to remain non-retryable")
+
+
+def _http_error_urlopen(
+    status: int,
+    payload: dict[str, Any],
+    *,
+    headers: dict[str, str] | None = None,
+) -> Callable[[urllib.request.Request], _FakeSSE]:
+    def urlopen(_req: urllib.request.Request) -> _FakeSSE:
+        raise urllib.error.HTTPError(
+            url="https://chatgpt.com/backend-api/codex/responses",
+            code=status,
+            msg="error",
+            hdrs=headers or {},
+            fp=io.BytesIO(json.dumps(payload).encode("utf-8")),
+        )
+
+    return urlopen
 
 
 def test_codex_provider_raises_retryable_error_for_http_503() -> None:
@@ -653,12 +827,13 @@ def test_codex_provider_uses_streamed_text_when_final_output_is_empty() -> None:
         ),
     )
 
-    response = _complete(provider,
+    response = _complete(
+        provider,
         CompletionRequest(
             model="gpt-5.5",
             max_tokens=512,
             messages=[Message(role="user", content=[TextBlock(text="hello")])],
-        )
+        ),
     )
 
     assert response.stop_reason == "end_turn"
