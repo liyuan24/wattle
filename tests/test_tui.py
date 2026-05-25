@@ -2614,7 +2614,7 @@ def test_live_stream_chunk_keeps_prompt_stable_until_completion() -> None:
         content=[TextBlock(text="Hello")],
         stop_reason="end_turn",
     )
-    live.events.put((live.active_turn_id, "complete", response))
+    live.events.put((live.active_turn_id, "complete", (response, None)))
     live._drain_events()
 
     rendered = out.getvalue()
@@ -2631,9 +2631,12 @@ def test_live_provider_error_flushes_partial_output_and_keeps_prompt_usable() ->
     live.streaming = True
     live.worker = threading.Thread(target=lambda: None)
     live.active_tool_status = "running bash - pytest"
+    live.inflight_tool_results = [
+        ToolResultBlock(tool_use_id="call_1", content="completed before failure")
+    ]
 
     live.events.put((3, "stream", TextDelta(text="partial output")))
-    live.events.put((3, "error", RuntimeError("Codex error: policy warning")))
+    live.events.put((3, "error", (RuntimeError("Codex error: policy warning"), None)))
     live._drain_events()
 
     rendered = out.getvalue()
@@ -2646,6 +2649,37 @@ def test_live_provider_error_flushes_partial_output_and_keeps_prompt_usable() ->
     assert live.streaming is False
     assert live.worker is None
     assert live.active_tool_status is None
+    assert live.inflight_tool_results == []
+
+
+def test_live_complete_applies_compaction_state_before_finishing_response() -> None:
+    out = _TTYBuffer()
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+    live = tui._LiveTerminal(app)
+    live.streaming = True
+    state = tui.RuntimeCompaction(
+        summary="summary",
+        summarized_until=10,
+        first_kept_index=10,
+    )
+    response = CompletionResponse(
+        content=[TextBlock(text="done")],
+        stop_reason="end_turn",
+    )
+    seen_state: list[object] = []
+
+    def finish_response(_response: CompletionResponse) -> None:
+        seen_state.append(app._compaction_state)
+        live.streaming = False
+
+    live._finish_response = finish_response  # type: ignore[method-assign]
+
+    live.events.put((live.active_turn_id, "complete", (response, state)))
+    live._drain_events()
+
+    assert seen_state == [state]
+    assert app._compaction_state == state
 
 
 def test_live_prompt_shows_queued_messages_with_interrupt_hint() -> None:
@@ -3057,6 +3091,26 @@ def test_live_end_turn_queued_input_waits_for_assistant_turn_to_finish() -> None
     assert "after the full turn" in out.getvalue()
 
 
+def test_live_interrupt_current_turn_clears_transient_inflight_tool_results() -> None:
+    out = _TTYBuffer()
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+    live = tui._LiveTerminal(app)
+    live.streaming = True
+    live.active_turn_id = 4
+    live.inflight_tool_results = [
+        ToolResultBlock(tool_use_id="call_1", content="completed before interrupt")
+    ]
+    app.messages.append(Message(role="user", content=[TextBlock(text="refactor the TUI")]))
+
+    live._reset_provider_for_interrupt = lambda: None  # type: ignore[method-assign]
+    live._interrupt_current_turn()
+
+    assert live.streaming is False
+    assert live.inflight_tool_results == []
+    assert live.active_turn_id == 5
+
+
 def test_live_esc_interrupt_keeps_user_and_queued_messages_without_partial_assistant() -> None:
     out = _TTYBuffer()
     app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
@@ -3065,6 +3119,9 @@ def test_live_esc_interrupt_keeps_user_and_queued_messages_without_partial_assis
     live.streaming = True
     live.pending_user_inputs = ["queued followup"]
     live.stream_text = ["partial assistant text"]
+    live.inflight_tool_results = [
+        ToolResultBlock(tool_use_id="call_1", content="completed before interrupt")
+    ]
     app.messages.append(Message(role="user", content=[TextBlock(text="refactor the TUI")]))
     started: list[int] = []
 
@@ -3089,6 +3146,7 @@ def test_live_esc_interrupt_keeps_user_and_queued_messages_without_partial_assis
         interrupting="queued followup",
     )
     assert live.stream_text == []
+    assert live.inflight_tool_results == []
     rendered = out.getvalue()
     assert "Interrupted current turn; sending queued input now." in rendered
     assert "partial assistant text" not in rendered
@@ -3495,7 +3553,7 @@ def test_live_ignores_stale_stream_and_complete_events_after_interrupt() -> None
     )
 
     live.events.put((1, "stream", TextDelta(text="stale partial")))
-    live.events.put((1, "complete", stale_response))
+    live.events.put((1, "complete", (stale_response, None)))
     live._drain_events()
 
     assert [message.role for message in app.messages] == ["user"]

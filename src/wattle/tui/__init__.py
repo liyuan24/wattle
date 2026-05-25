@@ -4925,6 +4925,7 @@ class _LiveTerminal:
             self.app._persist_session()
         self.streaming = False
         self.compacting = False
+        self.inflight_tool_results = []
         self.active_tool_status = None
         self.working_started_at = None
         self.turn_started_at = None
@@ -4982,6 +4983,7 @@ class _LiveTerminal:
             STATUS_STYLE,
         )
         self.turn_started_at = None
+        self.inflight_tool_results = []
         self._append_interrupted_user_message(render=True)
         self._reset_provider_for_interrupt()
         self._start_worker()
@@ -5122,11 +5124,9 @@ class _LiveTerminal:
                     final = event.response
             if final is None:
                 raise RuntimeError("provider stream ended without StreamComplete")
-            self.events.put((turn_id, "complete", final))
+            self.events.put((turn_id, "complete", (final, preparer.state)))
         except Exception as exc:  # noqa: BLE001
-            self.events.put((turn_id, "error", exc))
-        finally:
-            self.app._compaction_state = preparer.state
+            self.events.put((turn_id, "error", (exc, preparer.state)))
 
     def _drain_events(self) -> None:
         while True:
@@ -5144,10 +5144,19 @@ class _LiveTerminal:
             elif kind == "complete":
                 self._clear_prompt()
                 self.worker = None
-                self._finish_response(cast(CompletionResponse, payload))
+                response, compaction_state = cast(
+                    tuple[CompletionResponse, RuntimeCompaction | None],
+                    payload,
+                )
+                self.app._compaction_state = compaction_state
+                self._finish_response(response)
             elif kind == "error":
                 self._clear_prompt()
-                error = cast(BaseException, payload)
+                error, compaction_state = cast(
+                    tuple[BaseException, RuntimeCompaction | None],
+                    payload,
+                )
+                self.app._compaction_state = compaction_state
                 if isinstance(error, (IncompleteStreamError, TransientProviderError)):
                     self._clear_stream_buffers()
                 else:
@@ -5156,6 +5165,7 @@ class _LiveTerminal:
                 self._remember_worked_duration()
                 self.streaming = False
                 self.compacting = False
+                self.inflight_tool_results = []
                 self.worker = None
                 self.active_tool_status = None
                 self.working_started_at = None
