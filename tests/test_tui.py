@@ -4425,6 +4425,42 @@ def test_diff_preview_marks_add_to_delete_old_new_transition() -> None:
     ]
 
 
+def test_diff_preview_marks_add_to_delete_transition_across_hidden_hunk_boundary() -> None:
+    rows = tui._diff_preview_lines(
+        [
+            "@@ -158,8 +160,36 @@",
+            "+def session_preview(record):",
+            "+    return 'preview'",
+            "+def session_search_text(entry):",
+            "+    return entry.search_text",
+            "+def list_session_entries():",
+            "+    return []",
+            "@@ -170,13 +200,53 @@",
+            "-        entries.append(SessionEntry(path=path, record=record))",
+            "+        preview = session_preview(record)",
+            "+        entries.append(SessionEntry(path=path, record=record, preview=preview))",
+        ],
+        max_changes=None,
+    )
+
+    assert rows == [
+        ("add", "  160 +def session_preview(record):"),
+        ("add", "  161 +    return 'preview'"),
+        ("add", "  162 +def session_search_text(entry):"),
+        ("add", "  163 +    return entry.search_text"),
+        ("add", "  164 +def list_session_entries():"),
+        ("add", "  165 +    return []"),
+        ("meta", tui._DIFF_CONTEXT_MARKER_ROW),
+        ("delete", "  170 -        entries.append(SessionEntry(path=path, record=record))"),
+        ("add", "  200 +        preview = session_preview(record)"),
+        (
+            "add",
+            "  201 +        entries.append("
+            "SessionEntry(path=path, record=record, preview=preview))",
+        ),
+    ]
+
+
 def test_diff_preview_added_and_deleted_files_do_not_show_old_new_marker() -> None:
     added_rows = tui._diff_preview_lines(
         [

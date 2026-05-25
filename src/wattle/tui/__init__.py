@@ -1032,7 +1032,6 @@ def _diff_preview_rows(
             if len(parts) >= 3:
                 old_line = _parse_hunk_start(parts[1])
                 new_line = _parse_hunk_start(parts[2])
-            last_visible_changed_row = None
             continue
         if line.startswith("---") or line.startswith("+++"):
             continue
