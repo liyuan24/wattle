@@ -72,6 +72,88 @@ def _slow_wattle_child_code(
     )
 
 
+def _history_tool_child_code() -> str:
+    return textwrap.dedent(
+        """
+        import argparse
+        from pathlib import Path
+
+        from wattle import session
+        from wattle.permissions import PermissionMode
+        from wattle.providers import Message, Provider, TextBlock, ToolResultBlock, ToolUseBlock
+        from wattle.tui import WattleApp, _state_from_session
+
+
+        class IdleProvider(Provider):
+            def complete(self, request):
+                raise RuntimeError("provider should not be called")
+
+            def stream(self, request):
+                raise RuntimeError("provider should not be called")
+                yield
+
+
+        record = session.SessionRecord(
+            metadata=session.SessionMetadata(
+                id="sess_tool_history_pty",
+                created_at="2026-05-09T09:00:00Z",
+                updated_at="2026-05-09T10:00:00Z",
+                cwd=str(Path.cwd()),
+            ),
+            settings=session.SessionSettings(
+                provider="openai_responses",
+                model="gpt-5.5",
+                system=None,
+                max_tokens=4096,
+            ),
+            messages=[
+                Message(role="user", content=[TextBlock(text="check feature request md")]),
+                Message(
+                    role="assistant",
+                    content=[
+                        ToolUseBlock(
+                            id="read_1",
+                            name="read",
+                            input={"path": "feature_requests.md"},
+                        )
+                    ],
+                ),
+                Message(
+                    role="user",
+                    content=[
+                        ToolResultBlock(
+                            tool_use_id="read_1",
+                            content=(
+                                "path: /tmp/project/feature_requests.md\\n"
+                                "lines: 1-1 of 1\\n"
+                                "     1\\tsearch sessions based on query"
+                            ),
+                        )
+                    ],
+                ),
+                Message(
+                    role="assistant",
+                    content=[TextBlock(text="feature_requests.md contains:")],
+                ),
+            ],
+        )
+        args = argparse.Namespace(
+            provider="openai_responses",
+            model="gpt-5.5",
+            max_tokens=4096,
+            thinking=False,
+            effort=None,
+            prompt=None,
+            persist_session=True,
+            permission_mode=PermissionMode.YOLO,
+            _resume_session_record=record,
+            _resume_session_path=Path("/tmp/sess_tool_history_pty.jsonl"),
+        )
+        raise SystemExit(WattleApp(args, IdleProvider(), state=_state_from_session(record)).run())
+        """
+    )
+
+
 def _clear_wattle_child_code() -> str:
     return textwrap.dedent(
         """
@@ -710,6 +792,35 @@ def test_pty_update_plan_renders_semantic_cell_without_tool_result(tmp_path: Pat
         assert "- [ ] Run PTY coverage" in screen_text
         assert "Plan updated" not in screen_text
         assert "update_plan ok" not in screen_text
+
+
+def test_pty_history_tool_replay_and_resize_use_semantic_rendering(tmp_path: Path) -> None:
+    with PtySession.spawn_python(
+        _history_tool_child_code(),
+        cwd=tmp_path,
+        cols=120,
+        rows=36,
+    ) as session:
+        session.read_until("Read feature_requests.md", timeout=4)
+        session.read_until("feature_requests.md contains:", timeout=4)
+
+        screen_text = session.screen.text()
+        assert "Researched" in screen_text
+        assert "Read feature_requests.md" in screen_text
+        assert "feature_requests.md contains:" in screen_text
+        assert "tool use" not in screen_text
+        assert "tool result" not in screen_text
+        assert "path: /tmp/project/feature_requests.md" not in screen_text
+
+        session.resize(cols=80, rows=36)
+        session.read_for(0.35)
+
+        resized_screen_text = session.screen.text()
+        assert "Read feature_requests.md" in resized_screen_text
+        assert "feature_requests.md contains:" in resized_screen_text
+        assert "tool use" not in resized_screen_text
+        assert "tool result" not in resized_screen_text
+        assert "path: /tmp/project/feature_requests.md" not in resized_screen_text
 
 
 def test_pty_research_tool_calls_render_aggregate(tmp_path: Path) -> None:

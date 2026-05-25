@@ -16,6 +16,14 @@ class ModelChoice:
     vendor: str
     description: str
     context_window: int | None = None
+    source_url: str = ""
+
+
+OPENAI_MODELS_URL = "https://developers.openai.com/api/docs/models/compare"
+ANTHROPIC_MODELS_URL = "https://platform.claude.com/docs/en/about-claude/models/overview"
+DEEPSEEK_MODELS_URL = "https://api-docs.deepseek.com/quick_start/pricing"
+KIMI_MODELS_URL = "https://platform.kimi.ai/docs/models"
+MINIMAX_MODELS_URL = "https://platform.minimax.io/docs/guides/text-generation"
 
 
 MODEL_CATALOG: tuple[ModelChoice, ...] = (
@@ -25,6 +33,7 @@ MODEL_CATALOG: tuple[ModelChoice, ...] = (
         vendor="openai",
         description="Frontier model for complex coding, research, and real-world work.",
         context_window=272_000,
+        source_url=OPENAI_MODELS_URL,
     ),
     ModelChoice(
         model="gpt-5.4",
@@ -32,6 +41,7 @@ MODEL_CATALOG: tuple[ModelChoice, ...] = (
         vendor="openai",
         description="Strong model for everyday coding.",
         context_window=272_000,
+        source_url=OPENAI_MODELS_URL,
     ),
     ModelChoice(
         model="gpt-5.4-mini",
@@ -39,6 +49,7 @@ MODEL_CATALOG: tuple[ModelChoice, ...] = (
         vendor="openai",
         description="Small, fast, and cost-efficient model for simpler coding tasks.",
         context_window=272_000,
+        source_url=OPENAI_MODELS_URL,
     ),
     ModelChoice(
         model="gpt-5.3-codex",
@@ -46,6 +57,7 @@ MODEL_CATALOG: tuple[ModelChoice, ...] = (
         vendor="openai",
         description="Coding-optimized model.",
         context_window=272_000,
+        source_url=OPENAI_MODELS_URL,
     ),
     ModelChoice(
         model="gpt-5.3-codex-spark",
@@ -53,6 +65,7 @@ MODEL_CATALOG: tuple[ModelChoice, ...] = (
         vendor="openai",
         description="Ultra-fast coding model.",
         context_window=128_000,
+        source_url=OPENAI_MODELS_URL,
     ),
     ModelChoice(
         model="gpt-5.2",
@@ -60,6 +73,7 @@ MODEL_CATALOG: tuple[ModelChoice, ...] = (
         vendor="openai",
         description="Optimized for professional work and long-running agents.",
         context_window=272_000,
+        source_url=OPENAI_MODELS_URL,
     ),
     ModelChoice(
         model="claude-sonnet-4-6",
@@ -67,6 +81,7 @@ MODEL_CATALOG: tuple[ModelChoice, ...] = (
         vendor="anthropic",
         description="Balanced Anthropic model for coding and agentic work.",
         context_window=1_000_000,
+        source_url=ANTHROPIC_MODELS_URL,
     ),
     ModelChoice(
         model="claude-opus-4-6",
@@ -74,6 +89,7 @@ MODEL_CATALOG: tuple[ModelChoice, ...] = (
         vendor="anthropic",
         description="Anthropic model for complex coding and deep reasoning.",
         context_window=1_000_000,
+        source_url=ANTHROPIC_MODELS_URL,
     ),
     ModelChoice(
         model="claude-haiku-4-6",
@@ -81,6 +97,7 @@ MODEL_CATALOG: tuple[ModelChoice, ...] = (
         vendor="anthropic",
         description="Fast Anthropic model for lightweight coding tasks.",
         context_window=200_000,
+        source_url=ANTHROPIC_MODELS_URL,
     ),
     ModelChoice(
         model="deepseek-v4-flash",
@@ -88,6 +105,7 @@ MODEL_CATALOG: tuple[ModelChoice, ...] = (
         vendor="deepseek",
         description="DeepSeek fast model with 1M context and tool calling.",
         context_window=1_000_000,
+        source_url=DEEPSEEK_MODELS_URL,
     ),
     ModelChoice(
         model="deepseek-v4-pro",
@@ -95,6 +113,7 @@ MODEL_CATALOG: tuple[ModelChoice, ...] = (
         vendor="deepseek",
         description="DeepSeek stronger model with 1M context and tool calling.",
         context_window=1_000_000,
+        source_url=DEEPSEEK_MODELS_URL,
     ),
     ModelChoice(
         model="kimi-k2.6",
@@ -102,6 +121,7 @@ MODEL_CATALOG: tuple[ModelChoice, ...] = (
         vendor="kimi",
         description="Moonshot Kimi flagship model for agentic coding.",
         context_window=262_144,
+        source_url=KIMI_MODELS_URL,
     ),
     ModelChoice(
         model="kimi-k2.5",
@@ -109,6 +129,7 @@ MODEL_CATALOG: tuple[ModelChoice, ...] = (
         vendor="kimi",
         description="Moonshot Kimi long-context multimodal model.",
         context_window=262_144,
+        source_url=KIMI_MODELS_URL,
     ),
     ModelChoice(
         model="MiniMax-M2.7",
@@ -116,6 +137,7 @@ MODEL_CATALOG: tuple[ModelChoice, ...] = (
         vendor="minimax",
         description="MiniMax latest OpenAI-compatible coding model.",
         context_window=204_800,
+        source_url=MINIMAX_MODELS_URL,
     ),
     ModelChoice(
         model="MiniMax-M2.7-highspeed",
@@ -123,6 +145,7 @@ MODEL_CATALOG: tuple[ModelChoice, ...] = (
         vendor="minimax",
         description="MiniMax M2.7 optimized for faster output.",
         context_window=204_800,
+        source_url=MINIMAX_MODELS_URL,
     ),
 )
 

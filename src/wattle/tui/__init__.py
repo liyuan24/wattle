@@ -3658,18 +3658,76 @@ class WattleApp:
             self._write_panel(message.role, "[empty message]", STATUS_STYLE)
             displayed = True
 
+        pending_research: list[CommandSummary] = []
+        pending_edit_group: _EditRenderGroup | None = None
+
+        def flush_research() -> None:
+            nonlocal displayed
+            if pending_research:
+                self._write_research_result(pending_research)
+                pending_research.clear()
+                displayed = True
+
+        def flush_edit_group() -> None:
+            nonlocal pending_edit_group, displayed
+            if pending_edit_group is not None:
+                self._write_edit_result_group(pending_edit_group)
+                pending_edit_group = None
+                displayed = True
+
+        def flush_semantic_groups() -> None:
+            flush_edit_group()
+            flush_research()
+
         for block in tool_uses:
             result = _matching_tool_result(next_message, block.id)
-            plan_update = (
-                _plan_update_for_success(block, result) if result is not None else None
-            )
+            if result is None:
+                flush_semantic_groups()
+                self._write_panel("tool use", tool_permission_summary(block), TOOL_TITLE_STYLE)
+                displayed = True
+                continue
+            if result.is_error:
+                flush_semantic_groups()
+                self._write_tool_result(block, result)
+                suppressed_ids.add(block.id)
+                displayed = True
+                continue
+            plan_update = _plan_update_for_success(block, result)
             if plan_update is not None:
+                flush_semantic_groups()
                 self._write_plan_update(plan_update)
                 suppressed_ids.add(block.id)
                 displayed = True
                 continue
-            self._write_panel("tool use", tool_permission_summary(block), TOOL_TITLE_STYLE)
+            edit_item = _edit_render_item(block, result)
+            if edit_item is not None:
+                flush_research()
+                if pending_edit_group is None:
+                    pending_edit_group = _EditRenderGroup(
+                        path=edit_item.path,
+                        items=[edit_item],
+                    )
+                elif pending_edit_group.path == edit_item.path:
+                    pending_edit_group.items.append(edit_item)
+                else:
+                    flush_edit_group()
+                    pending_edit_group = _EditRenderGroup(
+                        path=edit_item.path,
+                        items=[edit_item],
+                    )
+                suppressed_ids.add(block.id)
+                continue
+            summary = _research_summary_for_success(block, result)
+            if summary is not None:
+                flush_edit_group()
+                pending_research.append(summary)
+                suppressed_ids.add(block.id)
+                continue
+            flush_semantic_groups()
+            self._write_tool_result(block, result)
+            suppressed_ids.add(block.id)
             displayed = True
+        flush_semantic_groups()
         for block in tool_results:
             if block.tool_use_id in suppressed_ids:
                 continue

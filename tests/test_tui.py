@@ -499,6 +499,69 @@ def test_resumed_session_renders_saved_history_before_prompt() -> None:
     assert out.index("old question") < out.index("Goodbye.")
 
 
+def test_resumed_session_renders_tool_history_semantically() -> None:
+    record = _session_record("sess_tool_history", text="check feature request md")
+    record = session.SessionRecord(
+        metadata=record.metadata,
+        settings=record.settings,
+        messages=[
+            *record.messages,
+            Message(
+                role="assistant",
+                content=[
+                    ToolUseBlock(
+                        id="read_1",
+                        name="read",
+                        input={"path": "feature_requests.md"},
+                    )
+                ],
+            ),
+            Message(
+                role="user",
+                content=[
+                    ToolResultBlock(
+                        tool_use_id="read_1",
+                        content=(
+                            "path: /tmp/project/feature_requests.md\n"
+                            "lines: 1-1 of 1\n"
+                            "     1\tsearch sessions based on query"
+                        ),
+                    )
+                ],
+            ),
+            Message(role="assistant", content=[TextBlock(text="feature_requests.md contains:")]),
+        ],
+    )
+    args = _make_args(persist_session=True)
+    args.provider = record.settings.provider
+    args.model = record.settings.model
+    args.max_tokens = record.settings.max_tokens
+    args._resume_session_record = record
+    args._resume_session_path = Path("/tmp/sess_tool_history.jsonl")
+
+    def input_func(_prompt: str = "") -> str:
+        raise EOFError
+
+    out_buffer = io.StringIO()
+    app = tui.WattleApp(
+        args,
+        _ScriptedStreamProvider([]),
+        state=tui._state_from_session(record),
+        input_func=input_func,
+        out=out_buffer,
+    )
+    assert app.run() == 0
+    out = out_buffer.getvalue()
+
+    assert "[resumed] Loaded 4 saved message(s)" in out
+    assert "Researched" in out
+    assert "Read feature_requests.md" in out
+    assert "feature_requests.md contains:" in out
+    assert "tool use" not in out
+    assert "tool result" not in out
+    assert "path: /tmp/project/feature_requests.md" not in out
+
+
 def test_resumed_session_sends_saved_history_on_next_request() -> None:
     record = _session_record("sess_resume", text="old question")
     record = session.SessionRecord(
