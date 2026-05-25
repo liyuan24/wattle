@@ -39,6 +39,7 @@ from .base import (
     ThinkingDelta,
     ToolUseBlock,
     ToolUseDelta,
+    TransientProviderError,
 )
 
 DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api"
@@ -56,6 +57,7 @@ MINUTES_PER_HOUR = 60
 MINUTES_PER_5_HOURS = 5 * MINUTES_PER_HOUR
 MINUTES_PER_DAY = 24 * MINUTES_PER_HOUR
 MINUTES_PER_WEEK = 7 * MINUTES_PER_DAY
+RETRYABLE_HTTP_STATUS_CODES = {408, 500, 502, 503, 504}
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,7 +133,18 @@ class OpenAICodexResponsesProvider(Provider):
                 )
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(_codex_error_message(exc.code, detail)) from exc
+            error = _codex_error_message(exc.code, detail)
+            if _is_retryable_http_status(exc.code):
+                raise TransientProviderError(
+                    error,
+                    status_code=exc.code,
+                    retry_after=_retry_after_from_headers(getattr(exc, "headers", None)),
+                ) from exc
+            raise RuntimeError(error) from exc
+        except urllib.error.URLError as exc:
+            raise TransientProviderError(
+                f"Codex request failed before a response: {exc.reason}",
+            ) from exc
 
     def fetch_quota_usage(self) -> dict[str, int]:
         """Fetch current Codex usage limits without starting a model turn."""
@@ -764,3 +777,23 @@ def _codex_error_message(status: int, detail: str) -> str:
             if isinstance(message, str):
                 return message
     return f"Codex request failed with HTTP {status}: {detail}"
+
+
+def _is_retryable_http_status(status: int | None) -> bool:
+    return status in RETRYABLE_HTTP_STATUS_CODES
+
+
+def _retry_after_from_headers(headers: Any) -> float | None:
+    if headers is None:
+        return None
+    get = getattr(headers, "get", None)
+    if not callable(get):
+        return None
+    value = get("retry-after") or get("Retry-After")
+    if value is None:
+        return None
+    try:
+        retry_after = float(value)
+    except (TypeError, ValueError):
+        return None
+    return retry_after if retry_after >= 0 else None

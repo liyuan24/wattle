@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
-import anyio
 import base64
+import io
 import json
+import urllib.error
 import urllib.request
 from typing import Any
+
+import anyio
 
 from wattle.providers import (
     CompletionRequest,
@@ -20,6 +23,7 @@ from wattle.providers import (
     ToolResultBlock,
     ToolUseBlock,
     ToolUseDelta,
+    TransientProviderError,
 )
 
 
@@ -558,18 +562,76 @@ def test_codex_provider_raises_retryable_error_for_incomplete_stream() -> None:
 
     try:
         list(
-            _stream(provider,
+            _stream(
+                provider,
                 CompletionRequest(
                     model="gpt-5.5",
                     max_tokens=512,
                     messages=[Message(role="user", content=[TextBlock(text="hello")])],
-                )
+                ),
             )
         )
     except IncompleteStreamError as exc:
         assert "without a completion event" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected incomplete stream to raise")
+
+
+def test_codex_provider_raises_retryable_error_for_http_503() -> None:
+    def urlopen(_req: urllib.request.Request) -> _FakeSSE:
+        raise urllib.error.HTTPError(
+            url="https://chatgpt.com/backend-api/codex/responses",
+            code=503,
+            msg="Service Unavailable",
+            hdrs={"retry-after": "2"},
+            fp=io.BytesIO(b"upstream connect error or disconnect/reset before headers"),
+        )
+
+    provider = OpenAICodexResponsesProvider(bearer_token=_token(), urlopen=urlopen)
+
+    try:
+        _stream(
+            provider,
+            CompletionRequest(
+                model="gpt-5.5",
+                max_tokens=512,
+                messages=[Message(role="user", content=[TextBlock(text="hello")])],
+            ),
+        )
+    except TransientProviderError as exc:
+        assert exc.status_code == 503
+        assert exc.retry_after == 2
+        assert "HTTP 503" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("expected 503 to be retryable")
+
+
+def test_codex_provider_does_not_retry_auth_http_errors() -> None:
+    def urlopen(_req: urllib.request.Request) -> _FakeSSE:
+        raise urllib.error.HTTPError(
+            url="https://chatgpt.com/backend-api/codex/responses",
+            code=401,
+            msg="Unauthorized",
+            hdrs={},
+            fp=io.BytesIO(b"bad token"),
+        )
+
+    provider = OpenAICodexResponsesProvider(bearer_token=_token(), urlopen=urlopen)
+
+    try:
+        _stream(
+            provider,
+            CompletionRequest(
+                model="gpt-5.5",
+                max_tokens=512,
+                messages=[Message(role="user", content=[TextBlock(text="hello")])],
+            ),
+        )
+    except RuntimeError as exc:
+        assert not isinstance(exc, TransientProviderError)
+        assert "HTTP 401" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("expected 401 to remain non-retryable")
 
 
 def test_codex_provider_uses_streamed_text_when_final_output_is_empty() -> None:

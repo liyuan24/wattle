@@ -23,6 +23,7 @@ from wattle.providers import (
     ToolResultBlock,
     ToolUseBlock,
     ToolUseDelta,
+    TransientProviderError,
 )
 from wattle.runtime import WattleRuntime
 from wattle.tools import BashTool
@@ -501,7 +502,9 @@ def test_run_streaming_retries_incomplete_stream_without_saving_partial(
         def __init__(self) -> None:
             self.requests: list[CompletionRequest] = []
 
-        async def acomplete(self, request: CompletionRequest) -> CompletionResponse:  # pragma: no cover
+        async def acomplete(
+            self, request: CompletionRequest
+        ) -> CompletionResponse:  # pragma: no cover
             raise NotImplementedError
 
         async def astream(self, request: CompletionRequest) -> AsyncIterator[StreamEvent]:
@@ -536,6 +539,49 @@ def test_run_streaming_retries_incomplete_stream_without_saving_partial(
         "partial",
         "final",
     ]
+
+
+def test_run_streaming_retries_transient_provider_error(monkeypatch) -> None:
+    class TransientThenSuccessProvider(Provider):
+        def __init__(self) -> None:
+            self.requests: list[CompletionRequest] = []
+
+        async def acomplete(
+            self, request: CompletionRequest
+        ) -> CompletionResponse:  # pragma: no cover
+            raise NotImplementedError
+
+        async def astream(self, request: CompletionRequest) -> AsyncIterator[StreamEvent]:
+            self.requests.append(request)
+            if len(self.requests) == 1:
+                raise TransientProviderError(
+                    "Codex request failed with HTTP 503: upstream reset",
+                    status_code=503,
+                )
+            response = CompletionResponse(
+                content=[TextBlock(text="final")],
+                stop_reason="end_turn",
+            )
+            yield TextDelta(text="final")
+            yield StreamComplete(response=response)
+
+    monkeypatch.setattr(request_preparation, "_stream_retry_delay", lambda _attempt: 0.0)
+    provider = TransientThenSuccessProvider()
+    captured: list[StreamEvent] = []
+
+    result = run_streaming(
+        provider=provider,
+        tools_by_name={},
+        system=None,
+        user_input="hello",
+        model="stub-model",
+        on_event=captured.append,
+    )
+
+    assert result.content == [TextBlock(text="final")]
+    assert len(provider.requests) == 2
+    assert provider.requests[0].messages == provider.requests[1].messages
+    assert [event.text for event in captured if isinstance(event, TextDelta)] == ["final"]
 
 
 def cast_request_text(request: CompletionRequest) -> str:

@@ -322,6 +322,21 @@ class IncompleteStreamError(RuntimeError):
     """Raised when a provider stream closes before its terminal completion event."""
 
 
+class TransientProviderError(RuntimeError):
+    """Raised when retrying the same provider request can reasonably recover."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        retry_after: float | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.retry_after = retry_after
+
+
 # ---------------------------------------------------------------------------
 # Provider ABC
 # ---------------------------------------------------------------------------

@@ -11,7 +11,7 @@ import re
 import threading
 import time
 from collections import deque
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +34,7 @@ from wattle.providers import (
     ToolResultBlock,
     ToolUseBlock,
     ToolUseDelta,
+    TransientProviderError,
 )
 from wattle.tools import TOOLS_BY_NAME
 from wattle.tools.base import Tool
@@ -97,6 +98,25 @@ class _IncompleteThenSuccessStreamProvider(Provider):
             yield TextDelta(text="partial")
             raise request_preparation.IncompleteStreamError(
                 "stream closed before response.completed"
+            )
+        response = CompletionResponse(content=[TextBlock(text="final")], stop_reason="end_turn")
+        yield TextDelta(text="final")
+        yield StreamComplete(response=response)
+
+
+class _TransientThenSuccessStreamProvider(Provider):
+    def __init__(self) -> None:
+        self.requests: list[CompletionRequest] = []
+
+    async def acomplete(self, request: CompletionRequest) -> CompletionResponse:  # pragma: no cover
+        raise NotImplementedError
+
+    async def astream(self, request: CompletionRequest) -> AsyncIterator[Any]:
+        self.requests.append(request)
+        if len(self.requests) == 1:
+            raise TransientProviderError(
+                "Codex request failed with HTTP 503: upstream reset",
+                status_code=503,
             )
         response = CompletionResponse(content=[TextBlock(text="final")], stop_reason="end_turn")
         yield TextDelta(text="final")
@@ -394,10 +414,48 @@ def test_basic_tui_retries_incomplete_stream_and_reports_reconnect(
     assert provider.requests[0].messages == provider.requests[1].messages
     assert [message.role for message in app.messages] == ["user", "assistant"]
     assert app.messages[-1].content == [TextBlock(text="final")]
-    assert "partial" in out
-    assert "[status] Reconnecting... 1/3 after stream interruption." in out
+    assert "partial" not in out
+    assert "[status] Reconnecting... 1/3" in out
     assert "final" in out
     assert "Codex stream ended without" not in out
+
+
+def test_basic_tui_retries_transient_error_and_reports_reconnect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(request_preparation, "_stream_retry_delay", lambda _attempt: 0.0)
+    provider = _TransientThenSuccessStreamProvider()
+
+    out, app = _drive(provider, ["run the task", "/exit"])
+
+    assert len(provider.requests) == 2
+    assert provider.requests[0].messages == provider.requests[1].messages
+    assert [message.role for message in app.messages] == ["user", "assistant"]
+    assert app.messages[-1].content == [TextBlock(text="final")]
+    assert "[status] Reconnecting... 1/3" in out
+    assert "final" in out
+    assert "upstream reset" not in out
+
+
+def test_basic_tui_exhausted_transient_error_keeps_prompt_readable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(request_preparation, "_stream_retry_delay", lambda _attempt: 0.0)
+    provider = _RaisingStreamProvider(
+        TransientProviderError(
+            "Codex request failed with HTTP 503: upstream reset",
+            status_code=503,
+        )
+    )
+
+    out, app = _drive(provider, ["run the task", "/exit"])
+
+    assert len(provider.requests) == 4
+    assert [message.role for message in app.messages] == ["user"]
+    assert out.count("[status] Reconnecting...") == 3
+    assert "[error] Temporary provider error after retries:" in out
+    assert "Conversation history and completed tool results were kept." in out
+    assert "Goodbye." in out
 
 
 def _session_record(
@@ -4545,10 +4603,10 @@ def test_diff_preview_keeps_intra_hunk_context_visible_between_change_blocks() -
             "+    max_tokens: int = 4096,",
             "+    permission_mode: PermissionMode = PermissionMode.YOLO,",
             "+    thinking: bool = False,",
-            "+    effort: Literal[\"low\", \"medium\", \"high\", \"xhigh\", \"max\"] | None = None,",
+            "+    effort: Literal[\"low\", \"medium\", \"high\", \"xhigh\", \"max\"] | None = None,",  # noqa: E501
             "+) -> AgentRunResult:",
             "+    \"\"\"Async headless agent runner returning the full transcript.\"\"\"",
-            "     provider, built_system = _build_provider_and_system(provider_name, permission_mode)",
+            "     provider, built_system = _build_provider_and_system(provider_name, permission_mode)",  # noqa: E501
             "     messages: list[Message] = []",
             "-",
             "-    if permission_mode == PermissionMode.YOLO:",

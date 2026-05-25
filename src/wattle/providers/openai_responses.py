@@ -108,6 +108,7 @@ from .base import (
     ToolResultBlock,
     ToolUseBlock,
     ToolUseDelta,
+    TransientProviderError,
 )
 
 _ERROR_PREFIX = "[error] "
@@ -115,6 +116,7 @@ _ERROR_PREFIX = "[error] "
 _LOW_THRESHOLD = 2048
 _MEDIUM_THRESHOLD = 8192
 _HIGH_THRESHOLD = 32768
+_RETRYABLE_STATUS_CODES = {408, 500, 502, 503, 504}
 
 
 def _budget_to_effort(budget: int) -> Literal["low", "medium", "high", "xhigh"]:
@@ -172,7 +174,11 @@ class OpenAIResponsesProvider(Provider):
 
     async def acomplete(self, request: CompletionRequest) -> CompletionResponse:
         kwargs = self._build_kwargs(request)
-        response = await _maybe_await(self.async_client.responses.create(**kwargs))
+        try:
+            response = await _maybe_await(self.async_client.responses.create(**kwargs))
+        except Exception as exc:
+            _raise_transient_openai_error(exc)
+            raise
         completion = _completion_from_response(response)
         self._advance_state(response, request)
         return completion
@@ -195,38 +201,42 @@ class OpenAIResponsesProvider(Provider):
         # narrow via attribute access. Stubs for these types are gappy.
         final_response: Any = None
 
-        stream = await _maybe_await(self.async_client.responses.create(**kwargs))
-        async for event in _aiter(stream):
-            etype = event.type
-            if etype == "response.output_text.delta":
-                yield TextDelta(text=event.delta)
-            elif etype in (
-                "response.reasoning_summary_text.delta",
-                "response.reasoning_text.delta",
-            ):
-                yield ThinkingDelta(thinking=event.delta)
-            elif etype == "response.output_item.added":
-                item = event.item
-                if item.type == "function_call":
-                    current_call_id = item.call_id
+        try:
+            stream = await _maybe_await(self.async_client.responses.create(**kwargs))
+            async for event in _aiter(stream):
+                etype = event.type
+                if etype == "response.output_text.delta":
+                    yield TextDelta(text=event.delta)
+                elif etype in (
+                    "response.reasoning_summary_text.delta",
+                    "response.reasoning_text.delta",
+                ):
+                    yield ThinkingDelta(thinking=event.delta)
+                elif etype == "response.output_item.added":
+                    item = event.item
+                    if item.type == "function_call":
+                        current_call_id = item.call_id
+                        yield ToolUseDelta(
+                            id=item.call_id,
+                            name=item.name,
+                            partial_json=None,
+                        )
+                elif etype == "response.function_call_arguments.delta":
+                    # The SDK doesn't put `call_id` directly on this event; we
+                    # track it via the most recent function_call start.
+                    assert current_call_id is not None
                     yield ToolUseDelta(
-                        id=item.call_id,
-                        name=item.name,
-                        partial_json=None,
+                        id=current_call_id,
+                        name=None,
+                        partial_json=event.delta,
                     )
-            elif etype == "response.function_call_arguments.delta":
-                # The SDK doesn't put `call_id` directly on this event; we
-                # track it via the most recent function_call start.
-                assert current_call_id is not None
-                yield ToolUseDelta(
-                    id=current_call_id,
-                    name=None,
-                    partial_json=event.delta,
-                )
-            elif etype == "response.completed":
-                final_response = event.response
-            # Other events (in_progress, content_part_added, item_done,
-            # etc.) carry no Wattle-visible signal during streaming.
+                elif etype == "response.completed":
+                    final_response = event.response
+                # Other events (in_progress, content_part_added, item_done,
+                # etc.) carry no Wattle-visible signal during streaming.
+        except Exception as exc:
+            _raise_transient_openai_error(exc)
+            raise
 
         if final_response is None:
             raise IncompleteStreamError(
@@ -305,6 +315,58 @@ async def _aiter(iterable: Any) -> AsyncIterator[Any]:
         return
     for item in iterable:
         yield item
+
+
+def _raise_transient_openai_error(exc: BaseException) -> None:
+    status_code = _status_code_from_exception(exc)
+    if status_code in _RETRYABLE_STATUS_CODES:
+        raise TransientProviderError(
+            str(exc) or type(exc).__name__,
+            status_code=status_code,
+            retry_after=_retry_after_from_exception(exc),
+        ) from exc
+
+    retryable_types = tuple(
+        typ
+        for typ in (
+            getattr(openai, "APIConnectionError", None),
+            getattr(openai, "APITimeoutError", None),
+            getattr(openai, "InternalServerError", None),
+        )
+        if isinstance(typ, type)
+    )
+    if retryable_types and isinstance(exc, retryable_types):
+        raise TransientProviderError(
+            str(exc) or type(exc).__name__,
+            status_code=status_code,
+            retry_after=_retry_after_from_exception(exc),
+        ) from exc
+
+
+def _status_code_from_exception(exc: BaseException) -> int | None:
+    for attr in ("status_code", "status", "code"):
+        value = getattr(exc, attr, None)
+        if isinstance(value, int):
+            return value
+    response = getattr(exc, "response", None)
+    value = getattr(response, "status_code", None)
+    return value if isinstance(value, int) else None
+
+
+def _retry_after_from_exception(exc: BaseException) -> float | None:
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None)
+    get = getattr(headers, "get", None)
+    if not callable(get):
+        return None
+    value = get("retry-after") or get("Retry-After")
+    if value is None:
+        return None
+    try:
+        retry_after = float(value)
+    except (TypeError, ValueError):
+        return None
+    return retry_after if retry_after >= 0 else None
 
 
 

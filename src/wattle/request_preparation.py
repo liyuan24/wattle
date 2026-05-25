@@ -28,11 +28,13 @@ from wattle.providers import (
     Message,
     Provider,
     StreamEvent,
+    TransientProviderError,
 )
 from wattle.session import message_to_dict
 
 DEFAULT_STREAM_MAX_RETRIES = 3
 
+type RetryableProviderError = IncompleteStreamError | TransientProviderError
 type StreamRetryCallback = Callable[[int, int, BaseException, float], None]
 
 
@@ -193,10 +195,10 @@ async def _acomplete_prepared_with_retries(
     for failures in range(preparer.stream_max_retries + 1):
         try:
             return await preparer.provider.acomplete(request)
-        except IncompleteStreamError as exc:
+        except (IncompleteStreamError, TransientProviderError) as exc:
             if failures >= preparer.stream_max_retries:
                 raise
-            delay = _stream_retry_delay(failures + 1)
+            delay = _retry_delay_for_error(failures + 1, exc)
             _notify_stream_retry(preparer, failures + 1, exc, delay)
             await asyncio.sleep(delay)
     raise AssertionError("unreachable")
@@ -211,12 +213,18 @@ async def _astream_prepared_with_retries(
             async for event in preparer.provider.astream(request):
                 yield event
             return
-        except IncompleteStreamError as exc:
+        except (IncompleteStreamError, TransientProviderError) as exc:
             if failures >= preparer.stream_max_retries:
                 raise
-            delay = _stream_retry_delay(failures + 1)
+            delay = _retry_delay_for_error(failures + 1, exc)
             _notify_stream_retry(preparer, failures + 1, exc, delay)
             await asyncio.sleep(delay)
+
+
+def _retry_delay_for_error(attempt: int, error: RetryableProviderError) -> float:
+    if isinstance(error, TransientProviderError) and error.retry_after is not None:
+        return min(30.0, error.retry_after)
+    return _stream_retry_delay(attempt)
 
 
 def _stream_retry_delay(attempt: int) -> float:
@@ -226,7 +234,7 @@ def _stream_retry_delay(attempt: int) -> float:
 def _notify_stream_retry(
     preparer: RequestPreparer,
     attempt: int,
-    exc: IncompleteStreamError,
+    exc: RetryableProviderError,
     delay: float,
 ) -> None:
     if preparer.on_stream_retry is not None:

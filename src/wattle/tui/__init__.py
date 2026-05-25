@@ -71,6 +71,7 @@ from wattle.providers import (
     CompletionResponse,
     ContentBlock,
     ImageBlock,
+    IncompleteStreamError,
     Message,
     OpenAICodexResponsesProvider,
     Provider,
@@ -82,6 +83,7 @@ from wattle.providers import (
     ToolResultBlock,
     ToolUseBlock,
     ToolUseDelta,
+    TransientProviderError,
 )
 from wattle.request_preparation import (
     RequestPreparer,
@@ -1861,6 +1863,13 @@ def _cached_tokens_from_usage(usage: dict[str, int]) -> int:
 
 
 def _turn_error_text(error: BaseException) -> str:
+    if isinstance(error, TransientProviderError):
+        text = str(error).strip() or "temporary provider error"
+        return (
+            f"Temporary provider error after retries: {text}\n"
+            "Conversation history and completed tool results were kept. "
+            "Send another message to retry."
+        )
     text = str(error).strip()
     if text:
         return text
@@ -2719,7 +2728,7 @@ class WattleApp:
     ) -> None:
         self._write_panel(
             "status",
-            f"Reconnecting... {attempt}/{max_retries} after stream interruption.",
+            f"Reconnecting... {attempt}/{max_retries}",
             STATUS_STYLE,
         )
 
@@ -2742,6 +2751,22 @@ class WattleApp:
             text_buffer.clear()
             in_text = False
 
+        previous_retry_callback = preparer.on_stream_retry
+
+        def on_retry(
+            attempt: int,
+            max_retries: int,
+            exc: BaseException,
+            delay: float,
+        ) -> None:
+            nonlocal in_text, wrote_content
+            text_buffer.clear()
+            in_text = False
+            wrote_content = False
+            if previous_retry_callback is not None:
+                previous_retry_callback(attempt, max_retries, exc, delay)
+
+        preparer.on_stream_retry = on_retry
         try:
             async for event in astream_with_recovery(preparer, self.messages):
                 if isinstance(event, TextDelta):
@@ -2772,6 +2797,7 @@ class WattleApp:
                 elif isinstance(event, StreamComplete):
                     final_response = event.response
         finally:
+            preparer.on_stream_retry = previous_retry_callback
             self._compaction_state = preparer.state
 
         flush_text_buffer()
@@ -5121,8 +5147,12 @@ class _LiveTerminal:
                 self._finish_response(cast(CompletionResponse, payload))
             elif kind == "error":
                 self._clear_prompt()
-                self._flush_stream_buffer()
-                self.app._write_turn_error(cast(BaseException, payload))
+                error = cast(BaseException, payload)
+                if isinstance(error, (IncompleteStreamError, TransientProviderError)):
+                    self._clear_stream_buffers()
+                else:
+                    self._flush_stream_buffer()
+                self.app._write_turn_error(error)
                 self._remember_worked_duration()
                 self.streaming = False
                 self.compacting = False
@@ -5139,7 +5169,7 @@ class _LiveTerminal:
                 self._draw_prompt()
             elif kind == "stream_retry":
                 self._clear_prompt()
-                self._flush_stream_buffer()
+                self._clear_stream_buffers()
                 attempt, max_retries, exc, delay = cast(
                     tuple[int, int, BaseException, float],
                     payload,

@@ -7,11 +7,11 @@ Responses API wire shape.
 
 from __future__ import annotations
 
-import anyio
 import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import anyio
 import pytest
 
 from wattle.providers import (
@@ -27,6 +27,7 @@ from wattle.providers import (
     ToolResultBlock,
     ToolUseBlock,
     ToolUseDelta,
+    TransientProviderError,
 )
 
 
@@ -1006,6 +1007,33 @@ def _stream_responses_provider(
     client = MagicMock()
     client.responses.create.return_value = iter(events)
     return OpenAIResponsesProvider(async_client=client), client
+
+
+class _FakeStatusError(Exception):
+    def __init__(self, status_code: int, message: str) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+def test_stream_create_503_is_retryable() -> None:
+    client = MagicMock()
+    client.responses.create.side_effect = _FakeStatusError(503, "upstream reset")
+    provider = OpenAIResponsesProvider(async_client=client)
+
+    try:
+        _stream(
+            provider,
+            CompletionRequest(
+                model="gpt-5",
+                max_tokens=64,
+                messages=[Message(role="user", content=[TextBlock(text="hi")])],
+            ),
+        )
+    except TransientProviderError as exc:
+        assert exc.status_code == 503
+        assert "upstream reset" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("expected 503 to be retryable")
 
 
 def test_stream_text_only_emits_deltas_then_complete() -> None:

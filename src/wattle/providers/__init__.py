@@ -26,6 +26,7 @@ from .base import (
     ToolResultBlock,
     ToolUseBlock,
     ToolUseDelta,
+    TransientProviderError,
 )
 from .openai_codex import OpenAICodexResponsesProvider
 from .openai_completions import OpenAICompletionsProvider
@@ -57,4 +58,5 @@ __all__ = [
     "ToolResultBlock",
     "ToolUseBlock",
     "ToolUseDelta",
+    "TransientProviderError",
 ]
