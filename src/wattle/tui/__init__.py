@@ -4242,7 +4242,7 @@ class _LiveTerminal:
         self.stream_text: list[str] = []
         self.stream_thinking: list[str] = []
         self.stream_tool_names: list[str] = []
-        self.inflight_tool_results: list[ContentBlock] = []
+        self.inflight_tool_results: list[ToolResultBlock] = []
         self.active_tool_status: str | None = None
         self.active_turn_id = 0
         self.model_picker_choices: list[ModelChoice] | None = None
@@ -5336,8 +5336,8 @@ class _LiveTerminal:
             if not isinstance(block, ToolUseBlock):
                 continue
             blocks = self._dispatch_tool_with_animated_prompt(block)
-            self.inflight_tool_results.extend(blocks)
             result = _first_tool_result(block, blocks)
+            self.inflight_tool_results.append(result)
             edit_item = _edit_render_item(block, result)
             summary = _research_summary_for_success(block, result)
             if edit_item is not None:

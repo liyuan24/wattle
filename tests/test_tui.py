@@ -3111,6 +3111,33 @@ def test_live_interrupt_current_turn_clears_transient_inflight_tool_results() ->
     assert live.active_turn_id == 5
 
 
+def test_live_inflight_resize_replay_tracks_only_tool_results() -> None:
+    out = _TTYBuffer()
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+    live = tui._LiveTerminal(app)
+    tool_result = ToolResultBlock(tool_use_id="call_1", content="image attached")
+    image = ImageBlock(
+        path="/tmp/image.png",
+        media_type="image/png",
+        filename="image.png",
+        size_bytes=12,
+    )
+    response = CompletionResponse(
+        content=[ToolUseBlock(id="call_1", name="image", input={})],
+        stop_reason="tool_use",
+    )
+
+    live._dispatch_tool_with_animated_prompt = lambda _block: [  # type: ignore[method-assign]
+        tool_result,
+        image,
+    ]
+    returned = live._dispatch_tools_with_prompt(response)
+
+    assert returned == [tool_result, image]
+    assert live.inflight_tool_results == [tool_result]
+
+
 def test_live_esc_interrupt_keeps_user_and_queued_messages_without_partial_assistant() -> None:
     out = _TTYBuffer()
     app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
