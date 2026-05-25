@@ -4439,7 +4439,7 @@ def test_diff_preview_simple_replacement_keeps_changed_line_rows() -> None:
     assert rows == [("delete", "  100 -old"), ("add", "  100 +new")]
 
 
-def test_diff_preview_marks_add_to_delete_old_new_transition() -> None:
+def test_diff_preview_renders_context_and_monotonic_line_numbers() -> None:
     rows = tui._diff_preview_lines(
         [
             "@@ -10,4 +10,8 @@",
@@ -4455,16 +4455,17 @@ def test_diff_preview_marks_add_to_delete_old_new_transition() -> None:
     )
 
     assert rows == [
+        ("context", "   10  context"),
         ("add", "   11 +added 1"),
         ("add", "   12 +added 2"),
         ("add", "   13 +added 3"),
         ("add", "   14 +added 4"),
-        ("meta", tui._DIFF_CONTEXT_MARKER_ROW),
-        ("delete", "   11 -removed"),
+        ("delete", "   14 -removed"),
+        ("context", "   15  after"),
     ]
 
 
-def test_diff_preview_marks_add_to_delete_transition_across_hidden_hunk_boundary() -> None:
+def test_diff_preview_marks_non_contiguous_hunk_boundary() -> None:
     rows = tui._diff_preview_lines(
         [
             "@@ -158,8 +160,36 @@",
