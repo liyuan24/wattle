@@ -319,6 +319,38 @@ def test_build_provider_wires_openai_responses_api_key() -> None:
     assert provider is fake_provider
 
 
+def test_build_provider_wires_xiaomi_token_plan_api_key() -> None:
+    fake_client = object()
+    fake_provider = object()
+
+    with (
+        patch.object(
+            cli,
+            "get_api_key_credential",
+            return_value=AuthCredential(
+                kind="api_key",
+                bearer_token="fake-xiaomi-key",
+                source="test",
+            ),
+        ) as gc,
+        patch.object(cli, "get_credential") as generic_gc,
+        patch.object(cli.openai, "AsyncOpenAI", return_value=fake_client) as openai_client,
+        patch.object(
+            cli, "OpenAICompletionsProvider", return_value=fake_provider
+        ) as provider_factory,
+    ):
+        provider = cli._build_provider("xiaomi-token-plan-sgp")
+
+    gc.assert_called_once_with("xiaomi-token-plan-sgp")
+    generic_gc.assert_not_called()
+    openai_client.assert_called_once_with(
+        api_key="fake-xiaomi-key",
+        base_url="https://token-plan-sgp.xiaomimimo.com/v1",
+    )
+    provider_factory.assert_called_once_with(async_client=fake_client)
+    assert provider is fake_provider
+
+
 def test_headless_calls_run_agent_and_prints_final_text(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

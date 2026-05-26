@@ -41,6 +41,7 @@ PROVIDER_TO_VENDOR: dict[str, str] = {
     "deepseek": "deepseek",
     "kimi": "kimi",
     "minimax": "minimax",
+    "xiaomi-token-plan-sgp": "xiaomi-token-plan-sgp",
     "openai_codex": "openai",
     "openai_completions": "openai",
     "openai_responses": "openai",
@@ -106,6 +107,14 @@ _PROVIDER_DISPATCH: dict[str, _DispatchSpec] = {
         ),
         provider_factory=lambda client: OpenAICompletionsProvider(async_client=client),
     ),
+    "xiaomi-token-plan-sgp": _ProviderSpec[openai.AsyncOpenAI](
+        vendor="xiaomi-token-plan-sgp",
+        client_factory=lambda key: openai.AsyncOpenAI(
+            api_key=key,
+            base_url="https://token-plan-sgp.xiaomimimo.com/v1",
+        ),
+        provider_factory=lambda client: OpenAICompletionsProvider(async_client=client),
+    ),
     "openai_codex": _ProviderSpec[str](
         vendor="openai",
         client_factory=lambda key: key,
@@ -122,6 +131,14 @@ _PROVIDER_DISPATCH: dict[str, _DispatchSpec] = {
         provider_factory=lambda client: OpenAIResponsesProvider(async_client=client),
     ),
 }
+
+_API_KEY_ONLY_PROVIDERS = frozenset(
+    {
+        "openai_completions",
+        "openai_responses",
+        "xiaomi-token-plan-sgp",
+    }
+)
 
 # Sanity: keep the public mapping in lockstep with the internal dispatch.
 assert {name: spec.vendor for name, spec in _PROVIDER_DISPATCH.items()} == PROVIDER_TO_VENDOR
@@ -149,7 +166,7 @@ def _build_provider_and_system(
 
     if provider_name == "openai_codex":
         credential = get_openai_codex_credential()
-    elif provider_name in {"openai_completions", "openai_responses"}:
+    elif provider_name in _API_KEY_ONLY_PROVIDERS:
         credential = get_api_key_credential(spec.vendor)
     else:
         credential = get_credential(spec.vendor)

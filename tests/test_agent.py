@@ -71,6 +71,7 @@ def test_provider_to_vendor_mapping_is_exact() -> None:
         "deepseek": "deepseek",
         "kimi": "kimi",
         "minimax": "minimax",
+        "xiaomi-token-plan-sgp": "xiaomi-token-plan-sgp",
         "openai_codex": "openai",
         "openai_completions": "openai",
         "openai_responses": "openai",
@@ -346,6 +347,52 @@ def test_run_agent_with_history_returns_response_messages_and_system() -> None:
     assert mock_run.call_args.kwargs["messages_out"] == captured_messages
 
 
+def test_xiaomi_token_plan_provider_wires_api_key_and_base_url(
+    loop_run_sentinel: MagicMock,
+) -> None:
+    fake_client = object()
+    fake_provider = object()
+
+    with (
+        patch.object(
+            agent,
+            "get_api_key_credential",
+            return_value=AuthCredential(
+                kind="api_key",
+                bearer_token="fake-xiaomi-key",
+                source="test",
+            ),
+        ) as gc,
+        patch.object(agent, "get_credential") as generic_gc,
+        patch.object(agent.anthropic, "AsyncAnthropic") as anth,
+        patch.object(agent.openai, "AsyncOpenAI", return_value=fake_client) as oa,
+        patch.object(agent, "AnthropicProvider") as ap,
+        patch.object(agent, "OpenAICodexResponsesProvider") as xp,
+        patch.object(
+            agent, "OpenAICompletionsProvider", return_value=fake_provider
+        ) as cp,
+        patch.object(agent, "OpenAIResponsesProvider") as rp,
+    ):
+        result = run_agent(
+            "xiaomi-token-plan-sgp",
+            model="gpt-5.5",
+            user_input="hello",
+        )
+
+    gc.assert_called_once_with("xiaomi-token-plan-sgp")
+    generic_gc.assert_not_called()
+    oa.assert_called_once_with(
+        api_key="fake-xiaomi-key",
+        base_url="https://token-plan-sgp.xiaomimimo.com/v1",
+    )
+    cp.assert_called_once_with(async_client=fake_client)
+    anth.assert_not_called()
+    ap.assert_not_called()
+    xp.assert_not_called()
+    rp.assert_not_called()
+    assert result is loop_run_sentinel.sentinel
+
+
 def test_unknown_provider_raises_valueerror_with_helpful_message() -> None:
     with pytest.raises(ValueError) as excinfo:
         run_agent("anthropik", model="x", user_input="hi")  # typo
@@ -358,6 +405,7 @@ def test_unknown_provider_raises_valueerror_with_helpful_message() -> None:
         "deepseek",
         "kimi",
         "minimax",
+        "xiaomi-token-plan-sgp",
         "openai_codex",
         "openai_completions",
         "openai_responses",

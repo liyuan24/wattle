@@ -21,6 +21,26 @@ def auth_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Point wattle.auth.AUTH_PATH at tmp_path/auth.json and return the path."""
     path = tmp_path / "auth.json"
     monkeypatch.setattr(auth, "AUTH_PATH", path)
+    for vendor in (
+        "anthropic",
+        "deepseek",
+        "kimi",
+        "minimax",
+        "openai",
+        "xiaomi-token-plan-sgp",
+    ):
+        for env_var in auth.api_key_env_vars(vendor):
+            monkeypatch.delenv(env_var, raising=False)
+    for env_var in (
+        "MOONSHOT_API_KEY",
+        "WATTLE_ANTHROPIC_API_KEY",
+        "WATTLE_DEEPSEEK_API_KEY",
+        "WATTLE_KIMI_API_KEY",
+        "WATTLE_MINIMAX_API_KEY",
+        "WATTLE_OPENAI_API_KEY",
+        "WATTLE_XIAOMI_TOKEN_PLAN_SGP_API_KEY",
+    ):
+        monkeypatch.delenv(env_var, raising=False)
     return path
 
 
@@ -159,6 +179,103 @@ def test_get_api_key_credential_rejects_oauth_only_vendor(auth_file: Path) -> No
 
     with pytest.raises(KeyError, match="api_key.*required"):
         auth.get_api_key_credential("openai")
+
+
+def test_api_key_env_vars_use_explicit_supported_provider_names() -> None:
+    assert auth.api_key_env_vars("anthropic") == ("ANTHROPIC_API_KEY",)
+    assert auth.api_key_env_vars("deepseek") == ("DEEPSEEK_API_KEY",)
+    assert auth.api_key_env_vars("kimi") == ("KIMI_API_KEY",)
+    assert auth.api_key_env_vars("minimax") == ("MINIMAX_API_KEY",)
+    assert auth.api_key_env_vars("openai") == ("OPENAI_API_KEY",)
+    assert auth.api_key_env_vars("xiaomi-token-plan-sgp") == ("XIAOMI_TOKEN_PLAN_SGP_API_KEY",)
+
+
+@pytest.mark.parametrize(
+    ("vendor", "env_var"),
+    [
+        ("anthropic", "ANTHROPIC_API_KEY"),
+        ("deepseek", "DEEPSEEK_API_KEY"),
+        ("kimi", "KIMI_API_KEY"),
+        ("minimax", "MINIMAX_API_KEY"),
+        ("openai", "OPENAI_API_KEY"),
+        ("xiaomi-token-plan-sgp", "XIAOMI_TOKEN_PLAN_SGP_API_KEY"),
+    ],
+)
+def test_get_api_key_credential_uses_env_when_auth_file_missing(
+    vendor: str,
+    env_var: str,
+    auth_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert not auth_file.exists()
+    monkeypatch.setenv(env_var, "env-key")
+
+    credential = auth.get_api_key_credential(vendor)
+
+    assert credential.kind == "api_key"
+    assert credential.bearer_token == "env-key"
+    assert credential.source == f"environment variable {env_var}"
+
+
+@pytest.mark.parametrize(
+    ("vendor", "env_var"),
+    [
+        ("anthropic", "WATTLE_ANTHROPIC_API_KEY"),
+        ("deepseek", "WATTLE_DEEPSEEK_API_KEY"),
+        ("kimi", "MOONSHOT_API_KEY"),
+        ("kimi", "WATTLE_KIMI_API_KEY"),
+        ("minimax", "WATTLE_MINIMAX_API_KEY"),
+        ("openai", "WATTLE_OPENAI_API_KEY"),
+        ("xiaomi-token-plan-sgp", "WATTLE_XIAOMI_TOKEN_PLAN_SGP_API_KEY"),
+    ],
+)
+def test_secondary_env_var_aliases_are_not_supported(
+    vendor: str,
+    env_var: str,
+    auth_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert not auth_file.exists()
+    monkeypatch.setenv(env_var, "env-key")
+
+    with pytest.raises(FileNotFoundError):
+        auth.get_api_key_credential(vendor)
+
+
+def test_get_api_key_credential_prefers_auth_json_over_env(
+    auth_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    auth_file.write_text(
+        json.dumps(
+            {
+                "xiaomi-token-plan-sgp": {
+                    "api_key": {"api_key": "tp-file-key"},
+                }
+            }
+        )
+    )
+    monkeypatch.setenv("XIAOMI_TOKEN_PLAN_SGP_API_KEY", "tp-env-key")
+
+    credential = auth.get_api_key_credential("xiaomi-token-plan-sgp")
+
+    assert credential.bearer_token == "tp-file-key"
+    assert credential.source == f"{auth_file} xiaomi-token-plan-sgp.api_key"
+
+
+def test_save_api_key_credential_writes_nested_entry_and_preserves_methods(
+    auth_file: Path,
+) -> None:
+    token = _jwt_with_exp(2_000_000_000)
+    auth_file.write_text(json.dumps({"openai": {"oauth": {"access_token": token}}}))
+
+    credential = auth.save_api_key_credential("xiaomi-token-plan-sgp", " tp-saved-key ")
+
+    assert credential.kind == "api_key"
+    assert credential.bearer_token == "tp-saved-key"
+    data = json.loads(auth_file.read_text())
+    assert data["openai"]["oauth"]["access_token"] == token
+    assert data["xiaomi-token-plan-sgp"]["api_key"]["api_key"] == "tp-saved-key"
 
 
 def test_get_credential_accepts_legacy_explicit_oauth_over_api_key(

@@ -80,6 +80,14 @@ _PROVIDER_DISPATCH: dict[str, _DispatchSpec] = {
         ),
         provider_factory=lambda client: OpenAICompletionsProvider(async_client=client),
     ),
+    "xiaomi-token-plan-sgp": _ProviderSpec[openai.AsyncOpenAI](
+        vendor="xiaomi-token-plan-sgp",
+        client_factory=lambda key: openai.AsyncOpenAI(
+            api_key=key,
+            base_url="https://token-plan-sgp.xiaomimimo.com/v1",
+        ),
+        provider_factory=lambda client: OpenAICompletionsProvider(async_client=client),
+    ),
     "openai_codex": _ProviderSpec[str](
         vendor="openai",
         client_factory=lambda key: key,
@@ -97,6 +105,14 @@ _PROVIDER_DISPATCH: dict[str, _DispatchSpec] = {
     ),
 }
 
+_API_KEY_ONLY_PROVIDERS = frozenset(
+    {
+        "openai_completions",
+        "openai_responses",
+        "xiaomi-token-plan-sgp",
+    }
+)
+
 
 def _build_provider(provider_name: str) -> Provider:
     """Resolve a provider name to a fully-wired Provider instance."""
@@ -108,7 +124,7 @@ def _build_provider(provider_name: str) -> Provider:
         )
     if provider_name == "openai_codex":
         credential = get_openai_codex_credential()
-    elif provider_name in {"openai_completions", "openai_responses"}:
+    elif provider_name in _API_KEY_ONLY_PROVIDERS:
         credential = get_api_key_credential(spec.vendor)
     else:
         credential = get_credential(spec.vendor)
@@ -122,7 +138,7 @@ def _provider_auth_available(provider_name: str) -> bool:
     try:
         if provider_name == "openai_codex":
             get_openai_codex_credential()
-        elif provider_name in {"openai_completions", "openai_responses"}:
+        elif provider_name in _API_KEY_ONLY_PROVIDERS:
             get_api_key_credential(spec.vendor)
         else:
             get_credential(spec.vendor)

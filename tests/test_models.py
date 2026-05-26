@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from wattle import models, request_preparation
+from pathlib import Path
+
+import pytest
+
+from wattle import auth, models, request_preparation
 
 
 def test_model_catalog_includes_context_windows() -> None:
@@ -67,6 +71,31 @@ def test_available_model_choices_includes_openai_compatible_vendors(
     choices = models.available_model_choices()
     by_model = {choice.model: choice for choice in choices}
 
+    assert by_model["deepseek-v4-flash"].provider == "deepseek"
+    assert by_model["kimi-k2.6"].provider == "kimi"
+    assert by_model["MiniMax-M2.7"].provider == "minimax"
+    assert "gpt-5.5" not in by_model
+
+
+def test_available_model_choices_uses_provider_native_env_vars(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(auth, "AUTH_PATH", tmp_path / "missing-auth.json")
+    for vendor in ("anthropic", "deepseek", "kimi", "minimax", "openai"):
+        for env_var in auth.api_key_env_vars(vendor):
+            monkeypatch.delenv(env_var, raising=False)
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-env")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-deepseek-env")
+    monkeypatch.setenv("KIMI_API_KEY", "sk-kimi-env")
+    monkeypatch.setenv("MINIMAX_API_KEY", "sk-minimax-env")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-env")
+
+    choices = models.available_model_choices()
+    by_model = {choice.model: choice for choice in choices}
+
+    assert by_model["claude-sonnet-4-6"].provider == "anthropic"
     assert by_model["deepseek-v4-flash"].provider == "deepseek"
     assert by_model["kimi-k2.6"].provider == "kimi"
     assert by_model["MiniMax-M2.7"].provider == "minimax"

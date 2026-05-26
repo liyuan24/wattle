@@ -18,6 +18,9 @@ Canonical file format::
       "minimax": {
         "api_key": {"api_key": "sk-..."}
       },
+      "xiaomi-token-plan-sgp": {
+        "api_key": {"api_key": "tp-..."}
+      },
       "openai": {
         "oauth": {
           "access_token": "...",
@@ -47,6 +50,7 @@ import contextlib
 import hashlib
 import html
 import json
+import os
 import queue
 import secrets
 import threading
@@ -85,6 +89,7 @@ _EXPECTED_SHAPE = (
     '  "deepseek": {"api_key": {"api_key": "sk-..."}},\n'
     '  "kimi": {"api_key": {"api_key": "sk-..."}},\n'
     '  "minimax": {"api_key": {"api_key": "sk-..."}},\n'
+    '  "xiaomi-token-plan-sgp": {"api_key": {"api_key": "tp-..."}},\n'
     '  "openai": {"oauth": {"access_token": "...", "refresh_token": "..."}}\n'
     '}'
 )
@@ -415,6 +420,44 @@ def _write_json_atomic(path: Path, data: dict) -> None:
     tmp_path.replace(path)
 
 
+def _normalized_env_vendor(vendor: str) -> str:
+    chars = [char if char.isalnum() else "_" for char in vendor.upper()]
+    normalized = "".join(chars).strip("_")
+    while "__" in normalized:
+        normalized = normalized.replace("__", "_")
+    return normalized
+
+
+API_KEY_ENV_VARS_BY_VENDOR: dict[str, tuple[str, ...]] = {
+    "anthropic": ("ANTHROPIC_API_KEY",),
+    "deepseek": ("DEEPSEEK_API_KEY",),
+    "kimi": ("KIMI_API_KEY",),
+    "minimax": ("MINIMAX_API_KEY",),
+    "openai": ("OPENAI_API_KEY",),
+    "xiaomi-token-plan-sgp": ("XIAOMI_TOKEN_PLAN_SGP_API_KEY",),
+}
+
+
+def api_key_env_vars(vendor: str) -> tuple[str, ...]:
+    """Return supported env vars for ``vendor`` API-key credentials."""
+    if vendor in API_KEY_ENV_VARS_BY_VENDOR:
+        return API_KEY_ENV_VARS_BY_VENDOR[vendor]
+    normalized = _normalized_env_vendor(vendor)
+    return (f"{normalized}_API_KEY",)
+
+
+def _api_key_credential_from_env(vendor: str) -> AuthCredential | None:
+    for env_var in api_key_env_vars(vendor):
+        value = os.environ.get(env_var)
+        if value:
+            return AuthCredential(
+                kind="api_key",
+                bearer_token=value,
+                source=f"environment variable {env_var}",
+            )
+    return None
+
+
 def _success_html(message: str) -> bytes:
     escaped = html.escape(message)
     return (
@@ -589,6 +632,37 @@ def save_openai_codex_oauth(token_map: dict[str, object]) -> AuthCredential:
         path=path,
         token_map=entry["oauth"],
         source=f"{path} openai.oauth",
+    )
+
+
+def save_api_key_credential(vendor: str, api_key: str) -> AuthCredential:
+    """Persist an API-key credential for ``vendor`` into Wattle's auth file."""
+    normalized_key = api_key.strip()
+    if not normalized_key:
+        raise ValueError("API key cannot be empty.")
+
+    path = AUTH_PATH
+    try:
+        data = load_auth()
+    except FileNotFoundError:
+        data = {}
+
+    entry = data.get(vendor)
+    if entry is None:
+        entry = {}
+        data[vendor] = entry
+    if not isinstance(entry, dict):
+        raise ValueError(
+            f"Entry for vendor {vendor!r} in {path} must be an object, "
+            f"got {type(entry).__name__}."
+        )
+
+    entry["api_key"] = {"api_key": normalized_key}
+    _write_json_atomic(path, data)
+    return AuthCredential(
+        kind="api_key",
+        bearer_token=normalized_key,
+        source=f"{path} {vendor}.api_key",
     )
 
 
@@ -844,9 +918,18 @@ def get_api_key_credential(vendor: str) -> AuthCredential:
     endpoints.
     """
     path = AUTH_PATH
-    data = load_auth()
+    try:
+        data = load_auth()
+    except FileNotFoundError:
+        credential = _api_key_credential_from_env(vendor)
+        if credential is not None:
+            return credential
+        raise
 
     if vendor not in data:
+        credential = _api_key_credential_from_env(vendor)
+        if credential is not None:
+            return credential
         raise _missing_vendor_error(vendor, path)
 
     entry = data[vendor]
@@ -864,6 +947,10 @@ def get_api_key_credential(vendor: str) -> AuthCredential:
     if credential is not None:
         return credential
 
+    env_credential = _api_key_credential_from_env(vendor)
+    if env_credential is not None:
+        return env_credential
+
     raise KeyError(
         f"Vendor {vendor!r} in Wattle auth file at {path} is missing the "
         f"'api_key' method object required by this provider. Add it: "
@@ -872,10 +959,11 @@ def get_api_key_credential(vendor: str) -> AuthCredential:
 
 
 def _missing_vendor_error(vendor: str, path: Path) -> KeyError:
+    env_hint = api_key_env_vars(vendor)[0]
     return KeyError(
         f"Vendor {vendor!r} not found in Wattle auth file at {path}. "
         f"Add an entry like {{{vendor!r}: {{'api_key': {{'api_key': '...'}}}}}} "
-        f"to that file."
+        f"to that file or set {env_hint}."
     )
 
 
@@ -895,9 +983,15 @@ def get_credential(vendor: str) -> AuthCredential:
     try:
         data = load_auth()
     except FileNotFoundError:
+        credential = _api_key_credential_from_env(vendor)
+        if credential is not None:
+            return credential
         raise
 
     if vendor not in data:
+        credential = _api_key_credential_from_env(vendor)
+        if credential is not None:
+            return credential
         raise _missing_vendor_error(vendor, path)
 
     entry = data[vendor]
@@ -955,6 +1049,10 @@ def get_credential(vendor: str) -> AuthCredential:
     )
     if api_key_credential is not None:
         return api_key_credential
+
+    env_credential = _api_key_credential_from_env(vendor)
+    if env_credential is not None:
+        return env_credential
 
     if credential is not None:
         return credential
