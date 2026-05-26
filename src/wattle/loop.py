@@ -38,6 +38,7 @@ from .request_preparation import (
     acomplete_with_recovery,
     astream_with_recovery,
 )
+from .tool_events import ToolRunEvent
 from .tools.base import Tool
 
 
@@ -301,6 +302,7 @@ async def dispatch_tool_blocks_async(
     block: ToolUseBlock,
     tools_by_name: Mapping[str, Tool],
     permission_gate: PermissionGate | None = None,
+    tool_event_callback: Callable[[ToolRunEvent], None] | None = None,
 ) -> list[ContentBlock]:
     """Async tool dispatch, allowing tools to return extra content blocks."""
 
@@ -312,11 +314,18 @@ async def dispatch_tool_blocks_async(
         if not permission.allowed:
             return [_tool_error(block, permission.denial or "Tool execution denied.")]
     try:
-        arun = getattr(tool, "arun", None)
-        if arun is None:
-            output = await asyncio.to_thread(tool.run, **block.input)
+        if tool_event_callback is not None:
+            output = await tool.arun_with_events(
+                emit=tool_event_callback,
+                tool_use_id=block.id,
+                **block.input,
+            )
         else:
-            output = await arun(**block.input)
+            arun = getattr(tool, "arun", None)
+            if arun is None:
+                output = await asyncio.to_thread(tool.run, **block.input)
+            else:
+                output = await arun(**block.input)
     except Exception as exc:  # noqa: BLE001 — surface anything as a tool error
         return [_tool_error(block, f"{type(exc).__name__}: {exc}")]
     return _normalize_tool_output(block, output)

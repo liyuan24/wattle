@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import shlex
 import subprocess
@@ -131,6 +132,53 @@ def test_foreground_tty_allocates_terminal(tmp_path: Path) -> None:
 
     assert "tty=True" in output
     assert "[elapsed " in output
+
+
+def test_foreground_piped_emits_output_events(tmp_path: Path) -> None:
+    tool = BashTool(cwd=tmp_path)
+    events = []
+    command = _python_command(
+        "import sys; print('out', flush=True); print('err', file=sys.stderr, flush=True)"
+    )
+
+    output = asyncio.run(
+        tool.arun_with_events(emit=events.append, tool_use_id="call_1", command=command)
+    )
+
+    assert "out" in output
+    assert "[stderr]\nerr" in output
+    assert events[0].kind == "started"
+    assert events[0].text == command
+    assert events[-1].kind == "completed"
+    assert any(
+        event.kind == "output" and event.stream == "stdout" and "out" in event.text
+        for event in events
+    )
+    assert any(
+        event.kind == "output" and event.stream == "stderr" and "err" in event.text
+        for event in events
+    )
+
+
+def test_foreground_tty_emits_combined_output_events(tmp_path: Path) -> None:
+    tool = BashTool(cwd=tmp_path)
+    events = []
+    command = _python_command("print('tty-event', flush=True)")
+
+    output = asyncio.run(
+        tool.arun_with_events(
+            emit=events.append,
+            tool_use_id="call_1",
+            command=command,
+            tty=True,
+        )
+    )
+
+    assert "tty-event" in output
+    assert any(
+        event.kind == "output" and event.stream == "combined" and "tty-event" in event.text
+        for event in events
+    )
 
 
 def test_background_task_metadata_log_and_status_update(tmp_path: Path) -> None:

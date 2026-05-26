@@ -1081,6 +1081,23 @@ def test_pty_resize_preserves_completed_inflight_diff_rendering(tmp_path: Path) 
         assert "Wrote 14 bytes to src/fast.py" not in resized_screen_text
 
 
+def test_pty_bash_exec_cell_finalizes_with_output(tmp_path: Path) -> None:
+    with PtySession.spawn_python(
+        _tool_rendering_child_code(),
+        cwd=tmp_path,
+        cols=120,
+        rows=36,
+    ) as session:
+        session.read_until("Ran echo", timeout=4)
+        session.read_until("Added src/demo.py", timeout=4)
+
+        screen_text = session.screen.text()
+        assert "Ran echo hello | sed -n 1p" in screen_text
+        assert "  └ hello" in screen_text
+        assert screen_text.count("Ran echo hello | sed -n 1p") == 1
+        assert "  hello" not in screen_text
+
+
 def test_pty_tool_rendering_uses_distinct_command_and_diff_styles(tmp_path: Path) -> None:
     with PtySession.spawn_python(
         _tool_rendering_child_code(),

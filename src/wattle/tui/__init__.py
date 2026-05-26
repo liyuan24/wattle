@@ -120,6 +120,7 @@ from wattle.skills import (
     render_skill_suggestions,
 )
 from wattle.system_prompt import build_system_prompt
+from wattle.tool_events import ToolRunEvent
 from wattle.tools import DEFAULT_RUNTIME, TOOLS_BY_NAME
 from wattle.tools.base import Tool
 from wattle.tools.plan import PlanUpdate, parse_plan_update_input
@@ -445,6 +446,87 @@ def _bash_preview_content(content: str) -> str:
     except ValueError:
         return "\n".join(lines)
     return "\n".join(lines[excerpt_start:excerpt_end])
+
+
+def _tail_chars(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[-limit:]
+
+
+def _plain_terminal_rows(text: str, *, width: int) -> list[str]:
+    rows: list[str] = []
+    for line in text.splitlines() or [""]:
+        rows.extend(_wrap_terminal_line(_strip_control(ANSI_ESCAPE_RE.sub("", line)), width))
+    return rows
+
+
+def _bash_exec_output_rows(
+    output: str,
+    *,
+    width: int,
+    running: bool,
+) -> list[str]:
+    content = _bash_preview_content(output).rstrip("\n")
+    if not content:
+        return [] if running else ["[no output]"]
+    rows = _plain_terminal_rows(content, width=width)
+    if running:
+        return rows[-5:]
+    if len(rows) <= 4:
+        return rows
+    omitted = len(rows) - 4
+    return [*rows[:2], f"... +{omitted} lines", *rows[-2:]]
+
+
+def _bash_exec_cell_plain_rows(cell: _BashExecCell, *, width: int) -> list[str]:
+    status = "Running" if cell.running else "Ran"
+    title_prefix = f"{TOOL_MARKER} {status} "
+    continuation_prefix = "  │ "
+    line_width = _terminal_line_width(width)
+    command = _strip_control(cell.command)
+    first_width = max(1, line_width - len(title_prefix))
+    continuation_width = max(1, line_width - len(continuation_prefix))
+    command_rows = _wrap_prompt_input(
+        command,
+        len(command),
+        first_width=first_width,
+        continuation_width=continuation_width,
+    ).lines
+    rows = [f"{title_prefix}{command_rows[0]}"]
+    rows.extend(f"{continuation_prefix}{line}" for line in command_rows[1:])
+    output_width = max(1, line_width - 4)
+    for index, line in enumerate(
+        _bash_exec_output_rows(cell.output, width=output_width, running=cell.running)
+    ):
+        prefix = "  └ " if index == 0 else "    "
+        rows.append(f"{prefix}{line}")
+    return rows
+
+
+def _bash_exec_cell_prompt_rows(
+    cell: _BashExecCell,
+    *,
+    width: int,
+    styles_enabled: bool,
+) -> list[str]:
+    rows = _bash_exec_cell_plain_rows(cell, width=width)
+    if not styles_enabled:
+        return [_default_terminal_line(row, width) for row in rows]
+    rendered: list[str] = []
+    for index, row in enumerate(rows):
+        if index == 0:
+            status = "Running" if cell.running else "Ran"
+            prefix = f"{TOOL_MARKER} {status} "
+            command = row[len(prefix) :]
+            rendered_command = _render_shell_command(command) or command
+            line = (
+                f"{TOOL_MARKER_STYLE}{TOOL_MARKER}{RESET} "
+                f"{TOOL_TITLE_STYLE}{status}{RESET} "
+                f"{rendered_command}"
+            )
+            rendered.append(_filled_terminal_line(line, TOOL_PREVIEW_STYLE, width))
+        else:
+            rendered.append(_styled_terminal_line(row, TOOL_PREVIEW_STYLE, width))
+    return rendered
 
 
 def _key_value_lines(content: str) -> dict[str, str]:
@@ -1701,6 +1783,15 @@ class _PromptFrame:
     width: int
     cursor_line_index: int
     cursor_column: int
+
+
+@dataclass(slots=True)
+class _BashExecCell:
+    tool_use_id: str
+    command: str
+    output: str = ""
+    running: bool = True
+    is_error: bool = False
 
 
 @dataclass(frozen=True)
@@ -3016,6 +3107,9 @@ class WattleApp:
         if block.name == "close_agent" and not result.is_error:
             self._write_close_agent_result(block, result)
             return
+        if block.name == "bash":
+            self._write_bash_exec_result(block, result)
+            return
         title = _tool_action_title(block, is_error=result.is_error)
         preview_content = result.content
         if block.name == "bash":
@@ -3043,6 +3137,38 @@ class WattleApp:
         self._write(f"{marker_style}{TOOL_MARKER}{RESET} {rendered_title}\n")
         for line in preview:
             self._write(f"{TOOL_PREVIEW_STYLE}  {line}{RESET}\n")
+
+    def _write_bash_exec_result(
+        self,
+        block: ToolUseBlock,
+        result: ToolResultBlock,
+    ) -> None:
+        cell = _BashExecCell(
+            tool_use_id=block.id,
+            command=_tool_arg(block, "command", "<missing command>"),
+            output=result.content,
+            running=False,
+            is_error=result.is_error,
+        )
+        width = self._terminal_width()
+        rows = _bash_exec_cell_plain_rows(cell, width=width)
+        if not self._styles_enabled():
+            for row in rows:
+                self._write_line(row)
+            return
+        marker_style = ERROR_TEXT_STYLE if result.is_error else TOOL_MARKER_STYLE
+        title_style = ERROR_TEXT_STYLE if result.is_error else TOOL_TITLE_STYLE
+        for index, row in enumerate(rows):
+            if index == 0:
+                prefix = f"{TOOL_MARKER} Ran "
+                command = row[len(prefix) :]
+                rendered_command = _render_shell_command(command) or command
+                self._write(
+                    f"{marker_style}{TOOL_MARKER}{RESET} "
+                    f"{title_style}Ran{RESET} {rendered_command}\n"
+                )
+            else:
+                self._write(f"{TOOL_PREVIEW_STYLE}{row}{RESET}\n")
 
     def _write_spawn_agent_result(
         self,
@@ -4380,6 +4506,8 @@ class _LiveTerminal:
         self.stream_tool_names: list[str] = []
         self.inflight_tool_results: list[ToolResultBlock] = []
         self.active_tool_status: str | None = None
+        self.active_exec_cells: dict[str, _BashExecCell] = {}
+        self._tool_event_queue: queue.Queue[ToolRunEvent] = queue.Queue()
         self.active_turn_id = 0
         self.model_picker_choices: list[ModelChoice] | None = None
         self.model_picker_selected = 0
@@ -5602,13 +5730,18 @@ class _LiveTerminal:
                         )
                     ]
                 self._last_running_frame_at = time.monotonic()
-                self._redraw_running_status_line()
+                if self._drain_tool_events():
+                    self._draw_prompt()
+                else:
+                    self._redraw_running_status_line()
                 worker.join(timeout=0.04)
         finally:
             if self.streaming:
                 worker.join()
+            self._drain_tool_events()
             self._clear_prompt()
             self.active_tool_status = None
+            self.active_exec_cells.pop(block.id, None)
         if result_box:
             return result_box[0]
         return [
@@ -5619,9 +5752,37 @@ class _LiveTerminal:
             )
         ]
 
-    @staticmethod
-    def _run_tool_without_permission(block: ToolUseBlock, tool: Tool) -> list[ContentBlock]:
-        return asyncio.run(dispatch_tool_blocks_async(block, {tool.name: tool}))
+    def _run_tool_without_permission(
+        self,
+        block: ToolUseBlock,
+        tool: Tool,
+    ) -> list[ContentBlock]:
+        callback = self._tool_event_queue.put if block.name == "bash" else None
+        return asyncio.run(dispatch_tool_blocks_async(block, {tool.name: tool}, None, callback))
+
+    def _drain_tool_events(self) -> bool:
+        changed = False
+        while True:
+            try:
+                event = self._tool_event_queue.get_nowait()
+            except queue.Empty:
+                return changed
+            changed = True
+            if event.tool_name != "bash":
+                continue
+            if event.kind == "started":
+                self.active_exec_cells[event.tool_use_id] = _BashExecCell(
+                    tool_use_id=event.tool_use_id,
+                    command=event.text or "<missing command>",
+                )
+            elif event.kind == "output":
+                cell = self.active_exec_cells.get(event.tool_use_id)
+                if cell is not None:
+                    cell.output = _tail_chars(cell.output + event.text, 12000)
+            elif event.kind == "completed":
+                cell = self.active_exec_cells.get(event.tool_use_id)
+                if cell is not None:
+                    cell.running = False
 
     def _flush_stream_buffer(self) -> None:
         thinking = "".join(self.stream_thinking)
@@ -5671,6 +5832,17 @@ class _LiveTerminal:
             frame = COMPACTION_FRAMES[int(time.monotonic() * 8) % len(COMPACTION_FRAMES)]
             line = f" {frame} Auto-compacting..."
             rows.append(_styled_terminal_line(line, COMPACTION_STYLE, width))
+        elif self.streaming and self.active_exec_cells:
+            rows.append(_default_terminal_line("", width))
+            for cell in self.active_exec_cells.values():
+                rows.extend(
+                    _bash_exec_cell_prompt_rows(
+                        cell,
+                        width=width,
+                        styles_enabled=self.app._styles_enabled(),
+                    )
+                )
+            rows.append(_default_terminal_line("", width))
         elif self.streaming and not self._suppress_running_status_line(visible_subagents):
             rows.append(_default_terminal_line("", width))
             rows.append(self._running_status_line(width))

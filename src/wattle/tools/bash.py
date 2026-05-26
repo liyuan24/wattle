@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import errno
 import os
 import pty
@@ -8,12 +9,14 @@ import signal
 import subprocess
 import threading
 import time
+from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
 
 from wattle.git_attribution import apply_git_attribution_env
 from wattle.runtime import TaskStatus, WattleRuntime
 from wattle.settings import load_settings
+from wattle.tool_events import ToolRunEvent
 
 from .base import Tool
 from .utils.output import externalize_large_output
@@ -96,12 +99,74 @@ class BashTool(Tool):
             return self._run_foreground_tty(command, timeout, max_output_chars=output_limit)
         return self._run_foreground_piped(command, timeout, max_output_chars=output_limit)
 
+    async def arun_with_events(
+        self,
+        *,
+        emit: Callable[[ToolRunEvent], None],
+        tool_use_id: str,
+        command: str,
+        timeout: float = 120.0,
+        background: bool = False,
+        tty: bool = False,
+        max_output_chars: int | None = None,
+        max_event_chars: int | None = None,
+    ) -> str:
+        return await asyncio.to_thread(
+            self._run_with_events,
+            emit=emit,
+            tool_use_id=tool_use_id,
+            command=command,
+            timeout=timeout,
+            background=background,
+            tty=tty,
+            max_output_chars=max_output_chars,
+            max_event_chars=max_event_chars,
+        )
+
+    def _run_with_events(
+        self,
+        *,
+        emit: Callable[[ToolRunEvent], None],
+        tool_use_id: str,
+        command: str,
+        timeout: float,
+        background: bool,
+        tty: bool,
+        max_output_chars: int | None,
+        max_event_chars: int | None,
+    ) -> str:
+        if background:
+            return self._run_background(command, tty=tty)
+        output_limit = _output_limit(max_output_chars, max_event_chars)
+        emit(ToolRunEvent(tool_use_id, self.name, "started", command))
+        try:
+            if tty:
+                return self._run_foreground_tty(
+                    command,
+                    timeout,
+                    max_output_chars=output_limit,
+                    emit=lambda text: emit(
+                        ToolRunEvent(tool_use_id, self.name, "output", text, "combined")
+                    ),
+                )
+            return self._run_foreground_piped(
+                command,
+                timeout,
+                max_output_chars=output_limit,
+                emit=lambda text, stream: emit(
+                    ToolRunEvent(tool_use_id, self.name, "output", text, stream)
+                ),
+            )
+        finally:
+            emit(ToolRunEvent(tool_use_id, self.name, "completed"))
+
     def _run_foreground_piped(
         self,
         command: str,
         timeout: float,
         *,
         max_output_chars: int | None = None,
+        emit: Callable[[str, str], None] | None = None,
     ) -> str:
         clamped_timeout = min(float(timeout), self.MAX_TIMEOUT_SECONDS)
         started_at = time.monotonic()
@@ -116,13 +181,27 @@ class BashTool(Tool):
             start_new_session=True,
         )
         try:
-            stdout, stderr = process.communicate(timeout=clamped_timeout)
+            if emit is None:
+                stdout, stderr = process.communicate(timeout=clamped_timeout)
+            else:
+                stdout, stderr = _communicate_with_output_events(
+                    process,
+                    timeout=clamped_timeout,
+                    emit=emit,
+                )
         except subprocess.TimeoutExpired as timeout_error:
             with suppress(ProcessLookupError, PermissionError):
                 os.killpg(process.pid, signal.SIGKILL)
             capture_incomplete = False
             try:
-                stdout, stderr = process.communicate(timeout=self.PIPE_DRAIN_TIMEOUT_SECONDS)
+                if emit is None:
+                    stdout, stderr = process.communicate(timeout=self.PIPE_DRAIN_TIMEOUT_SECONDS)
+                else:
+                    stdout, stderr = _communicate_with_output_events(
+                        process,
+                        timeout=self.PIPE_DRAIN_TIMEOUT_SECONDS,
+                        emit=emit,
+                    )
             except subprocess.TimeoutExpired as drain_error:
                 capture_incomplete = True
                 stdout = _timeout_output(drain_error.output) or _timeout_output(
@@ -143,10 +222,12 @@ class BashTool(Tool):
             parts = [f"[timeout after {clamped_timeout:g}s; elapsed {elapsed:.2f}s]"]
             if capture_incomplete:
                 parts.append("[output capture stopped: descendant process kept stdout/stderr open]")
-            if stdout:
-                parts.append(stdout.rstrip("\n"))
-            if stderr:
-                parts.append(f"[stderr]\n{stderr.rstrip(chr(10))}")
+            stdout_text = _decode_output(stdout)
+            stderr_text = _decode_output(stderr)
+            if stdout_text:
+                parts.append(stdout_text.rstrip("\n"))
+            if stderr_text:
+                parts.append(f"[stderr]\n{stderr_text.rstrip(chr(10))}")
             return externalize_large_output(
                 _prepend_warnings("\n".join(parts), attribution.warnings),
                 root=self.cwd,
@@ -182,6 +263,7 @@ class BashTool(Tool):
         timeout: float,
         *,
         max_output_chars: int | None = None,
+        emit: Callable[[str], None] | None = None,
     ) -> str:
         clamped_timeout = min(float(timeout), self.MAX_TIMEOUT_SECONDS)
         started_at = time.monotonic()
@@ -218,6 +300,8 @@ class BashTool(Tool):
                     data = _read_pty(master_fd)
                     if data:
                         chunks.append(data)
+                        if emit is not None:
+                            emit(_decode_output(data))
                     elif process.poll() is not None:
                         break
 
@@ -227,6 +311,8 @@ class BashTool(Tool):
                         if not data:
                             break
                         chunks.append(data)
+                        if emit is not None:
+                            emit(_decode_output(data))
                     break
         finally:
             with suppress(OSError):
@@ -337,6 +423,46 @@ class BashTool(Tool):
             command=command,
             enabled=load_settings().git_commit_attribution,
         )
+
+
+def _communicate_with_output_events(
+    process: subprocess.Popen[bytes],
+    *,
+    timeout: float,
+    emit: Callable[[str, str], None],
+) -> tuple[bytes, bytes]:
+    stdout_chunks: list[bytes] = []
+    stderr_chunks: list[bytes] = []
+    streams: dict[int, tuple[str, list[bytes]]] = {}
+    if process.stdout is not None:
+        os.set_blocking(process.stdout.fileno(), False)
+        streams[process.stdout.fileno()] = ("stdout", stdout_chunks)
+    if process.stderr is not None:
+        os.set_blocking(process.stderr.fileno(), False)
+        streams[process.stderr.fileno()] = ("stderr", stderr_chunks)
+    deadline = time.monotonic() + timeout
+    while streams:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(process.args, timeout)
+        readable, _, _ = select.select(list(streams), [], [], min(0.1, remaining))
+        if not readable:
+            if process.poll() is not None:
+                continue
+            continue
+        for fd in readable:
+            stream, chunks = streams[fd]
+            try:
+                data = os.read(fd, 4096)
+            except BlockingIOError:
+                continue
+            if data:
+                chunks.append(data)
+                emit(_decode_output(data), stream)
+            else:
+                streams.pop(fd, None)
+    process.wait(timeout=0)
+    return b"".join(stdout_chunks), b"".join(stderr_chunks)
 
 
 def _read_pty(fd: int) -> bytes:

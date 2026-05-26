@@ -4337,11 +4337,29 @@ def test_terminal_bash_tool_renders_command_and_concise_output() -> None:
     out, _app = _drive(provider, ["run command", "/exit"])
 
     assert "| Ran seq 1 5" in out
-    assert "  1" in out
-    assert "  2" in out
+    assert "  └ 1" in out
+    assert "    2" in out
     assert "... +1 lines" in out
-    assert "  4" in out
-    assert "  5" in out
+    assert "    4" in out
+    assert "    5" in out
+
+
+def test_terminal_bash_exec_cell_prompt_rows_show_running_output() -> None:
+    cell = tui._BashExecCell(
+        tool_use_id="call_1",
+        command="uv run pytest tests/test_tui.py -q",
+        output="line1\nline2\nline3\nline4\nline5\nline6",
+    )
+
+    rendered = "\n".join(
+        tui._bash_exec_cell_prompt_rows(cell, width=80, styles_enabled=False)
+    )
+    plain = _strip_ansi(rendered)
+
+    assert "| Running uv run pytest tests/test_tui.py -q" in plain
+    assert "  └ line2" in plain
+    assert "    line6" in plain
+    assert "line1" not in plain
 
 
 def test_terminal_bash_tool_externalized_output_hides_metadata() -> None:
@@ -4403,6 +4421,26 @@ def test_terminal_bash_tool_title_uses_token_styles() -> None:
     assert f"{tui.COMMAND_PATH_STYLE}src/wattle/tui/__init__.py{tui.RESET}" in rendered
     assert f"{tui.COMMAND_OPERATOR_STYLE}|{tui.RESET}" in rendered
     assert f"{tui.COMMAND_STRING_STYLE}'1,20p'{tui.RESET}" in rendered
+
+
+def test_terminal_bash_live_events_update_prompt_frame() -> None:
+    out = _TTYBuffer()
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = True
+    live = tui._LiveTerminal(app)
+    live.streaming = True
+
+    live._tool_event_queue.put(
+        tui.ToolRunEvent("call_1", "bash", "started", "python -c 'print(1)'")
+    )
+    live._tool_event_queue.put(tui.ToolRunEvent("call_1", "bash", "output", "hello\n"))
+    assert live._drain_tool_events()
+    frame = live._build_prompt_frame()
+    plain = _strip_ansi("\n".join(frame.rows))
+
+    assert "| Running python -c 'print(1)'" in plain
+    assert "  └ hello" in plain
+    assert " > " in plain
 
 
 def test_live_tool_execution_keeps_working_prompt_visible(

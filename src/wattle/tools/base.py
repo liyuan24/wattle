@@ -1,6 +1,9 @@
 import asyncio
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from typing import Any, ClassVar, TypedDict
+
+from wattle.tool_events import ToolRunEvent
 
 
 class ToolSpec(TypedDict):
@@ -39,6 +42,22 @@ class Tool(ABC):
         """
 
         return await asyncio.to_thread(self.run, **kwargs)
+
+    async def arun_with_events(
+        self,
+        *,
+        emit: Callable[[ToolRunEvent], None],
+        tool_use_id: str,
+        **kwargs: Any,
+    ) -> str:
+        """Async tool hook with optional runtime UI events.
+
+        The default implementation preserves existing tool behavior. Tools that
+        can report runtime progress may override this method.
+        """
+
+        del emit, tool_use_id
+        return await self.arun(**kwargs)
 
     @classmethod
     def spec(cls) -> ToolSpec:
