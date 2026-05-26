@@ -1830,9 +1830,9 @@ def test_flower_working_status_renders_shape_with_gradient() -> None:
     rendered = tui._running_terminal_line(f" {text}", 30, frame=0, flower=flower)
 
     assert flower.name == "wattle"
-    assert text == "✿ model..."
+    assert text == "✿ wattling..."
     assert "\x1b[38;5;227;1m✿" in rendered
-    assert _strip_ansi(rendered) == " ✿ model...                   "
+    assert _strip_ansi(rendered) == " ✿ wattling...                "
 
 
 @pytest.mark.parametrize(
@@ -1903,7 +1903,7 @@ def test_live_prompt_box_shows_working_when_streaming_without_input(
     assert "\x1b[40;" not in rendered[: rendered.index(tui.PROMPT_STYLE)]
     assert tui.STATUS_STYLE not in rendered[: rendered.index(tui.PROMPT_STYLE)]
     visible = _strip_ansi(rendered)
-    assert "model... (12s, press esc to interrupt)" in visible
+    assert "irising... (12s, press esc to interrupt)" in visible
     assert " > " in rendered
     assert live.prompt_lines == 7
     assert live.prompt_cursor_offset_from_bottom == 2
@@ -2814,7 +2814,7 @@ def test_live_finished_turn_clears_stale_running_status(
     assert live.working_started_at is None
     assert "Worked for 10s" in rendered
     assert "running bash - pytest" not in rendered
-    assert "model..." not in rendered
+    assert "wattling..." not in rendered
     assert "press esc to interrupt" not in rendered
 
 

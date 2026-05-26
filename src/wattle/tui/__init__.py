@@ -2014,7 +2014,7 @@ def _input_history_from_messages(messages: list[Message]) -> list[str]:
 
 def _flower_working_status(elapsed_seconds: int) -> tuple[Flower, str]:
     flower = flower_for_elapsed(elapsed_seconds)
-    return flower, f"{flower.shape} model..."
+    return flower, f"{flower.shape} {flower.verb}..."
 
 
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
