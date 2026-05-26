@@ -1,0 +1,67 @@
+{
+  "navigation": [
+    {
+      "title": "Start here",
+      "items": [
+        {
+          "title": "Overview",
+          "path": "index.md"
+        },
+        {
+          "title": "Quickstart",
+          "path": "quickstart.md"
+        },
+        {
+          "title": "Using Wattle",
+          "path": "usage.md"
+        },
+        {
+          "title": "Providers and Models",
+          "path": "providers.md"
+        },
+        {
+          "title": "Settings",
+          "path": "settings.md"
+        },
+        {
+          "title": "Permissions",
+          "path": "permissions.md"
+        },
+        {
+          "title": "Sessions",
+          "path": "sessions.md"
+        },
+        {
+          "title": "Compaction",
+          "path": "compaction.md"
+        }
+      ]
+    },
+    {
+      "title": "Agent Capabilities",
+      "items": [
+        {
+          "title": "Tools",
+          "path": "tools.md"
+        },
+        {
+          "title": "Subagents",
+          "path": "subagents.md"
+        },
+        {
+          "title": "Skills",
+          "path": "skills.md"
+        }
+      ]
+    },
+    {
+      "title": "Development",
+      "items": [
+        {
+          "title": "Development",
+          "path": "development.md"
+        }
+      ]
+    }
+  ]
+}
