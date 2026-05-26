@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import platform
+import shutil
 import subprocess
 from dataclasses import dataclass
 
@@ -65,8 +66,15 @@ _TYPE_INFO = {
 def read_clipboard_image() -> ClipboardImage | None:
     """Return image bytes from the OS clipboard when supported and available."""
 
-    if platform.system() != "Darwin":
-        return None
+    system = platform.system()
+    if system == "Darwin":
+        return _read_macos_clipboard_image()
+    if system in {"Linux", "FreeBSD", "OpenBSD", "NetBSD"}:
+        return _read_unix_clipboard_image()
+    return None
+
+
+def _read_macos_clipboard_image() -> ClipboardImage | None:
     try:
         result = subprocess.run(
             ["osascript", "-e", _MACOS_CLIPBOARD_IMAGE_SCRIPT],
@@ -91,3 +99,45 @@ def read_clipboard_image() -> ClipboardImage | None:
     if not data:
         return None
     return ClipboardImage(data=data, media_type=media_type, extension=extension)
+
+
+def _read_unix_clipboard_image() -> ClipboardImage | None:
+    candidates: list[tuple[list[str], str]] = []
+    if shutil.which("wl-paste"):
+        candidates.extend(
+            (["wl-paste", "--no-newline", "--type", type_name], type_name)
+            for type_name in _TYPE_INFO
+        )
+    if shutil.which("xclip"):
+        candidates.extend(
+            (["xclip", "-selection", "clipboard", "-t", type_name, "-o"], type_name)
+            for type_name in _TYPE_INFO
+        )
+    if shutil.which("xsel"):
+        candidates.extend(
+            (["xsel", "--clipboard", "--output", "--mime-type", type_name], type_name)
+            for type_name in _TYPE_INFO
+        )
+
+    for command, type_name in candidates:
+        image = _read_unix_clipboard_type(command, type_name)
+        if image is not None:
+            return image
+    return None
+
+
+def _read_unix_clipboard_type(command: list[str], type_name: str) -> ClipboardImage | None:
+    media_type, extension = _TYPE_INFO[type_name]
+    try:
+        result = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=2,
+            check=False,
+        )
+    except Exception:
+        return None
+    if result.returncode != 0 or not result.stdout:
+        return None
+    return ClipboardImage(data=result.stdout, media_type=media_type, extension=extension)

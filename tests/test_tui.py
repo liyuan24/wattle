@@ -1733,9 +1733,9 @@ def test_flower_working_status_renders_shape_with_gradient() -> None:
     rendered = tui._running_terminal_line(f" {text}", 30, frame=0, flower=flower)
 
     assert flower.name == "wattle"
-    assert text == "✿ wattling..."
+    assert text == "✿ model..."
     assert "\x1b[38;5;227;1m✿" in rendered
-    assert _strip_ansi(rendered) == " ✿ wattling...                "
+    assert _strip_ansi(rendered) == " ✿ model...                   "
 
 
 @pytest.mark.parametrize(
@@ -1806,7 +1806,7 @@ def test_live_prompt_box_shows_working_when_streaming_without_input(
     assert "\x1b[40;" not in rendered[: rendered.index(tui.PROMPT_STYLE)]
     assert tui.STATUS_STYLE not in rendered[: rendered.index(tui.PROMPT_STYLE)]
     visible = _strip_ansi(rendered)
-    assert "irising... (12s, press esc to interrupt)" in visible
+    assert "model... (12s, press esc to interrupt)" in visible
     assert " > " in rendered
     assert live.prompt_lines == 7
     assert live.prompt_cursor_offset_from_bottom == 2
@@ -2691,6 +2691,36 @@ def test_live_provider_error_flushes_partial_output_and_keeps_prompt_usable() ->
     assert live.inflight_tool_results == []
 
 
+def test_live_finished_turn_clears_stale_running_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(tui.time, "monotonic", lambda: 20.0)
+    out = _TTYBuffer()
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+    live = tui._LiveTerminal(app)
+    live.streaming = True
+    live.turn_started_at = 10.0
+    live.working_started_at = 10.0
+    live.active_tool_status = "running bash - pytest"
+
+    live._finish_response(
+        CompletionResponse(content=[TextBlock(text="done")], stop_reason="end_turn")
+    )
+    out.seek(0)
+    out.truncate(0)
+    live._draw_prompt()
+
+    rendered = _strip_ansi(out.getvalue())
+    assert live.streaming is False
+    assert live.active_tool_status is None
+    assert live.working_started_at is None
+    assert "Worked for 10s" in rendered
+    assert "running bash - pytest" not in rendered
+    assert "model..." not in rendered
+    assert "press esc to interrupt" not in rendered
+
+
 def test_live_complete_applies_compaction_state_before_finishing_response() -> None:
     out = _TTYBuffer()
     app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
@@ -3502,7 +3532,7 @@ def test_live_raw_terminal_enables_modified_key_reporting(
     app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     live = tui._LiveTerminal(app)
     live.fd = 123
-    old_attrs = ["old"]
+    old_attrs = [0, 0, 0, tui.termios.IEXTEN, 0, 0, 0]
     monkeypatch.setattr(tui.termios, "tcgetattr", lambda fd: old_attrs)
     monkeypatch.setattr(tui.termios, "tcsetattr", lambda fd, when, attrs: None)
     monkeypatch.setattr(tui.tty, "setcbreak", lambda fd: None)

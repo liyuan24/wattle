@@ -1261,6 +1261,52 @@ def test_pty_shift_tab_cycles_thinking_level(tmp_path: Path) -> None:
         assert "thinking: low" not in screen_text
 
 
+def test_pty_ctrl_v_pastes_clipboard_image_as_anchor(tmp_path: Path) -> None:
+    child_code = textwrap.dedent(
+        """
+        import argparse
+
+        from wattle.permissions import PermissionMode
+        from wattle.providers import CompletionResponse, Provider, StreamComplete, TextBlock
+        from wattle.tui import ClipboardImage, WattleApp
+        import wattle.tui as tui
+
+        tui.read_clipboard_image = lambda: ClipboardImage(b"fake-png", "image/png", ".png")
+
+        class ProviderStub(Provider):
+            async def acomplete(self, request):
+                return CompletionResponse(content=[TextBlock(text="done")], stop_reason="end_turn")
+
+            async def astream(self, request):
+                yield StreamComplete(
+                    CompletionResponse(content=[TextBlock(text="done")], stop_reason="end_turn")
+                )
+
+        args = argparse.Namespace(
+            provider="openai_responses",
+            model="gpt-5.5",
+            max_tokens=4096,
+            thinking=False,
+            effort=None,
+            prompt=None,
+            persist_session=False,
+            permission_mode=PermissionMode.YOLO,
+        )
+        raise SystemExit(WattleApp(args, ProviderStub()).run())
+        """
+    )
+
+    with PtySession.spawn_python(child_code, cwd=tmp_path, cols=60, rows=30) as session:
+        session.read_until("gpt-5.5 |", timeout=3)
+        session.write("\x16")
+        session.read_until("[image#1]", timeout=3)
+
+        screen_text = session.screen.text()
+        assert "[image#1]" in screen_text
+        assert "^V" not in screen_text
+        assert "\x16" not in screen_text
+
+
 def test_pty_dragged_image_uses_anchor_in_active_input(tmp_path: Path) -> None:
     image = tmp_path / "dragged image.png"
     image.write_bytes(b"fake-png")

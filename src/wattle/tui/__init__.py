@@ -1917,7 +1917,7 @@ def _input_history_from_messages(messages: list[Message]) -> list[str]:
 
 def _flower_working_status(elapsed_seconds: int) -> tuple[Flower, str]:
     flower = flower_for_elapsed(elapsed_seconds)
-    return flower, f"{flower.shape} {flower.verb}..."
+    return flower, f"{flower.shape} model..."
 
 
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
@@ -4467,6 +4467,9 @@ class _LiveTerminal:
         try:
             signal.signal(signal.SIGWINCH, mark_resize_pending)
             tty.setcbreak(self.fd)
+            attrs = termios.tcgetattr(self.fd)
+            attrs[3] &= ~termios.IEXTEN
+            termios.tcsetattr(self.fd, termios.TCSADRAIN, attrs)
             self.app._write(f"\x1b[?2004h{KEYBOARD_ENHANCEMENT_ENABLE}\x1b[6 q")
             yield
         finally:
@@ -5465,6 +5468,7 @@ class _LiveTerminal:
             self._start_worker()
         else:
             self.inflight_tool_results = []
+            self.active_tool_status = None
             self.streaming = False
             self.working_started_at = None
             self.app._write_status_snapshot()
