@@ -41,6 +41,7 @@ class WattleSettings:
     tui: TuiSettings = field(default_factory=TuiSettings)
     enabled_models: tuple[str, ...] = field(default_factory=tuple)
     compaction_keep_recent_tokens: int = 20_000
+    git_commit_attribution: bool = True
 
 
 def default_settings_path() -> Path:
@@ -90,6 +91,7 @@ def settings_to_dict(settings: WattleSettings) -> dict[str, Any]:
         },
         "enabled_models": list(settings.enabled_models),
         "compaction_keep_recent_tokens": settings.compaction_keep_recent_tokens,
+        "git_commit_attribution": settings.git_commit_attribution,
     }
 
 
@@ -115,6 +117,10 @@ def settings_from_dict(data: dict[str, Any]) -> WattleSettings:
                 data.get("compaction_keep_recent_tokens"),
                 defaults.compaction_keep_recent_tokens,
             ),
+        ),
+        git_commit_attribution=_bool(
+            data.get("git_commit_attribution"),
+            defaults.git_commit_attribution,
         ),
     )
 

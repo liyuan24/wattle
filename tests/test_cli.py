@@ -171,10 +171,7 @@ def test_build_parser_permission_modes_are_mutually_exclusive() -> None:
     parser = cli._build_parser()
 
     assert parser.parse_args(["--read-only"]).permission_mode == cli.PermissionMode.READ_ONLY
-    assert (
-        parser.parse_args(["--ask-for-permission"]).permission_mode
-        == cli.PermissionMode.ASK
-    )
+    assert parser.parse_args(["--ask-for-permission"]).permission_mode == cli.PermissionMode.ASK
     assert parser.parse_args(["--yolo", "-p", "prompt"]).permission_mode == cli.PermissionMode.YOLO
     with pytest.raises(SystemExit):
         parser.parse_args(["--yolo", "--read-only"])

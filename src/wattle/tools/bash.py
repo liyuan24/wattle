@@ -11,7 +11,9 @@ import time
 from contextlib import suppress
 from pathlib import Path
 
+from wattle.git_attribution import apply_git_attribution_env
 from wattle.runtime import TaskStatus, WattleRuntime
+from wattle.settings import load_settings
 
 from .base import Tool
 from .utils.output import externalize_large_output
@@ -103,10 +105,12 @@ class BashTool(Tool):
     ) -> str:
         clamped_timeout = min(float(timeout), self.MAX_TIMEOUT_SECONDS)
         started_at = time.monotonic()
+        attribution = self._git_attribution_env(command)
         process = subprocess.Popen(
             command,
             shell=True,
             cwd=self.cwd,
+            env=attribution.env,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             start_new_session=True,
@@ -138,21 +142,19 @@ class BashTool(Tool):
             elapsed = time.monotonic() - started_at
             parts = [f"[timeout after {clamped_timeout:g}s; elapsed {elapsed:.2f}s]"]
             if capture_incomplete:
-                parts.append(
-                    "[output capture stopped: descendant process kept stdout/stderr open]"
-                )
+                parts.append("[output capture stopped: descendant process kept stdout/stderr open]")
             if stdout:
                 parts.append(stdout.rstrip("\n"))
             if stderr:
                 parts.append(f"[stderr]\n{stderr.rstrip(chr(10))}")
             return externalize_large_output(
-                "\n".join(parts),
+                _prepend_warnings("\n".join(parts), attribution.warnings),
                 root=self.cwd,
                 tool_name=self.name,
                 **_externalize_limits(max_output_chars),
             )
 
-        parts = []
+        parts = list(attribution.warnings)
         stdout_text = _decode_output(stdout)
         stderr_text = _decode_output(stderr)
         if stdout_text:
@@ -184,10 +186,12 @@ class BashTool(Tool):
         clamped_timeout = min(float(timeout), self.MAX_TIMEOUT_SECONDS)
         started_at = time.monotonic()
         master_fd, slave_fd = pty.openpty()
+        attribution = self._git_attribution_env(command)
         process = subprocess.Popen(
             command,
             shell=True,
             cwd=self.cwd,
+            env=attribution.env,
             stdin=slave_fd,
             stdout=slave_fd,
             stderr=slave_fd,
@@ -229,7 +233,7 @@ class BashTool(Tool):
                 os.close(master_fd)
 
         output_text = b"".join(chunks).decode(errors="replace").rstrip("\n")
-        parts: list[str] = []
+        parts: list[str] = list(attribution.warnings)
         if timed_out:
             elapsed = time.monotonic() - started_at
             parts.append(f"[timeout after {clamped_timeout:g}s; elapsed {elapsed:.2f}s]")
@@ -252,9 +256,8 @@ class BashTool(Tool):
 
     def _run_background(self, command: str, *, tty: bool) -> str:
         started_at = time.time()
-        log_path = (
-            self.runtime.tasks.jobs_dir / f"shell-{int(started_at * 1000)}-{os.getpid()}.log"
-        )
+        log_path = self.runtime.tasks.jobs_dir / f"shell-{int(started_at * 1000)}-{os.getpid()}.log"
+        attribution = self._git_attribution_env(command)
         log_file = log_path.open("ab")
         try:
             if tty:
@@ -263,6 +266,7 @@ class BashTool(Tool):
                     command,
                     shell=True,
                     cwd=self.cwd,
+                    env=attribution.env,
                     stdin=slave_fd,
                     stdout=slave_fd,
                     stderr=slave_fd,
@@ -272,10 +276,14 @@ class BashTool(Tool):
                 os.close(slave_fd)
             else:
                 master_fd = None
+                if attribution.warnings:
+                    log_file.write(("\n".join(attribution.warnings) + "\n").encode())
+                    log_file.flush()
                 process = subprocess.Popen(
                     command,
                     shell=True,
                     cwd=self.cwd,
+                    env=attribution.env,
                     stdout=log_file,
                     stderr=subprocess.STDOUT,
                     start_new_session=True,
@@ -321,6 +329,15 @@ class BashTool(Tool):
             ]
         )
 
+    def _git_attribution_env(self, command: str):
+        return apply_git_attribution_env(
+            os.environ,
+            cwd=self.cwd,
+            state_root=self.runtime.tasks.root,
+            command=command,
+            enabled=load_settings().git_commit_attribution,
+        )
+
 
 def _read_pty(fd: int) -> bytes:
     try:
@@ -345,6 +362,12 @@ def _decode_output(value: str | bytes | None) -> str:
     if isinstance(value, bytes):
         return value.decode(errors="replace")
     return value
+
+
+def _prepend_warnings(output: str, warnings: tuple[str, ...]) -> str:
+    if not warnings:
+        return output
+    return "\n".join([*warnings, output])
 
 
 def _output_limit(
