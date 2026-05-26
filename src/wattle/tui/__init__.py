@@ -198,11 +198,18 @@ SHIFT_ENTER_SEQUENCES = (
     "\x1b[13;2~",
     "\x1b[27;2;13~",
 )
+SHIFT_TAB_SEQUENCES = (
+    "\x1b[Z",
+    "\x1b[9;2u",
+    "\x1b[27;2;9~",
+)
+THINKING_LEVELS = ("low", "medium", "high", "xhigh", "max")
 KNOWN_ESCAPE_SEQUENCES = (
     "\x1b[200~",
     "\x1b[201~",
     *CTRL_V_KEY_SEQUENCES[1:],
     *SHIFT_ENTER_SEQUENCES,
+    *SHIFT_TAB_SEQUENCES,
     "\x1bb",
     "\x1bB",
     "\x1bf",
@@ -3541,6 +3548,22 @@ class WattleApp:
             STATUS_STYLE,
         )
 
+    def _cycle_thinking_level(self) -> None:
+        if not self.thinking or self.effort not in THINKING_LEVELS:
+            next_effort: str | None = THINKING_LEVELS[0]
+        else:
+            current_index = THINKING_LEVELS.index(self.effort)
+            next_effort = (
+                THINKING_LEVELS[current_index + 1]
+                if current_index + 1 < len(THINKING_LEVELS)
+                else None
+            )
+
+        self.thinking = next_effort is not None
+        self.effort = next_effort
+        self._persist_user_settings(thinking=self.thinking, effort=self.effort)
+        self._persist_session()
+
     def _handle_permissions(self, rest: str) -> None:
         value = rest.strip()
         aliases = {
@@ -4452,6 +4475,19 @@ class _LiveTerminal:
                 if shift_enter is not None:
                     self._insert_text("\n")
                     index += len(shift_enter) - 1
+                    self._draw_prompt()
+                elif (
+                    shift_tab := next(
+                        (
+                            sequence
+                            for sequence in SHIFT_TAB_SEQUENCES
+                            if data.startswith(sequence[1:], index)
+                        ),
+                        None,
+                    )
+                ):
+                    self.app._cycle_thinking_level()
+                    index += len(shift_tab) - 1
                     self._draw_prompt()
                 elif data.startswith("[118;5u", index) or data.startswith("[86;5u", index):
                     index += 7 if data.startswith("[118;5u", index) else 6

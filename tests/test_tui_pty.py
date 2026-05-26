@@ -1243,6 +1243,24 @@ def test_pty_tab_queues_input_for_end_turn_followup(tmp_path: Path) -> None:
         assert "after the full turn" in screen_text
 
 
+def test_pty_shift_tab_cycles_thinking_level(tmp_path: Path) -> None:
+    with PtySession.spawn_python(
+        _slow_wattle_child_code(first_delay=0.1, later_delay=0.1, prompt=None),
+        cwd=tmp_path,
+        cols=100,
+        rows=30,
+    ) as session:
+        session.read_until("gpt-5.5 |", timeout=3)
+        session.write("\x1b[Z")
+        session.read_until("thinking: low", timeout=3)
+        session.write("\x1b[Z")
+        session.read_until("thinking: medium", timeout=3)
+
+        screen_text = session.screen.text()
+        assert "thinking: medium" in screen_text
+        assert "thinking: low" not in screen_text
+
+
 def test_pty_dragged_image_uses_anchor_in_active_input(tmp_path: Path) -> None:
     image = tmp_path / "dragged image.png"
     image.write_bytes(b"fake-png")
