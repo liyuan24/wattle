@@ -40,6 +40,7 @@ from pygments.token import Token
 from pygments.util import ClassNotFound
 
 from wattle.auth import login_openai_codex
+from wattle.clipboard import ClipboardImage, read_clipboard_image
 from wattle.command_summary import (
     CommandSummary,
     is_research_summary,
@@ -189,6 +190,7 @@ SUPPORTED_IMAGE_MEDIA_TYPES = frozenset(
 ESCAPE_SEQUENCE_TIMEOUT_SECONDS = 0.05
 KEYBOARD_ENHANCEMENT_ENABLE = "\x1b[>1u\x1b[>4;2m"
 KEYBOARD_ENHANCEMENT_DISABLE = "\x1b[<u\x1b[>4m"
+CTRL_V_KEY_SEQUENCES = ("\x16", "\x1b[118;5u", "\x1b[86;5u")
 VISIBLE_SCREEN_CLEAR = "\x1b[H\x1b[2J\x1b[H"
 TERMINAL_HISTORY_CLEAR = "\x1b[3J"
 SHIFT_ENTER_SEQUENCES = (
@@ -199,6 +201,7 @@ SHIFT_ENTER_SEQUENCES = (
 KNOWN_ESCAPE_SEQUENCES = (
     "\x1b[200~",
     "\x1b[201~",
+    *CTRL_V_KEY_SEQUENCES[1:],
     *SHIFT_ENTER_SEQUENCES,
     "\x1bb",
     "\x1bB",
@@ -2278,6 +2281,7 @@ class WattleApp:
         self.inline_mode = inline_mode
         self.input_func = input_func or input
         self.out = out or sys.stdout
+        self.cwd = Path.cwd()
         self._settings = load_settings()
 
         self.current_provider_name: str = args.provider
@@ -2498,10 +2502,26 @@ class WattleApp:
         if self._session_record is None:
             return path
         data = path.read_bytes()
+        return self._write_image_asset(data, path.suffix.lower())
+
+    def _save_clipboard_image_asset(self, image: ClipboardImage) -> Path:
+        if len(image.data) > MAX_IMAGE_ATTACHMENT_BYTES:
+            raise ValueError(
+                f"Clipboard image is too large ({_format_bytes(len(image.data))}; "
+                f"max {_format_bytes(MAX_IMAGE_ATTACHMENT_BYTES)})"
+            )
+        return self._write_image_asset(image.data, image.extension)
+
+    def _write_image_asset(self, data: bytes, suffix: str) -> Path:
         digest = hashlib.sha256(data).hexdigest()[:16]
-        asset_dir = default_session_dir() / "assets" / self._session_record.metadata.id
+        safe_suffix = suffix if suffix.startswith(".") else f".{suffix}"
+        if self._session_record is not None:
+            asset_dir = default_session_dir() / "assets" / self._session_record.metadata.id
+            target = asset_dir / f"{digest}{safe_suffix.lower()}"
+        else:
+            asset_dir = self.cwd / ".wattle" / "clipboard-images"
+            target = asset_dir / f"clipboard-{digest}{safe_suffix.lower()}"
         asset_dir.mkdir(parents=True, exist_ok=True)
-        target = asset_dir / f"{digest}{path.suffix.lower()}"
         if not target.exists():
             target.write_bytes(data)
         return target
@@ -4401,6 +4421,9 @@ class _LiveTerminal:
                 self._draw_prompt()
             elif ch == "\x03" or (ch == "\x04" and not self.buffer):
                 self.running = False
+            elif ch == "\x16":
+                self._paste_clipboard_image_or_insert_literal(ch)
+                self._draw_prompt()
             elif ch == "\x15":
                 self.buffer = ""
                 self.cursor = 0
@@ -4429,6 +4452,10 @@ class _LiveTerminal:
                 if shift_enter is not None:
                     self._insert_text("\n")
                     index += len(shift_enter) - 1
+                    self._draw_prompt()
+                elif data.startswith("[118;5u", index) or data.startswith("[86;5u", index):
+                    index += 7 if data.startswith("[118;5u", index) else 6
+                    self._paste_clipboard_image_or_insert_literal("\x16")
                     self._draw_prompt()
                 elif data.startswith("b", index) or data.startswith("B", index):
                     self._move_cursor_word_left()
@@ -4559,6 +4586,18 @@ class _LiveTerminal:
             self.pasted_ranges = _merge_pasted_ranges(
                 [*self.pasted_ranges, (start, start + len(text))]
             )
+
+    def _paste_clipboard_image_or_insert_literal(self, fallback: str) -> None:
+        image = read_clipboard_image()
+        if image is None:
+            self._insert_text(fallback)
+            return
+        try:
+            path = self.app._save_clipboard_image_asset(image)
+        except ValueError as exc:
+            self.app._write_panel("error", str(exc), ERROR_STYLE)
+            return
+        self._insert_text(shlex.quote(str(path)))
 
     def _move_cursor_word_left(self) -> None:
         cursor = self.cursor

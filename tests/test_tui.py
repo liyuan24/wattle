@@ -1408,6 +1408,45 @@ def test_tui_supports_at_prefixed_image_and_file_paths(
     assert "secret file content" not in str(message.content)
 
 
+def test_live_ctrl_v_pastes_clipboard_image_as_anchor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    out = io.StringIO()
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    monkeypatch.setattr(app, "cwd", tmp_path)
+    monkeypatch.setattr(
+        tui,
+        "read_clipboard_image",
+        lambda: tui.ClipboardImage(b"fake-png", "image/png", ".png"),
+    )
+    live = tui._LiveTerminal(app)
+
+    live._paste_clipboard_image_or_insert_literal("\x16")
+
+    assert "[image#1]" in tui._image_placeholder_prompt_render(
+        tui._render_prompt_input(live.buffer, live.pasted_ranges, live.cursor)
+    ).text
+    assert "\x16" not in live.buffer
+    assert (tmp_path / ".wattle" / "clipboard-images").is_dir()
+    content = app._user_content_blocks(live.buffer)
+    assert content[0] == TextBlock(text="[image#1]")
+    assert any(isinstance(block, ImageBlock) for block in content)
+
+
+def test_live_ctrl_v_falls_back_to_literal_when_no_clipboard_image(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    out = io.StringIO()
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    monkeypatch.setattr(tui, "read_clipboard_image", lambda: None)
+    live = tui._LiveTerminal(app)
+
+    live._paste_clipboard_image_or_insert_literal("\x16")
+
+    assert live.buffer == "\x16"
+
+
 def test_absolute_dragged_image_path_is_not_treated_as_slash_command(
     tmp_path: Path,
 ) -> None:

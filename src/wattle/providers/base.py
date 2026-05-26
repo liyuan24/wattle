@@ -31,9 +31,10 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import Any, Literal, Self
+from typing import TYPE_CHECKING, Any, Literal, Self
 
-from wattle.tools.base import ToolSpec
+if TYPE_CHECKING:
+    from wattle.tools.base import ToolSpec
 
 ProviderErrorKind = Literal[
     "quota",
