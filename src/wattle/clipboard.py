@@ -45,8 +45,8 @@ if imageObject is not missing value then
         set bitmap to current application's NSBitmapImageRep's imageRepWithData:tiffData
         if bitmap is not missing value then
             set fileType to current application's NSBitmapImageFileTypePNG
-            set properties to current application's NSDictionary's dictionary()
-            set pngData to bitmap's representationUsingType:fileType |properties|:properties
+            set imageProperties to current application's NSDictionary's dictionary()
+            set pngData to bitmap's representationUsingType:fileType |properties|:imageProperties
             if pngData is not missing value then
                 set encoded to pngData's base64EncodedStringWithOptions:0
                 my writeStdout("public.png", (encoded as text))

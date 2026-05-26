@@ -38,6 +38,11 @@ def test_read_clipboard_image_returns_none_without_image(monkeypatch) -> None:
     assert clipboard.read_clipboard_image() is None
 
 
+def test_macos_clipboard_fallback_does_not_assign_properties_keyword() -> None:
+    assert "set imageProperties to" in clipboard._MACOS_CLIPBOARD_IMAGE_SCRIPT
+    assert "set properties to" not in clipboard._MACOS_CLIPBOARD_IMAGE_SCRIPT
+
+
 def test_read_clipboard_image_reads_wayland_png(monkeypatch) -> None:
     data = b"fake-png"
     monkeypatch.setattr(clipboard.platform, "system", lambda: "Linux")
