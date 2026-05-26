@@ -24,7 +24,12 @@ import openai
 
 from wattle.agent import AgentRunResult, _ProviderSpec, run_agent, run_agent_with_history
 from wattle.auth import get_api_key_credential, get_credential, get_openai_codex_credential
-from wattle.models import MODEL_CHOICES_BY_MODEL, ModelChoice, available_model_choices
+from wattle.models import (
+    MODEL_CHOICES_BY_MODEL,
+    first_available_model_choice,
+    first_catalog_model_choice,
+    first_catalog_model_choice_for_provider,
+)
 from wattle.permissions import PermissionMode
 from wattle.providers import (
     AnthropicProvider,
@@ -278,13 +283,19 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--provider",
         choices=sorted(_PROVIDER_DISPATCH),
-        default="openai_codex",
-        help="Provider to talk to (default: openai_codex).",
+        default=None,
+        help=(
+            "Provider to talk to (default: settings.json provider, otherwise "
+            "the provider for the selected/default catalog model)."
+        ),
     )
     parser.add_argument(
         "--model",
-        default="gpt-5.5",
-        help="Model id forwarded to the provider (default: gpt-5.5).",
+        default=None,
+        help=(
+            "Model id forwarded to the provider (default: settings.json model, "
+            "otherwise the first model of the first authenticated provider)."
+        ),
     )
     parser.add_argument(
         "--max-tokens",
@@ -326,22 +337,29 @@ def _apply_settings_defaults(
 ) -> None:
     model_explicit = _has_flag(argv, "--model")
     provider_explicit = _has_flag(argv, "--provider")
-    if not model_explicit:
-        args.model = settings.model
-    if not provider_explicit:
-        provider = _default_provider_for_model(args.model) or settings.provider
-        if provider in _PROVIDER_DISPATCH and _provider_auth_available(provider):
-            args.provider = provider
-        elif (
-            settings.provider in _PROVIDER_DISPATCH
-            and _provider_auth_available(settings.provider)
-        ):
-            args.provider = settings.provider
-        elif not model_explicit:
-            default_choice = _first_available_model_choice()
-            if default_choice is not None:
-                args.model = default_choice.model
+    if provider_explicit and not model_explicit and settings.model is None:
+        provider_default = first_catalog_model_choice_for_provider(args.provider)
+        if provider_default is not None:
+            args.model = provider_default.model
+    if not model_explicit and args.model is None:
+        if settings.model is not None:
+            args.model = settings.model
+        else:
+            default_choice = first_available_model_choice() or first_catalog_model_choice()
+            args.model = default_choice.model
+            if not provider_explicit:
                 args.provider = default_choice.provider
+    if not provider_explicit:
+        provider = _default_provider_for_model(args.model)
+        if provider is not None:
+            args.provider = provider
+        elif settings.provider in _PROVIDER_DISPATCH:
+            args.provider = settings.provider
+        else:
+            default_choice = first_available_model_choice() or first_catalog_model_choice()
+            args.provider = default_choice.provider
+            if not model_explicit and settings.model is None:
+                args.model = default_choice.model
     if not _has_flag(argv, "--max-tokens"):
         args.max_tokens = settings.max_tokens
     if not _has_flag(argv, "--thinking") and not _has_flag(argv, "--effort"):
@@ -363,11 +381,6 @@ def _apply_settings_defaults(
 def _default_provider_for_model(model: str) -> str | None:
     choice = MODEL_CHOICES_BY_MODEL.get(model)
     return choice.provider if choice is not None else None
-
-
-def _first_available_model_choice() -> ModelChoice | None:
-    choices = available_model_choices()
-    return choices[0] if choices else None
 
 
 def _has_flag(argv: list[str], flag: str) -> bool:

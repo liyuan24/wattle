@@ -5797,7 +5797,7 @@ def test_terminal_model_selection_switches_provider(monkeypatch: pytest.MonkeyPa
     assert openai_provider.requests[0].model == "gpt-5.5"
 
 
-def test_terminal_login_xiaomi_token_plan_sets_default_model(
+def test_terminal_login_xiaomi_token_plan_preserves_current_model(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -5815,16 +5815,17 @@ def test_terminal_login_xiaomi_token_plan_sets_default_model(
     out, app = _drive(
         _ScriptedStreamProvider([]),
         ["/login xiaomi-token-plan-sgp", "tp-test-key", "/exit"],
+        args=_make_args(),
     )
 
     saved_settings = settings.load_settings(tmp_path / "settings.json")
     assert "Xiaomi Token Plan SGP API key saved" in out
     assert provider_names == ["xiaomi-token-plan-sgp"]
     assert app.current_provider_name == "xiaomi-token-plan-sgp"
-    assert app.current_model == "mimo-v2.5-pro"
+    assert app.current_model == "gpt-5.5"
     assert app.provider is reloaded_provider
     assert saved_settings.provider == "xiaomi-token-plan-sgp"
-    assert saved_settings.model == "mimo-v2.5-pro"
+    assert saved_settings.model == "gpt-5.5"
 
 
 def test_tui_statusline_defaults_to_model_thinking_and_cwd(

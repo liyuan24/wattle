@@ -31,8 +31,8 @@ class TuiSettings:
 
 @dataclass(frozen=True, slots=True)
 class WattleSettings:
-    provider: str = "openai_codex"
-    model: str = "gpt-5.5"
+    provider: str | None = None
+    model: str | None = None
     max_tokens: int = 4096
     thinking: bool = False
     effort: Effort | None = None
@@ -125,7 +125,7 @@ def settings_from_dict(data: dict[str, Any]) -> WattleSettings:
     )
 
 
-def _str(value: object, default: str) -> str:
+def _str(value: object, default: str | None) -> str | None:
     return value if isinstance(value, str) and value else default
 
 

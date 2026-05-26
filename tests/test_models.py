@@ -7,6 +7,19 @@ import pytest
 from wattle import auth, models, request_preparation
 
 
+def test_provider_catalog_is_ordered_with_codex_first() -> None:
+    assert [choice.provider for choice in models.PROVIDER_CATALOG] == [
+        "openai_codex",
+        "anthropic",
+        "deepseek",
+        "kimi",
+        "minimax",
+        "xiaomi-token-plan-sgp",
+    ]
+    assert models.first_catalog_model_choice().provider == "openai_codex"
+    assert models.first_catalog_model_choice().model == "gpt-5.5"
+
+
 def test_model_catalog_includes_context_windows() -> None:
     assert {choice.model: choice.context_window for choice in models.MODEL_CATALOG} == {
         "gpt-5.5": 272_000,

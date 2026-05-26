@@ -7,6 +7,9 @@ from typing import Literal
 
 from wattle.auth import get_credential, get_openai_codex_credential
 
+CODEX_PROVIDER = "openai_codex"
+CODEX_DEFAULT_MODEL = "gpt-5.5"
+
 XIAOMI_TOKEN_PLAN_SGP_PROVIDER = "xiaomi-token-plan-sgp"
 XIAOMI_DEFAULT_MODEL = "mimo-v2.5-pro"
 type EffortLevel = Literal["low", "medium", "high", "xhigh", "max"]
@@ -14,6 +17,15 @@ type EffortLevel = Literal["low", "medium", "high", "xhigh", "max"]
 DEFAULT_EFFORT_LEVELS: tuple[EffortLevel, ...] = ("low", "medium", "high", "xhigh", "max")
 OPENAI_CODEX_EFFORT_LEVELS: tuple[EffortLevel, ...] = ("low", "medium", "high", "xhigh")
 XIAOMI_EFFORT_LEVELS: tuple[EffortLevel, ...] = ("low", "medium", "high")
+
+
+@dataclass(frozen=True)
+class ProviderChoice:
+    """One supported provider in default-selection order."""
+
+    provider: str
+    vendor: str
+    description: str
 
 
 @dataclass(frozen=True)
@@ -37,10 +49,44 @@ MINIMAX_MODELS_URL = "https://platform.minimax.io/docs/guides/text-generation"
 XIAOMI_MODELS_URL = "https://token-plan-sgp.xiaomimimo.com/v1/models"
 
 
+PROVIDER_CATALOG: tuple[ProviderChoice, ...] = (
+    ProviderChoice(
+        provider=CODEX_PROVIDER,
+        vendor="openai",
+        description="ChatGPT Plus/Pro Codex OAuth provider.",
+    ),
+    ProviderChoice(
+        provider="anthropic",
+        vendor="anthropic",
+        description="Anthropic Claude API provider.",
+    ),
+    ProviderChoice(
+        provider="deepseek",
+        vendor="deepseek",
+        description="DeepSeek OpenAI-compatible API provider.",
+    ),
+    ProviderChoice(
+        provider="kimi",
+        vendor="kimi",
+        description="Moonshot Kimi OpenAI-compatible API provider.",
+    ),
+    ProviderChoice(
+        provider="minimax",
+        vendor="minimax",
+        description="MiniMax OpenAI-compatible API provider.",
+    ),
+    ProviderChoice(
+        provider=XIAOMI_TOKEN_PLAN_SGP_PROVIDER,
+        vendor=XIAOMI_TOKEN_PLAN_SGP_PROVIDER,
+        description="Xiaomi Token Plan SGP OpenAI-compatible API provider.",
+    ),
+)
+
+
 MODEL_CATALOG: tuple[ModelChoice, ...] = (
     ModelChoice(
-        model="gpt-5.5",
-        provider="openai_codex",
+        model=CODEX_DEFAULT_MODEL,
+        provider=CODEX_PROVIDER,
         vendor="openai",
         description="Frontier model for complex coding, research, and real-world work.",
         context_window=272_000,
@@ -201,7 +247,7 @@ def has_vendor_auth(vendor: str) -> bool:
 def has_model_auth(choice: ModelChoice) -> bool:
     """Return whether auth can run this model's provider."""
     try:
-        if choice.provider == "openai_codex":
+        if choice.provider == CODEX_PROVIDER:
             get_openai_codex_credential()
         else:
             get_credential(choice.vendor)
@@ -210,9 +256,33 @@ def has_model_auth(choice: ModelChoice) -> bool:
     return True
 
 
+def available_provider_choices() -> list[ProviderChoice]:
+    """Return supported providers with configured credentials in catalog order."""
+    available_providers = {choice.provider for choice in available_model_choices()}
+    return [
+        choice for choice in PROVIDER_CATALOG if choice.provider in available_providers
+    ]
+
+
 def available_model_choices() -> list[ModelChoice]:
     """Return catalog entries whose vendors are configured in auth."""
     return [choice for choice in MODEL_CATALOG if has_model_auth(choice)]
+
+
+def first_catalog_model_choice() -> ModelChoice:
+    """Return the first supported model in provider/model catalog order."""
+    return MODEL_CATALOG[0]
+
+
+def first_catalog_model_choice_for_provider(provider: str) -> ModelChoice | None:
+    """Return the first supported model for ``provider`` in catalog order."""
+    return next((choice for choice in MODEL_CATALOG if choice.provider == provider), None)
+
+
+def first_available_model_choice() -> ModelChoice | None:
+    """Return the first credential-backed supported model in catalog order."""
+    choices = available_model_choices()
+    return choices[0] if choices else None
 
 
 def context_window_for_model(model: str) -> int | None:

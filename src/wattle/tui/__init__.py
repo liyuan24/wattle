@@ -3464,7 +3464,7 @@ class WattleApp:
                 ERROR_STYLE,
             )
             return
-        vendor, display_name, default_model = login_config
+        vendor, display_name, _default_model = login_config
         try:
             credential = save_api_key_credential(vendor, api_key)
         except Exception as exc:  # noqa: BLE001
@@ -3480,7 +3480,6 @@ class WattleApp:
 
         try:
             self.current_provider_name = provider
-            self.current_model = default_model
             self.provider = _build_provider(self.current_provider_name)
             self._configure_subagents(provider=self.provider)
             self._persist_user_settings(

@@ -23,8 +23,8 @@ def test_build_parser_defaults_to_tui_settings() -> None:
     args = parser.parse_args([])
 
     assert args.prompt is None
-    assert args.provider == "openai_codex"
-    assert args.model == "gpt-5.5"
+    assert args.provider is None
+    assert args.model is None
     assert args.max_tokens == 4096
     assert args.thinking is False
     assert args.effort is None
@@ -87,22 +87,18 @@ def test_apply_settings_defaults_prefers_catalog_provider_for_known_model(
     assert args.model == "gpt-5.5"
 
 
-def test_apply_settings_defaults_ignores_saved_provider_without_auth_when_no_models_available(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_apply_settings_defaults_uses_saved_provider_for_unknown_saved_model() -> None:
     parser = cli._build_parser()
     args = parser.parse_args([])
-    monkeypatch.setattr(cli, "_provider_auth_available", lambda _provider: False)
-    monkeypatch.setattr(cli, "available_model_choices", lambda: [])
 
     cli._apply_settings_defaults(
         args,
         [],
-        WattleSettings(provider="openai_responses", model="gpt-5.4"),
+        WattleSettings(provider="openai_responses", model="custom-platform-model"),
     )
 
-    assert args.provider == "openai_codex"
-    assert args.model == "gpt-5.4"
+    assert args.provider == "openai_responses"
+    assert args.model == "custom-platform-model"
 
 
 def test_apply_settings_defaults_falls_back_to_first_available_model(
@@ -110,30 +106,21 @@ def test_apply_settings_defaults_falls_back_to_first_available_model(
 ) -> None:
     parser = cli._build_parser()
     args = parser.parse_args([])
-    monkeypatch.setattr(cli, "_provider_auth_available", lambda _provider: False)
     monkeypatch.setattr(
         cli,
-        "available_model_choices",
-        lambda: [
-            models.ModelChoice(
-                model="mimo-v2.5-pro",
-                provider="xiaomi-token-plan-sgp",
-                vendor="xiaomi-token-plan-sgp",
-                description="Xiaomi MiMo V2.5 Pro model.",
-            ),
-            models.ModelChoice(
-                model="mimo-v2.5",
-                provider="xiaomi-token-plan-sgp",
-                vendor="xiaomi-token-plan-sgp",
-                description="Xiaomi MiMo V2.5 model.",
-            ),
-        ],
+        "first_available_model_choice",
+        lambda: models.ModelChoice(
+            model="mimo-v2.5-pro",
+            provider="xiaomi-token-plan-sgp",
+            vendor="xiaomi-token-plan-sgp",
+            description="Xiaomi MiMo V2.5 Pro model.",
+        ),
     )
 
     cli._apply_settings_defaults(
         args,
         [],
-        WattleSettings(provider="openai_codex", model="gpt-5.5"),
+        WattleSettings(),
     )
 
     assert args.provider == "xiaomi-token-plan-sgp"
@@ -145,18 +132,15 @@ def test_apply_settings_defaults_keeps_explicit_model_when_provider_has_no_auth(
 ) -> None:
     parser = cli._build_parser()
     args = parser.parse_args(["--model", "gpt-5.5"])
-    monkeypatch.setattr(cli, "_provider_auth_available", lambda _provider: False)
     monkeypatch.setattr(
         cli,
-        "available_model_choices",
-        lambda: [
-            models.ModelChoice(
-                model="mimo-v2.5-pro",
-                provider="xiaomi-token-plan-sgp",
-                vendor="xiaomi-token-plan-sgp",
-                description="Xiaomi MiMo V2.5 Pro model.",
-            )
-        ],
+        "first_available_model_choice",
+        lambda: models.ModelChoice(
+            model="mimo-v2.5-pro",
+            provider="xiaomi-token-plan-sgp",
+            vendor="xiaomi-token-plan-sgp",
+            description="Xiaomi MiMo V2.5 Pro model.",
+        ),
     )
 
     cli._apply_settings_defaults(
@@ -164,6 +148,33 @@ def test_apply_settings_defaults_keeps_explicit_model_when_provider_has_no_auth(
         ["--model", "gpt-5.5"],
         WattleSettings(provider="openai_codex", model="gpt-5.5"),
     )
+
+    assert args.provider == "openai_codex"
+    assert args.model == "gpt-5.5"
+
+
+def test_apply_settings_defaults_uses_first_catalog_model_for_explicit_provider() -> None:
+    parser = cli._build_parser()
+    args = parser.parse_args(["--provider", "xiaomi-token-plan-sgp"])
+
+    cli._apply_settings_defaults(
+        args,
+        ["--provider", "xiaomi-token-plan-sgp"],
+        WattleSettings(),
+    )
+
+    assert args.provider == "xiaomi-token-plan-sgp"
+    assert args.model == "mimo-v2.5-pro"
+
+
+def test_apply_settings_defaults_falls_back_to_first_catalog_model_without_auth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parser = cli._build_parser()
+    args = parser.parse_args([])
+    monkeypatch.setattr(cli, "first_available_model_choice", lambda: None)
+
+    cli._apply_settings_defaults(args, [], WattleSettings())
 
     assert args.provider == "openai_codex"
     assert args.model == "gpt-5.5"
