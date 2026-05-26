@@ -34,6 +34,11 @@ def test_build_system_prompt_uses_wattle_default_without_pi_docs(tmp_path: Path)
     assert "derive the task contract" in prompt
     assert "assumptions that must be checked" in prompt
     assert "validate heuristic constants or stopping conditions with repeatable evidence" in prompt
+    assert "Work until the user's task is actually handled" in prompt
+    assert "Do not stop at analysis, a partial implementation" in prompt
+    assert "Treat fixable follow-up work discovered during validation" in prompt
+    assert "rerun focused validation" in prompt
+    assert "runtime permission restriction" in prompt
     assert "When investigating a failure, prioritize reproducing and explaining" in prompt
     assert "keep multiple hypotheses alive until one explains the symptom end to end" in prompt
     assert "For investigation/debugging requests, do not modify existing project files" in prompt
@@ -95,6 +100,27 @@ def test_read_only_mode_adds_read_only_guideline(tmp_path: Path) -> None:
     )
 
     assert "Read-only mode is active" in prompt
+
+
+def test_persistence_guideline_is_stable_across_permission_modes(tmp_path: Path) -> None:
+    prompts = [
+        build_system_prompt(
+            tools_by_name=TOOLS_BY_NAME,
+            cwd=tmp_path,
+            context_files=[],
+            permission_mode=mode,
+            current_date=date(2026, 5, 10),
+        )
+        for mode in PermissionMode
+    ]
+
+    expected = (
+        "Work until the user's task is actually handled. Do not stop at analysis, "
+        "a partial implementation, or the first validation failure when the next "
+        "step is clear."
+    )
+    assert all(expected in prompt for prompt in prompts)
+    assert len({prompt.split("When investigating a failure", 1)[0] for prompt in prompts}) == 1
 
 
 def _touch_git(path: Path) -> None:

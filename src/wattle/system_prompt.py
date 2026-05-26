@@ -151,6 +151,17 @@ def _guidelines(
         "with that contract, and validate heuristic constants or stopping "
         "conditions with repeatable evidence instead of a single successful "
         "trial.",
+        "Work until the user's task is actually handled. Do not stop at "
+        "analysis, a partial implementation, or the first validation failure "
+        "when the next step is clear. Treat fixable follow-up work discovered "
+        "during validation, such as failing tests, stale expectations, missing "
+        "imports, formatting issues, or type errors, as part of the task. "
+        "Continue making reasonable local decisions, apply the needed fixes "
+        "when the available tools and runtime permissions allow it, and rerun "
+        "focused validation. Stop only when the task is complete, the user "
+        "explicitly asks you to pause, or you are genuinely blocked by a "
+        "missing decision, unavailable credential, destructive action, external "
+        "cost/risk, or a runtime permission restriction.",
         "When investigating a failure, prioritize reproducing and explaining "
         "the observed symptom. Treat cwd, repo identity, filenames, and nearby "
         "docs as context, not as proof of user intent. If evidence conflicts, "
