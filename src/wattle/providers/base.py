@@ -28,6 +28,7 @@ Design notes:
 
 from __future__ import annotations
 
+import os
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
@@ -45,6 +46,24 @@ ProviderErrorKind = Literal[
     "policy",
     "request_too_large",
 ]
+
+DEFAULT_STREAM_IDLE_TIMEOUT_SECONDS = 300.0
+STREAM_IDLE_TIMEOUT_ENV = "WATTLE_STREAM_IDLE_TIMEOUT_SECONDS"
+
+
+def stream_idle_timeout_seconds_from_env(
+    default: float = DEFAULT_STREAM_IDLE_TIMEOUT_SECONDS,
+) -> float:
+    """Return the configured provider stream idle timeout in seconds."""
+
+    raw = os.environ.get(STREAM_IDLE_TIMEOUT_ENV)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        return default
+    return value if value > 0 else default
 
 # ---------------------------------------------------------------------------
 # Content blocks

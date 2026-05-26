@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import base64
 import io
 import json
@@ -118,6 +119,23 @@ class _TransientThenSuccessStreamProvider(Provider):
                 "Codex request failed with HTTP 503: upstream reset",
                 status_code=503,
             )
+        response = CompletionResponse(content=[TextBlock(text="final")], stop_reason="end_turn")
+        yield TextDelta(text="final")
+        yield StreamComplete(response=response)
+
+
+class _IdleThenSuccessStreamProvider(Provider):
+    def __init__(self) -> None:
+        self.requests: list[CompletionRequest] = []
+
+    async def acomplete(self, request: CompletionRequest) -> CompletionResponse:  # pragma: no cover
+        raise NotImplementedError
+
+    async def astream(self, request: CompletionRequest) -> AsyncIterator[Any]:
+        self.requests.append(request)
+        if len(self.requests) == 1:
+            yield TextDelta(text="partial")
+            await asyncio.sleep(60)
         response = CompletionResponse(content=[TextBlock(text="final")], stop_reason="end_turn")
         yield TextDelta(text="final")
         yield StreamComplete(response=response)
@@ -435,6 +453,28 @@ def test_basic_tui_retries_transient_error_and_reports_reconnect(
     assert "[status] Reconnecting... 1/3" in out
     assert "final" in out
     assert "upstream reset" not in out
+
+
+def test_basic_tui_retries_idle_stream_and_reports_reconnect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(request_preparation, "_stream_retry_delay", lambda _attempt: 0.0)
+    monkeypatch.setattr(
+        request_preparation,
+        "stream_idle_timeout_seconds_from_env",
+        lambda: 0.01,
+    )
+    provider = _IdleThenSuccessStreamProvider()
+
+    out, app = _drive(provider, ["run the task", "/exit"])
+
+    assert len(provider.requests) == 2
+    assert provider.requests[0].messages == provider.requests[1].messages
+    assert [message.role for message in app.messages] == ["user", "assistant"]
+    assert app.messages[-1].content == [TextBlock(text="final")]
+    assert "partial" not in out
+    assert "[status] Reconnecting... 1/3" in out
+    assert "final" in out
 
 
 def test_basic_tui_exhausted_transient_error_keeps_prompt_readable(

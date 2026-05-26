@@ -12,8 +12,11 @@ with the account id extracted from the OAuth JWT and sent in
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import platform
+import queue
+import threading
 import urllib.error
 import urllib.request
 from collections.abc import AsyncIterator, Callable, Iterator
@@ -41,6 +44,7 @@ from .base import (
     ToolUseBlock,
     ToolUseDelta,
     TransientProviderError,
+    stream_idle_timeout_seconds_from_env,
 )
 
 DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api"
@@ -52,7 +56,10 @@ DEFAULT_CODEX_INSTRUCTIONS = (
     "relevant checks when feasible."
 )
 
-UrlOpen = Callable[[urllib.request.Request], Any]
+UrlOpen = Callable[..., Any]
+_STREAM_DONE = object()
+_QUEUE_EMPTY = object()
+_QUEUE_POLL_SECONDS = 0.1
 
 MINUTES_PER_HOUR = 60
 MINUTES_PER_5_HOURS = 5 * MINUTES_PER_HOUR
@@ -84,18 +91,25 @@ class OpenAICodexResponsesProvider(Provider):
         urlopen: UrlOpen | None = None,
         session_id: str | None = None,
         thread_id: str | None = None,
+        stream_idle_timeout_seconds: float | None = None,
     ) -> None:
         self.bearer_token = bearer_token
         self.base_url = base_url
         self.urlopen = urlopen or urllib.request.urlopen
         self.session_id = session_id or str(uuid4())
         self.thread_id = thread_id or str(uuid4())
+        self.stream_idle_timeout_seconds = (
+            stream_idle_timeout_seconds_from_env()
+            if stream_idle_timeout_seconds is None
+            else max(0.001, stream_idle_timeout_seconds)
+        )
 
     def fork(self) -> OpenAICodexResponsesProvider:
         return OpenAICodexResponsesProvider(
             bearer_token=self.bearer_token,
             base_url=self.base_url,
             urlopen=self.urlopen,
+            stream_idle_timeout_seconds=self.stream_idle_timeout_seconds,
         )
 
     async def acomplete(self, request: CompletionRequest) -> CompletionResponse:
@@ -108,9 +122,28 @@ class OpenAICodexResponsesProvider(Provider):
         return response
 
     async def astream(self, request: CompletionRequest) -> AsyncIterator[StreamEvent]:
-        events = await asyncio.to_thread(lambda: list(self._stream_blocking(request)))
-        for event in events:
-            yield event
+        items: queue.Queue[StreamEvent | BaseException | object] = queue.Queue()
+
+        def produce() -> None:
+            try:
+                for event in self._stream_blocking(request):
+                    items.put(event)
+            except BaseException as exc:  # noqa: BLE001
+                items.put(exc)
+            finally:
+                items.put(_STREAM_DONE)
+
+        threading.Thread(target=produce, name="wattle-codex-stream", daemon=True).start()
+
+        while True:
+            item = await asyncio.to_thread(_get_queue_item, items)
+            if item is _QUEUE_EMPTY:
+                continue
+            if item is _STREAM_DONE:
+                return
+            if isinstance(item, BaseException):
+                raise item
+            yield item
 
     def _stream_blocking(self, request: CompletionRequest) -> Iterator[StreamEvent]:
         body = self._build_body(request)
@@ -126,7 +159,11 @@ class OpenAICodexResponsesProvider(Provider):
         )
 
         try:
-            with self.urlopen(http_request) as response:
+            with _urlopen_with_timeout(
+                self.urlopen,
+                http_request,
+                timeout=self.stream_idle_timeout_seconds,
+            ) as response:
                 yield from _events_from_sse(
                     response,
                     initial_rate_limits=_rate_limit_snapshot_from_headers(response),
@@ -144,9 +181,26 @@ class OpenAICodexResponsesProvider(Provider):
             )
             raise normalized from exc
         except urllib.error.URLError as exc:
+            if _is_timeout_error(exc):
+                raise TransientProviderError(
+                    _codex_stream_idle_timeout_message(self.stream_idle_timeout_seconds),
+                    provider="openai_codex",
+                ) from exc
             raise TransientProviderError(
                 f"Codex request failed before a response: {exc.reason}",
             ) from exc
+        except TimeoutError as exc:
+            raise TransientProviderError(
+                _codex_stream_idle_timeout_message(self.stream_idle_timeout_seconds),
+                provider="openai_codex",
+            ) from exc
+        except OSError as exc:
+            if _is_timeout_error(exc):
+                raise TransientProviderError(
+                    _codex_stream_idle_timeout_message(self.stream_idle_timeout_seconds),
+                    provider="openai_codex",
+                ) from exc
+            raise
 
     def fetch_quota_usage(self) -> dict[str, int]:
         """Fetch current Codex usage limits without starting a model turn."""
@@ -157,7 +211,11 @@ class OpenAICodexResponsesProvider(Provider):
             method="GET",
         )
         try:
-            with self.urlopen(http_request) as response:
+            with _urlopen_with_timeout(
+                self.urlopen,
+                http_request,
+                timeout=self.stream_idle_timeout_seconds,
+            ) as response:
                 body = response.read().decode("utf-8", errors="replace")
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
@@ -204,6 +262,54 @@ class OpenAICodexResponsesProvider(Provider):
             if effort is not None:
                 body["reasoning"] = {"effort": effort, "summary": "auto"}
         return body
+
+
+def _get_queue_item(
+    items: queue.Queue[StreamEvent | BaseException | object],
+) -> StreamEvent | BaseException | object:
+    try:
+        return items.get(timeout=_QUEUE_POLL_SECONDS)
+    except queue.Empty:
+        return _QUEUE_EMPTY
+
+
+def _urlopen_with_timeout(
+    urlopen: UrlOpen,
+    request: urllib.request.Request,
+    *,
+    timeout: float,
+) -> Any:
+    if _callable_accepts_timeout(urlopen):
+        return urlopen(request, timeout=timeout)
+    return urlopen(request)
+
+
+def _callable_accepts_timeout(callable_obj: UrlOpen) -> bool:
+    try:
+        signature = inspect.signature(callable_obj)
+    except (TypeError, ValueError):
+        return True
+    for parameter in signature.parameters.values():
+        if parameter.kind is parameter.VAR_KEYWORD:
+            return True
+        if parameter.name == "timeout":
+            return True
+    return False
+
+
+def _is_timeout_error(error: BaseException) -> bool:
+    if isinstance(error, TimeoutError):
+        return True
+    if isinstance(error, urllib.error.URLError):
+        reason = error.reason
+        if isinstance(reason, BaseException):
+            return _is_timeout_error(reason)
+        return "timed out" in str(reason).lower()
+    return "timed out" in str(error).lower() or "timeout" in str(error).lower()
+
+
+def _codex_stream_idle_timeout_message(timeout_seconds: float) -> str:
+    return f"Codex stream was idle for {timeout_seconds:g}s."
 
 
 def _codex_tool_spec_to_api(spec: dict[str, Any]) -> dict[str, Any]:

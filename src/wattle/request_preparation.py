@@ -30,6 +30,7 @@ from wattle.providers import (
     StreamEvent,
     TransientProviderError,
 )
+from wattle.providers.base import stream_idle_timeout_seconds_from_env
 from wattle.session import message_to_dict
 
 DEFAULT_STREAM_MAX_RETRIES = 3
@@ -68,6 +69,7 @@ class RequestPreparer:
         ) = None,
         compaction_keep_recent_tokens: int = 20_000,
         stream_max_retries: int = DEFAULT_STREAM_MAX_RETRIES,
+        stream_idle_timeout_seconds: float | None = None,
         on_stream_retry: StreamRetryCallback | None = None,
     ) -> None:
         self.provider = provider
@@ -86,6 +88,11 @@ class RequestPreparer:
         self.on_compaction_record = on_compaction_record
         self.compaction_keep_recent_tokens = compaction_keep_recent_tokens
         self.stream_max_retries = max(0, stream_max_retries)
+        self.stream_idle_timeout_seconds = (
+            stream_idle_timeout_seconds_from_env()
+            if stream_idle_timeout_seconds is None
+            else max(0.001, stream_idle_timeout_seconds)
+        )
         self.on_stream_retry = on_stream_retry
 
     async def aprepare(
@@ -210,7 +217,10 @@ async def _astream_prepared_with_retries(
 ) -> AsyncIterator[StreamEvent]:
     for failures in range(preparer.stream_max_retries + 1):
         try:
-            async for event in preparer.provider.astream(request):
+            async for event in _iter_stream_with_idle_timeout(
+                preparer.provider.astream(request),
+                timeout_seconds=preparer.stream_idle_timeout_seconds,
+            ):
                 yield event
             return
         except (IncompleteStreamError, TransientProviderError) as exc:
@@ -219,6 +229,31 @@ async def _astream_prepared_with_retries(
             delay = _retry_delay_for_error(failures + 1, exc)
             _notify_stream_retry(preparer, failures + 1, exc, delay)
             await asyncio.sleep(delay)
+
+
+async def _iter_stream_with_idle_timeout(
+    events: AsyncIterator[StreamEvent],
+    *,
+    timeout_seconds: float,
+) -> AsyncIterator[StreamEvent]:
+    try:
+        while True:
+            try:
+                event = await asyncio.wait_for(
+                    anext(events),
+                    timeout=timeout_seconds,
+                )
+            except StopAsyncIteration:
+                return
+            except TimeoutError as exc:
+                raise TransientProviderError(
+                    f"Provider stream was idle for {timeout_seconds:g}s.",
+                ) from exc
+            yield event
+    finally:
+        aclose = getattr(events, "aclose", None)
+        if callable(aclose):
+            await aclose()
 
 
 def _retry_delay_for_error(attempt: int, error: RetryableProviderError) -> float:

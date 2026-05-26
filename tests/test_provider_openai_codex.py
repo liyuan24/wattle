@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import io
 import json
+import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
@@ -19,6 +20,7 @@ from wattle.providers import (
     Message,
     OpenAICodexResponsesProvider,
     StreamComplete,
+    StreamEvent,
     TextBlock,
     TextDelta,
     ToolResultBlock,
@@ -116,6 +118,39 @@ class _LineOnlySSE(_FakeSSE):
         raise AssertionError("SSE parser should not wait for fixed-size reads")
 
 
+class _DelayedSSE:
+    def __init__(self, lines: list[tuple[float, bytes]]) -> None:
+        self._lines = list(lines)
+        self.headers: dict[str, str] = {}
+
+    def __enter__(self) -> _DelayedSSE:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+    def readline(self) -> bytes:
+        if not self._lines:
+            return b""
+        delay, line = self._lines.pop(0)
+        if delay:
+            time.sleep(delay)
+        return line
+
+
+class _TimeoutSSE:
+    headers: dict[str, str] = {}
+
+    def __enter__(self) -> _TimeoutSSE:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+    def readline(self) -> bytes:
+        raise TimeoutError("timed out")
+
+
 def test_codex_provider_builds_chatgpt_backend_request() -> None:
     captured: list[urllib.request.Request] = []
 
@@ -199,6 +234,36 @@ def test_codex_provider_builds_chatgpt_backend_request() -> None:
             "strict": None,
         }
     ]
+
+
+def test_codex_provider_passes_stream_idle_timeout_to_urlopen() -> None:
+    captured_timeout: list[float | None] = []
+
+    def urlopen(req: urllib.request.Request, *, timeout: float | None = None) -> _FakeSSE:
+        captured_timeout.append(timeout)
+        return _FakeSSE(
+            [
+                {
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp_1",
+                        "status": "completed",
+                        "output": [],
+                        "usage": {},
+                    },
+                }
+            ]
+        )
+
+    provider = OpenAICodexResponsesProvider(
+        bearer_token=_token(),
+        urlopen=urlopen,
+        stream_idle_timeout_seconds=12.5,
+    )
+
+    _complete(provider, _request())
+
+    assert captured_timeout == [12.5]
 
 
 def test_codex_provider_reads_rate_limit_headers_into_usage() -> None:
@@ -560,6 +625,46 @@ def test_codex_provider_reads_sse_incrementally_by_line() -> None:
     ]
 
 
+def test_codex_provider_yields_stream_events_before_completion() -> None:
+    delta = json.dumps({"type": "response.output_text.delta", "delta": "hi"}).encode()
+    completed = json.dumps(
+        {
+            "type": "response.completed",
+            "response": {
+                "id": "resp_1",
+                "status": "completed",
+                "output": [],
+                "usage": {"input_tokens": 3, "output_tokens": 4},
+            },
+        }
+    ).encode()
+    provider = OpenAICodexResponsesProvider(
+        bearer_token=_token(),
+        urlopen=lambda _req: _DelayedSSE(
+            [
+                (0.0, b"data: " + delta + b"\n"),
+                (0.0, b"\n"),
+                (1.0, b"data: " + completed + b"\n"),
+                (0.0, b"\n"),
+            ]
+        ),
+    )
+
+    async def first_event() -> tuple[StreamEvent, float]:
+        started_at = time.monotonic()
+        stream = provider.astream(_request())
+        try:
+            event = await anext(stream)
+            return event, time.monotonic() - started_at
+        finally:
+            await stream.aclose()
+
+    event, elapsed = anyio.run(first_event)
+
+    assert event == TextDelta(text="hi")
+    assert elapsed < 0.5
+
+
 def test_codex_provider_raises_retryable_error_for_incomplete_stream() -> None:
     provider = OpenAICodexResponsesProvider(
         bearer_token=_token(),
@@ -581,6 +686,22 @@ def test_codex_provider_raises_retryable_error_for_incomplete_stream() -> None:
         assert "without a completion event" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected incomplete stream to raise")
+
+
+def test_codex_provider_raises_retryable_error_for_socket_idle_timeout() -> None:
+    provider = OpenAICodexResponsesProvider(
+        bearer_token=_token(),
+        urlopen=lambda _req: _TimeoutSSE(),
+        stream_idle_timeout_seconds=0.2,
+    )
+
+    try:
+        _stream(provider, _request())
+    except TransientProviderError as exc:
+        assert exc.provider == "openai_codex"
+        assert "idle for 0.2s" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("expected socket timeout to be retryable")
 
 
 def _request() -> CompletionRequest:

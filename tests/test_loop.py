@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections import deque
 from collections.abc import AsyncIterator, Iterable
 
@@ -582,6 +583,55 @@ def test_run_streaming_retries_transient_provider_error(monkeypatch) -> None:
     assert len(provider.requests) == 2
     assert provider.requests[0].messages == provider.requests[1].messages
     assert [event.text for event in captured if isinstance(event, TextDelta)] == ["final"]
+
+
+def test_run_streaming_retries_idle_provider_stream(monkeypatch) -> None:
+    class IdleThenSuccessProvider(Provider):
+        def __init__(self) -> None:
+            self.requests: list[CompletionRequest] = []
+
+        async def acomplete(
+            self, request: CompletionRequest
+        ) -> CompletionResponse:  # pragma: no cover
+            raise NotImplementedError
+
+        async def astream(self, request: CompletionRequest) -> AsyncIterator[StreamEvent]:
+            self.requests.append(request)
+            if len(self.requests) == 1:
+                yield TextDelta(text="partial")
+                await asyncio.sleep(60)
+            response = CompletionResponse(
+                content=[TextBlock(text="final")],
+                stop_reason="end_turn",
+            )
+            yield TextDelta(text="final")
+            yield StreamComplete(response=response)
+
+    monkeypatch.setattr(request_preparation, "_stream_retry_delay", lambda _attempt: 0.0)
+    monkeypatch.setattr(
+        request_preparation,
+        "stream_idle_timeout_seconds_from_env",
+        lambda: 0.01,
+    )
+    provider = IdleThenSuccessProvider()
+    captured: list[StreamEvent] = []
+
+    result = run_streaming(
+        provider=provider,
+        tools_by_name={},
+        system=None,
+        user_input="hello",
+        model="stub-model",
+        on_event=captured.append,
+    )
+
+    assert result.content == [TextBlock(text="final")]
+    assert len(provider.requests) == 2
+    assert provider.requests[0].messages == provider.requests[1].messages
+    assert [event.text for event in captured if isinstance(event, TextDelta)] == [
+        "partial",
+        "final",
+    ]
 
 
 def cast_request_text(request: CompletionRequest) -> str:
