@@ -24,6 +24,8 @@ def test_model_catalog_includes_context_windows() -> None:
         "kimi-k2.5": 262_144,
         "MiniMax-M2.7": 204_800,
         "MiniMax-M2.7-highspeed": 204_800,
+        "mimo-v2.5-pro": 1_000_000,
+        "mimo-v2.5": 1_000_000,
     }
 
 
@@ -44,8 +46,26 @@ def test_model_catalog_includes_source_urls() -> None:
         "kimi-k2.5": models.KIMI_MODELS_URL,
         "MiniMax-M2.7": models.MINIMAX_MODELS_URL,
         "MiniMax-M2.7-highspeed": models.MINIMAX_MODELS_URL,
+        "mimo-v2.5-pro": models.XIAOMI_MODELS_URL,
+        "mimo-v2.5": models.XIAOMI_MODELS_URL,
     }
     assert all(choice.source_url.startswith("https://") for choice in models.MODEL_CATALOG)
+
+
+def test_model_catalog_includes_supported_effort_levels() -> None:
+    by_model = {choice.model: choice.effort_levels for choice in models.MODEL_CATALOG}
+
+    assert by_model["gpt-5.5"] == ("low", "medium", "high", "xhigh")
+    assert by_model["claude-opus-4-6"] == ("low", "medium", "high", "xhigh", "max")
+    assert by_model["mimo-v2.5-pro"] == ("low", "medium", "high")
+    assert models.effort_levels_for_model("mimo-v2.5") == ("low", "medium", "high")
+    assert models.effort_levels_for_model("future-model") == (
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+    )
 
 
 def test_request_preparation_uses_model_catalog_context_windows() -> None:
@@ -61,7 +81,7 @@ def test_unknown_model_context_window_is_unknown() -> None:
 def test_available_model_choices_includes_openai_compatible_vendors(
     monkeypatch,
 ) -> None:
-    configured = {"deepseek", "kimi", "minimax"}
+    configured = {"deepseek", "kimi", "minimax", "xiaomi-token-plan-sgp"}
     monkeypatch.setattr(
         models,
         "has_model_auth",
@@ -74,6 +94,13 @@ def test_available_model_choices_includes_openai_compatible_vendors(
     assert by_model["deepseek-v4-flash"].provider == "deepseek"
     assert by_model["kimi-k2.6"].provider == "kimi"
     assert by_model["MiniMax-M2.7"].provider == "minimax"
+    assert by_model["mimo-v2.5-pro"].provider == "xiaomi-token-plan-sgp"
+    assert by_model["mimo-v2.5"].provider == "xiaomi-token-plan-sgp"
+    assert [
+        choice.model
+        for choice in choices
+        if choice.provider == "xiaomi-token-plan-sgp"
+    ] == ["mimo-v2.5-pro", "mimo-v2.5"]
     assert "gpt-5.5" not in by_model
 
 
@@ -90,6 +117,7 @@ def test_available_model_choices_uses_provider_native_env_vars(
     monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-deepseek-env")
     monkeypatch.setenv("KIMI_API_KEY", "sk-kimi-env")
     monkeypatch.setenv("MINIMAX_API_KEY", "sk-minimax-env")
+    monkeypatch.setenv("XIAOMI_TOKEN_PLAN_SGP_API_KEY", "tp-xiaomi-env")
     monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-env")
 
     choices = models.available_model_choices()
@@ -99,6 +127,8 @@ def test_available_model_choices_uses_provider_native_env_vars(
     assert by_model["deepseek-v4-flash"].provider == "deepseek"
     assert by_model["kimi-k2.6"].provider == "kimi"
     assert by_model["MiniMax-M2.7"].provider == "minimax"
+    assert by_model["mimo-v2.5-pro"].provider == "xiaomi-token-plan-sgp"
+    assert by_model["mimo-v2.5"].provider == "xiaomi-token-plan-sgp"
     assert "gpt-5.5" not in by_model
 
 

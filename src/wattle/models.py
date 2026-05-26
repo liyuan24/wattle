@@ -3,8 +3,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 from wattle.auth import get_credential, get_openai_codex_credential
+
+XIAOMI_TOKEN_PLAN_SGP_PROVIDER = "xiaomi-token-plan-sgp"
+XIAOMI_DEFAULT_MODEL = "mimo-v2.5-pro"
+type EffortLevel = Literal["low", "medium", "high", "xhigh", "max"]
+
+DEFAULT_EFFORT_LEVELS: tuple[EffortLevel, ...] = ("low", "medium", "high", "xhigh", "max")
+OPENAI_CODEX_EFFORT_LEVELS: tuple[EffortLevel, ...] = ("low", "medium", "high", "xhigh")
+XIAOMI_EFFORT_LEVELS: tuple[EffortLevel, ...] = ("low", "medium", "high")
 
 
 @dataclass(frozen=True)
@@ -17,6 +26,7 @@ class ModelChoice:
     description: str
     context_window: int | None = None
     source_url: str = ""
+    effort_levels: tuple[EffortLevel, ...] = DEFAULT_EFFORT_LEVELS
 
 
 OPENAI_MODELS_URL = "https://developers.openai.com/api/docs/models/compare"
@@ -24,6 +34,7 @@ ANTHROPIC_MODELS_URL = "https://platform.claude.com/docs/en/about-claude/models/
 DEEPSEEK_MODELS_URL = "https://api-docs.deepseek.com/quick_start/pricing"
 KIMI_MODELS_URL = "https://platform.kimi.ai/docs/models"
 MINIMAX_MODELS_URL = "https://platform.minimax.io/docs/guides/text-generation"
+XIAOMI_MODELS_URL = "https://token-plan-sgp.xiaomimimo.com/v1/models"
 
 
 MODEL_CATALOG: tuple[ModelChoice, ...] = (
@@ -34,6 +45,7 @@ MODEL_CATALOG: tuple[ModelChoice, ...] = (
         description="Frontier model for complex coding, research, and real-world work.",
         context_window=272_000,
         source_url=OPENAI_MODELS_URL,
+        effort_levels=OPENAI_CODEX_EFFORT_LEVELS,
     ),
     ModelChoice(
         model="gpt-5.4",
@@ -42,6 +54,7 @@ MODEL_CATALOG: tuple[ModelChoice, ...] = (
         description="Strong model for everyday coding.",
         context_window=272_000,
         source_url=OPENAI_MODELS_URL,
+        effort_levels=OPENAI_CODEX_EFFORT_LEVELS,
     ),
     ModelChoice(
         model="gpt-5.4-mini",
@@ -50,6 +63,7 @@ MODEL_CATALOG: tuple[ModelChoice, ...] = (
         description="Small, fast, and cost-efficient model for simpler coding tasks.",
         context_window=272_000,
         source_url=OPENAI_MODELS_URL,
+        effort_levels=OPENAI_CODEX_EFFORT_LEVELS,
     ),
     ModelChoice(
         model="gpt-5.3-codex",
@@ -58,6 +72,7 @@ MODEL_CATALOG: tuple[ModelChoice, ...] = (
         description="Coding-optimized model.",
         context_window=272_000,
         source_url=OPENAI_MODELS_URL,
+        effort_levels=OPENAI_CODEX_EFFORT_LEVELS,
     ),
     ModelChoice(
         model="gpt-5.3-codex-spark",
@@ -66,6 +81,7 @@ MODEL_CATALOG: tuple[ModelChoice, ...] = (
         description="Ultra-fast coding model.",
         context_window=128_000,
         source_url=OPENAI_MODELS_URL,
+        effort_levels=OPENAI_CODEX_EFFORT_LEVELS,
     ),
     ModelChoice(
         model="gpt-5.2",
@@ -74,6 +90,7 @@ MODEL_CATALOG: tuple[ModelChoice, ...] = (
         description="Optimized for professional work and long-running agents.",
         context_window=272_000,
         source_url=OPENAI_MODELS_URL,
+        effort_levels=OPENAI_CODEX_EFFORT_LEVELS,
     ),
     ModelChoice(
         model="claude-sonnet-4-6",
@@ -147,6 +164,24 @@ MODEL_CATALOG: tuple[ModelChoice, ...] = (
         context_window=204_800,
         source_url=MINIMAX_MODELS_URL,
     ),
+    ModelChoice(
+        model=XIAOMI_DEFAULT_MODEL,
+        provider=XIAOMI_TOKEN_PLAN_SGP_PROVIDER,
+        vendor=XIAOMI_TOKEN_PLAN_SGP_PROVIDER,
+        description="Xiaomi MiMo V2.5 Pro model for coding and agentic work.",
+        context_window=1_000_000,
+        source_url=XIAOMI_MODELS_URL,
+        effort_levels=XIAOMI_EFFORT_LEVELS,
+    ),
+    ModelChoice(
+        model="mimo-v2.5",
+        provider=XIAOMI_TOKEN_PLAN_SGP_PROVIDER,
+        vendor=XIAOMI_TOKEN_PLAN_SGP_PROVIDER,
+        description="Xiaomi MiMo V2.5 model.",
+        context_window=1_000_000,
+        source_url=XIAOMI_MODELS_URL,
+        effort_levels=XIAOMI_EFFORT_LEVELS,
+    ),
 )
 
 MODEL_CHOICES_BY_MODEL: dict[str, ModelChoice] = {
@@ -186,6 +221,14 @@ def context_window_for_model(model: str) -> int | None:
     if choice is not None:
         return choice.context_window
     return None
+
+
+def effort_levels_for_model(model: str) -> tuple[EffortLevel, ...]:
+    """Return the reasoning-effort levels Wattle should expose for ``model``."""
+    choice = MODEL_CHOICES_BY_MODEL.get(model)
+    if choice is not None:
+        return choice.effort_levels
+    return DEFAULT_EFFORT_LEVELS
 
 
 def find_model_choice(selector: str, choices: list[ModelChoice]) -> ModelChoice | None:

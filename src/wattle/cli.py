@@ -24,7 +24,7 @@ import openai
 
 from wattle.agent import AgentRunResult, _ProviderSpec, run_agent, run_agent_with_history
 from wattle.auth import get_api_key_credential, get_credential, get_openai_codex_credential
-from wattle.models import MODEL_CHOICES_BY_MODEL
+from wattle.models import MODEL_CHOICES_BY_MODEL, ModelChoice, available_model_choices
 from wattle.permissions import PermissionMode
 from wattle.providers import (
     AnthropicProvider,
@@ -324,9 +324,11 @@ def _apply_settings_defaults(
     argv: list[str],
     settings: WattleSettings,
 ) -> None:
-    if not _has_flag(argv, "--model"):
+    model_explicit = _has_flag(argv, "--model")
+    provider_explicit = _has_flag(argv, "--provider")
+    if not model_explicit:
         args.model = settings.model
-    if not _has_flag(argv, "--provider"):
+    if not provider_explicit:
         provider = _default_provider_for_model(args.model) or settings.provider
         if provider in _PROVIDER_DISPATCH and _provider_auth_available(provider):
             args.provider = provider
@@ -335,6 +337,11 @@ def _apply_settings_defaults(
             and _provider_auth_available(settings.provider)
         ):
             args.provider = settings.provider
+        elif not model_explicit:
+            default_choice = _first_available_model_choice()
+            if default_choice is not None:
+                args.model = default_choice.model
+                args.provider = default_choice.provider
     if not _has_flag(argv, "--max-tokens"):
         args.max_tokens = settings.max_tokens
     if not _has_flag(argv, "--thinking") and not _has_flag(argv, "--effort"):
@@ -356,6 +363,11 @@ def _apply_settings_defaults(
 def _default_provider_for_model(model: str) -> str | None:
     choice = MODEL_CHOICES_BY_MODEL.get(model)
     return choice.provider if choice is not None else None
+
+
+def _first_available_model_choice() -> ModelChoice | None:
+    choices = available_model_choices()
+    return choices[0] if choices else None
 
 
 def _has_flag(argv: list[str], flag: str) -> bool:

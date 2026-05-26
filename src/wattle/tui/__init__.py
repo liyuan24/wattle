@@ -39,7 +39,7 @@ from pygments.lexers import get_lexer_for_filename
 from pygments.token import Token
 from pygments.util import ClassNotFound
 
-from wattle.auth import login_openai_codex
+from wattle.auth import login_openai_codex, save_api_key_credential
 from wattle.clipboard import ClipboardImage, read_clipboard_image
 from wattle.command_summary import (
     CommandSummary,
@@ -56,8 +56,11 @@ from wattle.message_history import (
     queued_user_text_blocks,
 )
 from wattle.models import (
+    XIAOMI_DEFAULT_MODEL,
+    XIAOMI_TOKEN_PLAN_SGP_PROVIDER,
     ModelChoice,
     available_model_choices,
+    effort_levels_for_model,
     find_model_choice,
     render_model_choices,
 )
@@ -181,7 +184,15 @@ def _login_callback_timeout_seconds() -> float:
 BUILTIN_SLASH_COMMANDS = frozenset(command for command, _description in SLASH_COMMAND_HINTS)
 LOGIN_PROVIDER_CHOICES: tuple[tuple[str, str], ...] = (
     ("openai-codex", "ChatGPT Plus/Pro Codex OAuth"),
+    (XIAOMI_TOKEN_PLAN_SGP_PROVIDER, "Xiaomi Token Plan SGP API key"),
 )
+API_KEY_LOGIN_PROVIDERS: Mapping[str, tuple[str, str, str]] = {
+    XIAOMI_TOKEN_PLAN_SGP_PROVIDER: (
+        XIAOMI_TOKEN_PLAN_SGP_PROVIDER,
+        "Xiaomi Token Plan SGP",
+        XIAOMI_DEFAULT_MODEL,
+    ),
+}
 PASTE_PLACEHOLDER_MIN_CHARS = 500
 MAX_IMAGE_ATTACHMENT_BYTES = 20 * 1024 * 1024
 SUPPORTED_IMAGE_MEDIA_TYPES = frozenset(
@@ -1303,7 +1314,7 @@ def _render_statusline(
 
     values: dict[str, str | None] = {
         "model": model,
-        "thinking": f"thinking: {effort}" if thinking and effort else None,
+        "thinking": f"thinking: {effort}" if thinking and effort else "thinking: off",
         "context_used": context_segment,
         "context_remaining": context_remaining_segment,
         "context_size": context_size_segment,
@@ -2342,6 +2353,7 @@ class WattleApp:
 
         if state is not None:
             self._restore_state(state)
+        self._coerce_effort_for_current_model()
         self._prefetch_startup_quota()
 
         if bool(getattr(args, "persist_session", False)):
@@ -2711,6 +2723,7 @@ class WattleApp:
         on_compaction_end: Callable[[], None] | None = None,
         on_stream_retry: Callable[[int, int, BaseException, float], None] | None = None,
     ) -> RequestPreparer:
+        self._coerce_effort_for_current_model()
         return RequestPreparer(
             provider=provider or self.provider,
             model=self.current_model,
@@ -2731,6 +2744,7 @@ class WattleApp:
         )
 
     def _configure_subagents(self, *, provider: Provider | None = None) -> None:
+        self._coerce_effort_for_current_model()
         self.runtime.subagents.configure(
             provider=provider or self.provider,
             tools_by_name=TOOLS_BY_NAME,
@@ -3350,6 +3364,7 @@ class WattleApp:
         self.max_tokens = record.settings.max_tokens
         self.thinking = record.settings.thinking
         self.effort = cast(str | None, record.settings.effort)
+        self._coerce_effort_for_current_model()
         self.messages = list(record.messages)
         self._session_record = record
         self._session_path = path
@@ -3369,10 +3384,20 @@ class WattleApp:
 
     def _handle_login(self, rest: str) -> None:
         provider = rest.strip() or "openai-codex"
+        if provider in API_KEY_LOGIN_PROVIDERS:
+            _vendor, display_name, _default_model = API_KEY_LOGIN_PROVIDERS[provider]
+            try:
+                api_key = self.input_func(f"Enter API key for {display_name}: ")
+            except EOFError:
+                self._write_panel("error", f"{display_name} API key login cancelled.", ERROR_STYLE)
+                return
+            self._save_api_key_login(provider, api_key)
+            return
+
         if provider != "openai-codex":
             self._write_panel(
                 "error",
-                "Only /login openai-codex is supported.",
+                f"Unsupported login provider: {provider}",
                 ERROR_STYLE,
             )
             return
@@ -3424,6 +3449,46 @@ class WattleApp:
         except Exception as exc:  # noqa: BLE001
             self._write_panel("error", f"OpenAI Codex provider reload failed: {exc}", ERROR_STYLE)
 
+    def _save_api_key_login(self, provider: str, api_key: str) -> None:
+        login_config = API_KEY_LOGIN_PROVIDERS.get(provider)
+        if login_config is None:
+            self._write_panel(
+                "error",
+                f"Unsupported API-key login provider: {provider}",
+                ERROR_STYLE,
+            )
+            return
+        vendor, display_name, default_model = login_config
+        try:
+            credential = save_api_key_credential(vendor, api_key)
+        except Exception as exc:  # noqa: BLE001
+            self._write_panel("error", f"{display_name} API key login failed: {exc}", ERROR_STYLE)
+            return
+
+        self._write_panel(
+            "login",
+            f"{display_name} API key saved to {credential.source}.",
+            STATUS_STYLE,
+        )
+        from wattle.cli import _build_provider
+
+        try:
+            self.current_provider_name = provider
+            self.current_model = default_model
+            self.provider = _build_provider(self.current_provider_name)
+            self._configure_subagents(provider=self.provider)
+            self._persist_user_settings(
+                provider=self.current_provider_name,
+                model=self.current_model,
+            )
+            self._persist_session()
+        except Exception as exc:  # noqa: BLE001
+            self._write_panel(
+                "error",
+                f"{display_name} provider reload failed: {exc}",
+                ERROR_STYLE,
+            )
+
     def _expand_skill_text(self, text: str) -> str | None:
         command = text.strip().split(maxsplit=1)[0]
         if command in BUILTIN_SLASH_COMMANDS:
@@ -3451,10 +3516,13 @@ class WattleApp:
         choice = find_model_choice(rest, choices)
         if choice is None:
             self.current_model = rest
+            self._coerce_effort_for_current_model()
             self._write_panel("model", f"Model set to {self.current_model!r}.", STATUS_STYLE)
             self._persist_user_settings(
                 provider=self.current_provider_name,
                 model=self.current_model,
+                thinking=self.thinking,
+                effort=self.effort,
             )
             self._persist_session()
             return
@@ -3467,9 +3535,12 @@ class WattleApp:
 
             self.provider = _build_provider(choice.provider)
             self.current_provider_name = choice.provider
+        self._coerce_effort_for_current_model()
         self._persist_user_settings(
             provider=self.current_provider_name,
             model=self.current_model,
+            thinking=self.thinking,
+            effort=self.effort,
         )
         self._write_panel(
             "model",
@@ -3519,24 +3590,26 @@ class WattleApp:
 
     def _handle_effort(self, rest: str) -> None:
         effort = rest.strip()
+        effort_levels = self._effort_levels_for_current_model()
+        choices_text = ", ".join((*effort_levels, "off"))
         if not effort:
-            current = self.effort or "(provider default)"
+            current = self.effort if self.thinking and self.effort else "off"
             self._write_panel(
                 "effort",
-                f"Current effort: {current}\nChoices: low, medium, high, xhigh, max, off",
+                f"Current effort: {current}\nChoices for {self.current_model}: {choices_text}",
                 STATUS_STYLE,
             )
             return
         if effort == "off":
             self.thinking = False
             self.effort = None
-        elif effort in {"low", "medium", "high", "xhigh", "max"}:
+        elif effort in effort_levels:
             self.thinking = True
             self.effort = effort
         else:
             self._write_panel(
                 "error",
-                "Usage: /effort low|medium|high|xhigh|max|off",
+                f"Usage for {self.current_model}: /effort {'|'.join((*effort_levels, 'off'))}",
                 ERROR_STYLE,
             )
             return
@@ -3548,14 +3621,29 @@ class WattleApp:
             STATUS_STYLE,
         )
 
+    def _effort_levels_for_current_model(self) -> tuple[str, ...]:
+        return tuple(effort_levels_for_model(self.current_model))
+
+    def _coerce_effort_for_current_model(self) -> None:
+        if not self.thinking or self.effort is None:
+            return
+        effort_levels = self._effort_levels_for_current_model()
+        if self.effort in effort_levels:
+            return
+        self.effort = effort_levels[-1] if effort_levels else None
+        self.thinking = self.effort is not None
+
     def _cycle_thinking_level(self) -> None:
-        if not self.thinking or self.effort not in THINKING_LEVELS:
-            next_effort: str | None = THINKING_LEVELS[0]
+        effort_levels = self._effort_levels_for_current_model()
+        if not effort_levels:
+            next_effort: str | None = None
+        elif not self.thinking or self.effort not in effort_levels:
+            next_effort = effort_levels[0]
         else:
-            current_index = THINKING_LEVELS.index(self.effort)
+            current_index = effort_levels.index(self.effort)
             next_effort = (
-                THINKING_LEVELS[current_index + 1]
-                if current_index + 1 < len(THINKING_LEVELS)
+                effort_levels[current_index + 1]
+                if current_index + 1 < len(effort_levels)
                 else None
             )
 

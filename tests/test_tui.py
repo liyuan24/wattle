@@ -1085,7 +1085,7 @@ def test_render_statusline_defaults_to_model_thinking_and_cwd() -> None:
         cwd="~/repos/wattle",
     )
 
-    assert rendered == "gpt-5.5 | ~/repos/wattle"
+    assert rendered == "gpt-5.5 | thinking: off | ~/repos/wattle"
     assert " · " not in rendered
 
 
@@ -1246,7 +1246,7 @@ def test_terminal_appends_without_rewriting_scrollback() -> None:
     assert "Session:" not in out
     assert "hi there" in out
     assert "[status] gpt-5.5 | " in out
-    assert "thinking: off" not in out
+    assert "thinking: off" in out
     assert "cwd: " not in out
     assert "Goodbye." in out
     forbidden = ["\x1b[2J", "\x1b[H", "\x1b[1A", "\x1b[K", "\x1b[?1049h"]
@@ -5710,6 +5710,36 @@ def test_terminal_model_selection_switches_provider(monkeypatch: pytest.MonkeyPa
     assert openai_provider.requests[0].model == "gpt-5.5"
 
 
+def test_terminal_login_xiaomi_token_plan_sets_default_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(settings.SETTINGS_PATH_ENV, str(tmp_path / "settings.json"))
+    monkeypatch.setattr(auth, "AUTH_PATH", tmp_path / "auth.json")
+    reloaded_provider = _ScriptedStreamProvider([])
+    provider_names: list[str] = []
+
+    def fake_build_provider(provider: str) -> _ScriptedStreamProvider:
+        provider_names.append(provider)
+        return reloaded_provider
+
+    monkeypatch.setattr(cli, "_build_provider", fake_build_provider)
+
+    out, app = _drive(
+        _ScriptedStreamProvider([]),
+        ["/login xiaomi-token-plan-sgp", "tp-test-key", "/exit"],
+    )
+
+    saved_settings = settings.load_settings(tmp_path / "settings.json")
+    assert "Xiaomi Token Plan SGP API key saved" in out
+    assert provider_names == ["xiaomi-token-plan-sgp"]
+    assert app.current_provider_name == "xiaomi-token-plan-sgp"
+    assert app.current_model == "mimo-v2.5-pro"
+    assert app.provider is reloaded_provider
+    assert saved_settings.provider == "xiaomi-token-plan-sgp"
+    assert saved_settings.model == "mimo-v2.5-pro"
+
+
 def test_tui_statusline_defaults_to_model_thinking_and_cwd(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -5767,6 +5797,82 @@ def test_tui_statusline_fields_load_from_settings_section(
     assert app._status_text() == (
         "gpt-5.5 | thinking: medium | remaining: 271.9k tok | 5h quota: unknown"
     )
+
+
+def test_statusline_shows_thinking_off_when_disabled() -> None:
+    rendered = tui._render_statusline(
+        model="mimo-v2.5-pro",
+        context_tokens=None,
+        context_window=1_000_000,
+        input_tokens=0,
+        cached_tokens=0,
+        output_tokens=0,
+        cwd="~/repos/wattle",
+        thinking=False,
+        effort=None,
+        fields=("model", "thinking", "cwd"),
+    )
+
+    assert rendered == "mimo-v2.5-pro | thinking: off | ~/repos/wattle"
+
+
+def test_effort_choices_are_limited_by_current_model() -> None:
+    out = io.StringIO()
+    app = tui.WattleApp(
+        _make_args(provider="xiaomi-token-plan-sgp", model="mimo-v2.5-pro"),
+        _ScriptedStreamProvider([]),
+        out=out,
+    )
+
+    app._handle_effort("")
+    app._handle_effort("xhigh")
+    app._handle_effort("high")
+
+    rendered = out.getvalue()
+    assert "Choices for mimo-v2.5-pro: low, medium, high, off" in rendered
+    assert "Usage for mimo-v2.5-pro: /effort low|medium|high|off" in rendered
+    assert app.thinking is True
+    assert app.effort == "high"
+
+
+def test_shift_tab_cycles_current_model_effort_levels() -> None:
+    app = tui.WattleApp(
+        _make_args(provider="xiaomi-token-plan-sgp", model="mimo-v2.5-pro"),
+        _ScriptedStreamProvider([]),
+        out=io.StringIO(),
+    )
+
+    observed: list[str | None] = []
+    for _ in range(4):
+        app._cycle_thinking_level()
+        observed.append(app.effort)
+
+    assert observed == ["low", "medium", "high", None]
+    assert app.thinking is False
+
+
+def test_model_switch_coerces_unsupported_effort() -> None:
+    app = tui.WattleApp(
+        _make_args(provider="xiaomi-token-plan-sgp"),
+        _ScriptedStreamProvider([]),
+        out=io.StringIO(),
+    )
+    app.thinking = True
+    app.effort = "xhigh"
+
+    app._apply_model_choice(
+        ModelChoice(
+            model="mimo-v2.5-pro",
+            provider="xiaomi-token-plan-sgp",
+            vendor="xiaomi-token-plan-sgp",
+            description="Xiaomi MiMo V2.5 Pro model.",
+            effort_levels=("low", "medium", "high"),
+        )
+    )
+
+    assert app.current_model == "mimo-v2.5-pro"
+    assert app.thinking is True
+    assert app.effort == "high"
 
 
 def test_tui_prefetches_codex_quota_for_startup_statusline() -> None:

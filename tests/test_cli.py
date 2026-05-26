@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 import pytest
 
-from wattle import cli
+from wattle import cli, models
 from wattle.auth import AuthCredential
 from wattle.permissions import PermissionMode
 from wattle.providers import CompletionResponse, Message, TextBlock
@@ -87,12 +87,13 @@ def test_apply_settings_defaults_prefers_catalog_provider_for_known_model(
     assert args.model == "gpt-5.5"
 
 
-def test_apply_settings_defaults_ignores_saved_provider_without_auth(
+def test_apply_settings_defaults_ignores_saved_provider_without_auth_when_no_models_available(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     parser = cli._build_parser()
     args = parser.parse_args([])
     monkeypatch.setattr(cli, "_provider_auth_available", lambda _provider: False)
+    monkeypatch.setattr(cli, "available_model_choices", lambda: [])
 
     cli._apply_settings_defaults(
         args,
@@ -102,6 +103,70 @@ def test_apply_settings_defaults_ignores_saved_provider_without_auth(
 
     assert args.provider == "openai_codex"
     assert args.model == "gpt-5.4"
+
+
+def test_apply_settings_defaults_falls_back_to_first_available_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parser = cli._build_parser()
+    args = parser.parse_args([])
+    monkeypatch.setattr(cli, "_provider_auth_available", lambda _provider: False)
+    monkeypatch.setattr(
+        cli,
+        "available_model_choices",
+        lambda: [
+            models.ModelChoice(
+                model="mimo-v2.5-pro",
+                provider="xiaomi-token-plan-sgp",
+                vendor="xiaomi-token-plan-sgp",
+                description="Xiaomi MiMo V2.5 Pro model.",
+            ),
+            models.ModelChoice(
+                model="mimo-v2.5",
+                provider="xiaomi-token-plan-sgp",
+                vendor="xiaomi-token-plan-sgp",
+                description="Xiaomi MiMo V2.5 model.",
+            ),
+        ],
+    )
+
+    cli._apply_settings_defaults(
+        args,
+        [],
+        WattleSettings(provider="openai_codex", model="gpt-5.5"),
+    )
+
+    assert args.provider == "xiaomi-token-plan-sgp"
+    assert args.model == "mimo-v2.5-pro"
+
+
+def test_apply_settings_defaults_keeps_explicit_model_when_provider_has_no_auth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parser = cli._build_parser()
+    args = parser.parse_args(["--model", "gpt-5.5"])
+    monkeypatch.setattr(cli, "_provider_auth_available", lambda _provider: False)
+    monkeypatch.setattr(
+        cli,
+        "available_model_choices",
+        lambda: [
+            models.ModelChoice(
+                model="mimo-v2.5-pro",
+                provider="xiaomi-token-plan-sgp",
+                vendor="xiaomi-token-plan-sgp",
+                description="Xiaomi MiMo V2.5 Pro model.",
+            )
+        ],
+    )
+
+    cli._apply_settings_defaults(
+        args,
+        ["--model", "gpt-5.5"],
+        WattleSettings(provider="openai_codex", model="gpt-5.5"),
+    )
+
+    assert args.provider == "openai_codex"
+    assert args.model == "gpt-5.5"
 
 
 def test_build_parser_print_mode_accepts_prompt_and_shared_flags() -> None:
