@@ -1447,6 +1447,63 @@ def test_live_ctrl_v_falls_back_to_literal_when_no_clipboard_image(
     assert live.buffer == "\x16"
 
 
+def test_live_xterm_modified_ctrl_v_pastes_clipboard_image_as_anchor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    out = _TTYBuffer()
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+    monkeypatch.setattr(app, "cwd", tmp_path)
+    monkeypatch.setattr(
+        tui,
+        "read_clipboard_image",
+        lambda: tui.ClipboardImage(b"fake-png", "image/png", ".png"),
+    )
+    live = tui._LiveTerminal(app)
+    read_fd, write_fd = os.pipe()
+    try:
+        live.fd = read_fd
+        os.write(write_fd, b"\x1b[27;5;118~")
+        live._read_available_input()
+    finally:
+        os.close(read_fd)
+        os.close(write_fd)
+
+    assert "[image#1]" in tui._image_placeholder_prompt_render(
+        tui._render_prompt_input(live.buffer, live.pasted_ranges, live.cursor)
+    ).text
+    assert "\x16" not in live.buffer
+    assert app._user_content_blocks(live.buffer)[0] == TextBlock(text="[image#1]")
+
+
+def test_live_ctrl_v_inserts_spaces_around_clipboard_image_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    out = io.StringIO()
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    monkeypatch.setattr(app, "cwd", tmp_path)
+    monkeypatch.setattr(
+        tui,
+        "read_clipboard_image",
+        lambda: tui.ClipboardImage(b"fake-png", "image/png", ".png"),
+    )
+    live = tui._LiveTerminal(app)
+
+    live.buffer = "beforeafter"
+    live.cursor = len("before")
+    live._paste_clipboard_image_or_insert_literal("\x16")
+
+    rendered = tui._image_placeholder_prompt_render(
+        tui._render_prompt_input(live.buffer, live.pasted_ranges, live.cursor)
+    ).text
+    assert rendered == "before [image#1] after"
+    assert app._user_content_blocks(live.buffer)[0] == TextBlock(
+        text="before [image#1] after"
+    )
+
+
 def test_absolute_dragged_image_path_is_not_treated_as_slash_command(
     tmp_path: Path,
 ) -> None:

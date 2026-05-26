@@ -1300,9 +1300,12 @@ def test_pty_ctrl_v_pastes_clipboard_image_as_anchor(tmp_path: Path) -> None:
         session.read_until("gpt-5.5 |", timeout=3)
         session.write("\x16")
         session.read_until("[image#1]", timeout=3)
+        session.write("\x1b[27;5;118~")
+        session.read_until("[image#2]", timeout=3)
 
         screen_text = session.screen.text()
         assert "[image#1]" in screen_text
+        assert "[image#2]" in screen_text
         assert "^V" not in screen_text
         assert "\x16" not in screen_text
 

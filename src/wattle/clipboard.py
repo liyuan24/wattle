@@ -22,7 +22,8 @@ use scripting additions
 on writeStdout(typeName, encodedText)
     set stdout to current application's NSFileHandle's fileHandleWithStandardOutput()
     set outputText to (typeName & linefeed & encodedText)
-    set stdoutData to outputText's dataUsingEncoding:(current application's NSUTF8StringEncoding)
+    set outputString to current application's NSString's stringWithString:outputText
+    set stdoutData to outputString's dataUsingEncoding:(current application's NSUTF8StringEncoding)
     stdout's writeData:stdoutData
 end writeStdout
 

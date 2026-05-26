@@ -201,7 +201,13 @@ SUPPORTED_IMAGE_MEDIA_TYPES = frozenset(
 ESCAPE_SEQUENCE_TIMEOUT_SECONDS = 0.05
 KEYBOARD_ENHANCEMENT_ENABLE = "\x1b[>1u\x1b[>4;2m"
 KEYBOARD_ENHANCEMENT_DISABLE = "\x1b[<u\x1b[>4m"
-CTRL_V_KEY_SEQUENCES = ("\x16", "\x1b[118;5u", "\x1b[86;5u")
+CTRL_V_KEY_SEQUENCES = (
+    "\x16",
+    "\x1b[118;5u",
+    "\x1b[86;5u",
+    "\x1b[27;5;118~",
+    "\x1b[27;5;86~",
+)
 VISIBLE_SCREEN_CLEAR = "\x1b[H\x1b[2J\x1b[H"
 TERMINAL_HISTORY_CLEAR = "\x1b[3J"
 SHIFT_ENTER_SEQUENCES = (
@@ -4580,8 +4586,17 @@ class _LiveTerminal:
                     self.app._cycle_thinking_level()
                     index += len(shift_tab) - 1
                     self._draw_prompt()
-                elif data.startswith("[118;5u", index) or data.startswith("[86;5u", index):
-                    index += 7 if data.startswith("[118;5u", index) else 6
+                elif (
+                    ctrl_v := next(
+                        (
+                            sequence
+                            for sequence in CTRL_V_KEY_SEQUENCES[1:]
+                            if data.startswith(sequence[1:], index)
+                        ),
+                        None,
+                    )
+                ):
+                    index += len(ctrl_v) - 1
                     self._paste_clipboard_image_or_insert_literal("\x16")
                     self._draw_prompt()
                 elif data.startswith("b", index) or data.startswith("B", index):
@@ -4724,7 +4739,12 @@ class _LiveTerminal:
         except ValueError as exc:
             self.app._write_panel("error", str(exc), ERROR_STYLE)
             return
-        self._insert_text(shlex.quote(str(path)))
+        text = shlex.quote(str(path))
+        if self.cursor > 0 and not self.buffer[self.cursor - 1].isspace():
+            text = f" {text}"
+        if self.cursor < len(self.buffer) and not self.buffer[self.cursor].isspace():
+            text = f"{text} "
+        self._insert_text(text)
 
     def _move_cursor_word_left(self) -> None:
         cursor = self.cursor
