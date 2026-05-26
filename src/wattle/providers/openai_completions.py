@@ -64,6 +64,7 @@ from typing import Any, Literal, TypedDict
 
 import openai
 
+from wattle.provider_errors import raise_normalized_provider_error
 from wattle.tools.base import ToolSpec
 
 from .base import (
@@ -145,7 +146,10 @@ class OpenAICompletionsProvider(Provider):
 
     async def acomplete(self, request: CompletionRequest) -> CompletionResponse:
         kwargs = self._build_kwargs(request)
-        response = await _maybe_await(self.async_client.chat.completions.create(**kwargs))
+        try:
+            response = await _maybe_await(self.async_client.chat.completions.create(**kwargs))
+        except Exception as exc:
+            raise_normalized_provider_error(exc, provider="openai_completions")
 
         choice = response.choices[0]
         content: list[ContentBlock] = []
@@ -194,78 +198,81 @@ class OpenAICompletionsProvider(Provider):
         completion_tokens: int = 0
         cached_tokens: int = 0
 
-        stream = await _maybe_await(self.async_client.chat.completions.create(**kwargs))
-        async for chunk in _aiter(stream):
-            # Usage-only chunks have an empty `choices` list when
-            # `include_usage=True`; harvest usage and continue.
-            if chunk.usage is not None:
-                prompt_tokens = chunk.usage.prompt_tokens
-                completion_tokens = chunk.usage.completion_tokens
-                cached_tokens = _cached_tokens_from_usage(chunk.usage)
-            if not chunk.choices:
-                continue
+        try:
+            stream = await _maybe_await(self.async_client.chat.completions.create(**kwargs))
+            async for chunk in _aiter(stream):
+                # Usage-only chunks have an empty `choices` list when
+                # `include_usage=True`; harvest usage and continue.
+                if chunk.usage is not None:
+                    prompt_tokens = chunk.usage.prompt_tokens
+                    completion_tokens = chunk.usage.completion_tokens
+                    cached_tokens = _cached_tokens_from_usage(chunk.usage)
+                if not chunk.choices:
+                    continue
 
-            choice = chunk.choices[0]
-            delta = choice.delta
+                choice = chunk.choices[0]
+                delta = choice.delta
 
-            reasoning_content = _reasoning_content_from_obj(delta)
-            if reasoning_content:
-                reasoning_parts.append(reasoning_content)
-                yield ThinkingDelta(thinking=reasoning_content)
+                reasoning_content = _reasoning_content_from_obj(delta)
+                if reasoning_content:
+                    reasoning_parts.append(reasoning_content)
+                    yield ThinkingDelta(thinking=reasoning_content)
 
-            if delta.content:
-                text_parts.append(delta.content)
-                yield TextDelta(text=delta.content)
+                if delta.content:
+                    text_parts.append(delta.content)
+                    yield TextDelta(text=delta.content)
 
-            for tool_call_delta in delta.tool_calls or []:
-                index = tool_call_delta.index
-                entry = tool_calls.get(index)
-                if entry is None:
-                    # First sighting of this tool call: id + name arrive now.
-                    name = (
-                        tool_call_delta.function.name
+                for tool_call_delta in delta.tool_calls or []:
+                    index = tool_call_delta.index
+                    entry = tool_calls.get(index)
+                    if entry is None:
+                        # First sighting of this tool call: id + name arrive now.
+                        name = (
+                            tool_call_delta.function.name
+                            if tool_call_delta.function is not None
+                            else None
+                        )
+                        entry = _ToolCallAcc(
+                            id=tool_call_delta.id or "",
+                            name=name or "",
+                            arguments="",
+                        )
+                        tool_calls[index] = entry
+                        yield ToolUseDelta(
+                            id=entry["id"],
+                            name=entry["name"],
+                            partial_json=None,
+                        )
+                    else:
+                        # Some providers re-send id/name on later chunks; treat
+                        # them as authoritative if previously empty, but never
+                        # emit another start delta.
+                        if not entry["id"] and tool_call_delta.id:
+                            entry["id"] = tool_call_delta.id
+                        if (
+                            not entry["name"]
+                            and tool_call_delta.function is not None
+                            and tool_call_delta.function.name
+                        ):
+                            entry["name"] = tool_call_delta.function.name
+
+                    fragment = (
+                        tool_call_delta.function.arguments
                         if tool_call_delta.function is not None
                         else None
                     )
-                    entry = _ToolCallAcc(
-                        id=tool_call_delta.id or "",
-                        name=name or "",
-                        arguments="",
-                    )
-                    tool_calls[index] = entry
-                    yield ToolUseDelta(
-                        id=entry["id"],
-                        name=entry["name"],
-                        partial_json=None,
-                    )
-                else:
-                    # Some providers re-send id/name on later chunks; treat
-                    # them as authoritative if previously empty, but never
-                    # emit another start delta.
-                    if not entry["id"] and tool_call_delta.id:
-                        entry["id"] = tool_call_delta.id
-                    if (
-                        not entry["name"]
-                        and tool_call_delta.function is not None
-                        and tool_call_delta.function.name
-                    ):
-                        entry["name"] = tool_call_delta.function.name
+                    if fragment:
+                        entry["arguments"] += fragment
+                        yield ToolUseDelta(
+                            id=entry["id"],
+                            name=None,
+                            partial_json=fragment,
+                        )
 
-                fragment = (
-                    tool_call_delta.function.arguments
-                    if tool_call_delta.function is not None
-                    else None
-                )
-                if fragment:
-                    entry["arguments"] += fragment
-                    yield ToolUseDelta(
-                        id=entry["id"],
-                        name=None,
-                        partial_json=fragment,
-                    )
-
-            if choice.finish_reason is not None:
-                finish_reason = choice.finish_reason
+                if choice.finish_reason is not None:
+                    finish_reason = choice.finish_reason
+        except Exception as exc:
+            raise_normalized_provider_error(exc, provider="openai_completions")
 
         # Assemble the final response.
         content: list[ContentBlock] = []
@@ -347,7 +354,6 @@ async def _aiter(iterable: Any) -> AsyncIterator[Any]:
         return
     for item in iterable:
         yield item
-
 
 
 def _cached_tokens_from_usage(usage: Any) -> int:

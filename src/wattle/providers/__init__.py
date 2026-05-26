@@ -5,7 +5,6 @@ Responses) target lives here. Plugins implement async `Provider.acomplete()` and
 `Provider.astream()`; everything else is provider-agnostic.
 """
 
-from .anthropic import AnthropicProvider
 from .base import (
     CompletionRequest,
     CompletionResponse,
@@ -14,6 +13,14 @@ from .base import (
     IncompleteStreamError,
     Message,
     Provider,
+    ProviderAuthError,
+    ProviderBillingError,
+    ProviderError,
+    ProviderInvalidRequestError,
+    ProviderPermissionError,
+    ProviderPolicyError,
+    ProviderQuotaError,
+    ProviderRequestTooLargeError,
     RedactedThinkingBlock,
     Role,
     StopReason,
@@ -28,10 +35,28 @@ from .base import (
     ToolUseDelta,
     TransientProviderError,
 )
-from .openai_codex import OpenAICodexResponsesProvider
-from .openai_completions import OpenAICompletionsProvider
-from .openai_responses import OpenAIResponsesProvider
 from .stub import StubProvider
+
+
+def __getattr__(name: str):
+    if name == "AnthropicProvider":
+        from .anthropic import AnthropicProvider
+
+        return AnthropicProvider
+    if name == "OpenAICodexResponsesProvider":
+        from .openai_codex import OpenAICodexResponsesProvider
+
+        return OpenAICodexResponsesProvider
+    if name == "OpenAICompletionsProvider":
+        from .openai_completions import OpenAICompletionsProvider
+
+        return OpenAICompletionsProvider
+    if name == "OpenAIResponsesProvider":
+        from .openai_responses import OpenAIResponsesProvider
+
+        return OpenAIResponsesProvider
+    raise AttributeError(name)
+
 
 __all__ = [
     "AnthropicProvider",
@@ -45,6 +70,14 @@ __all__ = [
     "OpenAICodexResponsesProvider",
     "OpenAIResponsesProvider",
     "Provider",
+    "ProviderAuthError",
+    "ProviderBillingError",
+    "ProviderError",
+    "ProviderInvalidRequestError",
+    "ProviderPermissionError",
+    "ProviderPolicyError",
+    "ProviderQuotaError",
+    "ProviderRequestTooLargeError",
     "RedactedThinkingBlock",
     "Role",
     "StopReason",

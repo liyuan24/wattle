@@ -82,13 +82,13 @@ from __future__ import annotations
 import base64
 import inspect
 import json
-import re
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any, Literal
 
 import openai
 
+from wattle.provider_errors import raise_normalized_provider_error
 from wattle.tools.base import ToolSpec
 
 from .base import (
@@ -109,7 +109,6 @@ from .base import (
     ToolResultBlock,
     ToolUseBlock,
     ToolUseDelta,
-    TransientProviderError,
 )
 
 _ERROR_PREFIX = "[error] "
@@ -117,7 +116,6 @@ _ERROR_PREFIX = "[error] "
 _LOW_THRESHOLD = 2048
 _MEDIUM_THRESHOLD = 8192
 _HIGH_THRESHOLD = 32768
-_RETRYABLE_STATUS_CODES = {408, 500, 502, 503, 504}
 
 
 def _budget_to_effort(budget: int) -> Literal["low", "medium", "high", "xhigh"]:
@@ -178,8 +176,7 @@ class OpenAIResponsesProvider(Provider):
         try:
             response = await _maybe_await(self.async_client.responses.create(**kwargs))
         except Exception as exc:
-            _raise_transient_openai_error(exc)
-            raise
+            raise_normalized_provider_error(exc, provider="openai_responses")
         completion = _completion_from_response(response)
         self._advance_state(response, request)
         return completion
@@ -236,8 +233,7 @@ class OpenAIResponsesProvider(Provider):
                 # Other events (in_progress, content_part_added, item_done,
                 # etc.) carry no Wattle-visible signal during streaming.
         except Exception as exc:
-            _raise_transient_openai_error(exc)
-            raise
+            raise_normalized_provider_error(exc, provider="openai_responses")
 
         if final_response is None:
             raise IncompleteStreamError(
@@ -316,163 +312,6 @@ async def _aiter(iterable: Any) -> AsyncIterator[Any]:
         return
     for item in iterable:
         yield item
-
-
-def _raise_transient_openai_error(exc: BaseException) -> None:
-    status_code = _status_code_from_exception(exc)
-    error_payload = _openai_error_payload(exc)
-    if error_payload is not None:
-        _raise_for_openai_error_payload(
-            error_payload,
-            status_code=status_code,
-            retry_after=_retry_after_from_exception(exc),
-            fallback_message=str(exc) or type(exc).__name__,
-        )
-
-    if status_code in _RETRYABLE_STATUS_CODES:
-        raise TransientProviderError(
-            str(exc) or type(exc).__name__,
-            status_code=status_code,
-            retry_after=_retry_after_from_exception(exc),
-        ) from exc
-
-    retryable_types = tuple(
-        typ
-        for typ in (
-            getattr(openai, "APIConnectionError", None),
-            getattr(openai, "APITimeoutError", None),
-            getattr(openai, "InternalServerError", None),
-        )
-        if isinstance(typ, type)
-    )
-    if retryable_types and isinstance(exc, retryable_types):
-        raise TransientProviderError(
-            str(exc) or type(exc).__name__,
-            status_code=status_code,
-            retry_after=_retry_after_from_exception(exc),
-        ) from exc
-
-
-def _openai_error_payload(exc: BaseException) -> dict[str, Any] | None:
-    for value in (
-        getattr(exc, "body", None),
-        getattr(exc, "response", None),
-    ):
-        payload = _error_payload_from_value(value)
-        if payload is not None:
-            return payload
-    return None
-
-
-def _error_payload_from_value(value: object) -> dict[str, Any] | None:
-    if isinstance(value, dict):
-        error = value.get("error")
-        if isinstance(error, dict):
-            return error
-        if any(isinstance(value.get(key), str) for key in ("code", "type", "message")):
-            return value
-    text = getattr(value, "text", None)
-    if isinstance(text, str):
-        return _error_payload_from_text(text)
-    content = getattr(value, "content", None)
-    if isinstance(content, (str, bytes)):
-        return _error_payload_from_text(
-            content.decode("utf-8", errors="replace") if isinstance(content, bytes) else content
-        )
-    return None
-
-
-def _error_payload_from_text(text: str) -> dict[str, Any] | None:
-    try:
-        parsed = json.loads(text)
-    except json.JSONDecodeError:
-        return None
-    return _error_payload_from_value(parsed)
-
-
-def _raise_for_openai_error_payload(
-    error: dict[str, Any],
-    *,
-    status_code: int | None,
-    retry_after: float | None,
-    fallback_message: str,
-) -> None:
-    code = _openai_error_code(error)
-    message = _openai_error_message(error) or fallback_message
-    retry_after = retry_after if retry_after is not None else _retry_after_from_message(message)
-    if code == "context_length_exceeded":
-        raise RuntimeError(f"context_length_exceeded: {message}")
-    if code in {"server_is_overloaded", "slow_down", "rate_limit_exceeded"}:
-        raise TransientProviderError(
-            message,
-            status_code=status_code,
-            retry_after=retry_after,
-        )
-    if code in {"insufficient_quota", "usage_limit_reached"}:
-        raise RuntimeError(message or "Quota exceeded. Check your plan and billing details.")
-    if code == "usage_not_included":
-        raise RuntimeError(message or "Usage is not included for this plan.")
-    if code == "cyber_policy":
-        raise RuntimeError(
-            message or "This request has been flagged for possible cybersecurity risk."
-        )
-    if code == "invalid_prompt":
-        raise RuntimeError(message or "Invalid request.")
-
-
-def _openai_error_code(error: dict[str, Any]) -> str | None:
-    for key in ("code", "type"):
-        value = error.get(key)
-        if isinstance(value, str) and value:
-            return value
-    return None
-
-
-def _openai_error_message(error: dict[str, Any]) -> str | None:
-    value = error.get("message")
-    return value if isinstance(value, str) and value else None
-
-
-def _retry_after_from_message(message: str | None) -> float | None:
-    if not message:
-        return None
-    match = re.search(
-        r"(?i)try again in\s*(\d+(?:\.\d+)?)\s*(ms|s|seconds?)",
-        message,
-    )
-    if match is None:
-        return None
-    value = float(match.group(1))
-    unit = match.group(2).lower()
-    if unit == "ms":
-        return value / 1000
-    return value
-
-
-def _status_code_from_exception(exc: BaseException) -> int | None:
-    for attr in ("status_code", "status", "code"):
-        value = getattr(exc, attr, None)
-        if isinstance(value, int):
-            return value
-    response = getattr(exc, "response", None)
-    value = getattr(response, "status_code", None)
-    return value if isinstance(value, int) else None
-
-
-def _retry_after_from_exception(exc: BaseException) -> float | None:
-    response = getattr(exc, "response", None)
-    headers = getattr(response, "headers", None)
-    get = getattr(headers, "get", None)
-    if not callable(get):
-        return None
-    value = get("retry-after") or get("Retry-After")
-    if value is None:
-        return None
-    try:
-        retry_after = float(value)
-    except (TypeError, ValueError):
-        return None
-    return retry_after if retry_after >= 0 else None
 
 
 # Any: SDK Response object — we read `.usage.input_tokens`, `.output`,

@@ -14,7 +14,6 @@ from __future__ import annotations
 import asyncio
 import json
 import platform
-import re
 import urllib.error
 import urllib.request
 from collections.abc import AsyncIterator, Callable, Iterator
@@ -23,6 +22,7 @@ from typing import Any, Literal
 from uuid import uuid4
 
 from wattle.auth import _jwt_payload
+from wattle.provider_errors import ProviderErrorPayload, normalize_provider_error
 from wattle.providers.openai_responses import _messages_to_input, _tool_spec_to_api
 
 from .base import (
@@ -58,7 +58,6 @@ MINUTES_PER_HOUR = 60
 MINUTES_PER_5_HOURS = 5 * MINUTES_PER_HOUR
 MINUTES_PER_DAY = 24 * MINUTES_PER_HOUR
 MINUTES_PER_WEEK = 7 * MINUTES_PER_DAY
-RETRYABLE_HTTP_STATUS_CODES = {408, 500, 502, 503, 504}
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,17 +133,16 @@ class OpenAICodexResponsesProvider(Provider):
                 )
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
-            error_payload = _codex_error_payload(detail)
-            try:
-                _raise_for_codex_http_error(
-                    exc.code,
-                    detail,
-                    getattr(exc, "headers", None),
-                    error_payload,
-                )
-            except BaseException as mapped:
-                raise mapped from exc
-            raise RuntimeError(_codex_error_message(exc.code, detail)) from exc
+            normalized = normalize_provider_error(
+                ProviderErrorPayload(
+                    message=_codex_error_message(exc.code, detail),
+                    status_code=exc.code,
+                    headers=getattr(exc, "headers", None),
+                    raw=_codex_error_payload(detail),
+                ),
+                provider="openai_codex",
+            )
+            raise normalized from exc
         except urllib.error.URLError as exc:
             raise TransientProviderError(
                 f"Codex request failed before a response: {exc.reason}",
@@ -388,8 +386,11 @@ def _map_event(
     if event_type == "error":
         raise RuntimeError(f"Codex error: {event.get('message') or event}")
     if event_type == "response.failed":
-        _raise_for_codex_response_error(_codex_response_error(event))
-        raise TransientProviderError("Codex response failed")
+        normalized = normalize_provider_error(
+            _provider_payload_from_codex_error(_codex_response_error(event)),
+            provider="openai_codex",
+        )
+        raise normalized
     if event_type == "response.output_text.delta":
         return TextDelta(text=str(event.get("delta", ""))), current_call_id, final_response
     if event_type in {
@@ -805,72 +806,27 @@ def _codex_response_error(event: dict[str, Any]) -> dict[str, Any] | None:
     return error if isinstance(error, dict) else None
 
 
-def _raise_for_codex_http_error(
-    status: int | None,
-    detail: str,
-    headers: Any,
-    error: dict[str, Any] | None,
-) -> None:
-    retry_after = _retry_after_from_headers(headers)
-    if error is not None:
-        _raise_for_codex_response_error(
-            error,
-            status_code=status,
-            retry_after=retry_after,
-            fallback_message=_codex_error_message(status or 0, detail),
-        )
-    if _is_retryable_http_status(status):
-        raise TransientProviderError(
-            _codex_error_message(status or 0, detail),
-            status_code=status,
-            retry_after=retry_after,
-        )
-
-
-def _raise_for_codex_response_error(
-    error: dict[str, Any] | None,
-    *,
-    status_code: int | None = None,
-    retry_after: float | None = None,
-    fallback_message: str = "Codex response failed",
-) -> None:
-    if error is None:
-        raise TransientProviderError(fallback_message, status_code=status_code)
-    code = _codex_error_code(error)
-    message = _codex_error_message_from_payload(error) or fallback_message
-    retry_after = (
-        retry_after if retry_after is not None else _retry_after_from_error_message(message)
+def _provider_payload_from_codex_error(error: dict[str, Any] | None) -> ProviderErrorPayload:
+    return ProviderErrorPayload(
+        message=_codex_error_message_from_payload(error) or "Codex response failed",
+        code=_codex_error_code(error),
+        type=_codex_error_type(error),
+        raw=error,
     )
-    if code == "context_length_exceeded":
-        raise RuntimeError(f"context_length_exceeded: {message}")
-    if code in {"server_is_overloaded", "slow_down", "rate_limit_exceeded"}:
-        raise TransientProviderError(
-            message,
-            status_code=status_code,
-            retry_after=retry_after,
-        )
-    if code in {"insufficient_quota", "usage_limit_reached"}:
-        raise RuntimeError(message or "Quota exceeded. Check your plan and billing details.")
-    if code == "usage_not_included":
-        raise RuntimeError(
-            message
-            or "To use Codex with your ChatGPT plan, upgrade to Plus: https://chatgpt.com/explore/plus."
-        )
-    if code == "cyber_policy":
-        raise RuntimeError(
-            message or "This request has been flagged for possible cybersecurity risk."
-        )
-    if code == "invalid_prompt":
-        raise RuntimeError(message or "Invalid request.")
-    raise TransientProviderError(message, status_code=status_code, retry_after=retry_after)
 
 
-def _codex_error_code(error: dict[str, Any]) -> str | None:
-    for key in ("code", "type"):
-        value = error.get(key)
-        if isinstance(value, str) and value:
-            return value
-    return None
+def _codex_error_code(error: dict[str, Any] | None) -> str | None:
+    if error is None:
+        return None
+    value = error.get("code")
+    return value if isinstance(value, str) and value else None
+
+
+def _codex_error_type(error: dict[str, Any] | None) -> str | None:
+    if error is None:
+        return None
+    value = error.get("type")
+    return value if isinstance(value, str) and value else None
 
 
 def _codex_error_message_from_payload(error: dict[str, Any] | None) -> str | None:
@@ -878,39 +834,3 @@ def _codex_error_message_from_payload(error: dict[str, Any] | None) -> str | Non
         return None
     message = error.get("message")
     return message if isinstance(message, str) and message else None
-
-
-def _retry_after_from_error_message(message: str | None) -> float | None:
-    if not message:
-        return None
-    match = re.search(
-        r"(?i)try again in\s*(\d+(?:\.\d+)?)\s*(ms|s|seconds?)",
-        message,
-    )
-    if match is None:
-        return None
-    value = float(match.group(1))
-    unit = match.group(2).lower()
-    if unit == "ms":
-        return value / 1000
-    return value
-
-
-def _is_retryable_http_status(status: int | None) -> bool:
-    return status in RETRYABLE_HTTP_STATUS_CODES
-
-
-def _retry_after_from_headers(headers: Any) -> float | None:
-    if headers is None:
-        return None
-    get = getattr(headers, "get", None)
-    if not callable(get):
-        return None
-    value = get("retry-after") or get("Retry-After")
-    if value is None:
-        return None
-    try:
-        retry_after = float(value)
-    except (TypeError, ValueError):
-        return None
-    return retry_after if retry_after >= 0 else None

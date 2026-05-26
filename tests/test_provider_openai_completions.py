@@ -11,11 +11,11 @@ is exercised in two directions:
 
 from __future__ import annotations
 
-import anyio
 import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import anyio
 import pytest
 
 from wattle.providers import (
@@ -23,6 +23,7 @@ from wattle.providers import (
     ImageBlock,
     Message,
     OpenAICompletionsProvider,
+    ProviderQuotaError,
     StreamComplete,
     TextBlock,
     TextDelta,
@@ -31,6 +32,7 @@ from wattle.providers import (
     ToolResultBlock,
     ToolUseBlock,
     ToolUseDelta,
+    TransientProviderError,
 )
 
 
@@ -177,7 +179,8 @@ def test_user_image_block_translates_to_chat_image_part(tmp_path) -> None:
     client = _make_client(_fake_response(content="ok"))
     provider = OpenAICompletionsProvider(async_client=client)
 
-    _complete(provider,
+    _complete(
+        provider,
         CompletionRequest(
             model="gpt-4o-mini",
             max_tokens=64,
@@ -195,7 +198,7 @@ def test_user_image_block_translates_to_chat_image_part(tmp_path) -> None:
                     ],
                 )
             ],
-        )
+        ),
     )
 
     assert client.chat.completions.create.call_args.kwargs["messages"] == [
@@ -218,7 +221,8 @@ def test_user_text_blocks_are_separated_when_flattened() -> None:
     client = _make_client(_fake_response(content="ok"))
     provider = OpenAICompletionsProvider(async_client=client)
 
-    _complete(provider,
+    _complete(
+        provider,
         CompletionRequest(
             model="gpt-4o-mini",
             max_tokens=64,
@@ -231,7 +235,7 @@ def test_user_text_blocks_are_separated_when_flattened() -> None:
                     ],
                 )
             ],
-        )
+        ),
     )
 
     messages = client.chat.completions.create.call_args.kwargs["messages"]
@@ -266,12 +270,13 @@ def test_request_no_tools_omits_tools_kwarg() -> None:
     client = _make_client(_fake_response(content="ok"))
     provider = OpenAICompletionsProvider(async_client=client)
 
-    _complete(provider,
+    _complete(
+        provider,
         CompletionRequest(
             model="gpt-4o-mini",
             max_tokens=64,
             messages=[Message(role="user", content=[TextBlock(text="hi")])],
-        )
+        ),
     )
 
     assert "tools" not in client.chat.completions.create.call_args.kwargs
@@ -283,7 +288,8 @@ def test_assistant_tool_only_message_has_null_content() -> None:
     client = _make_client(_fake_response(content="ok"))
     provider = OpenAICompletionsProvider(async_client=client)
 
-    _complete(provider,
+    _complete(
+        provider,
         CompletionRequest(
             model="gpt-4o-mini",
             max_tokens=64,
@@ -298,7 +304,7 @@ def test_assistant_tool_only_message_has_null_content() -> None:
                     content=[ToolResultBlock(tool_use_id="c1", content="done")],
                 ),
             ],
-        )
+        ),
     )
 
     messages = client.chat.completions.create.call_args.kwargs["messages"]
@@ -311,7 +317,8 @@ def test_multiple_tool_results_lift_to_separate_wire_messages() -> None:
     client = _make_client(_fake_response(content="ok"))
     provider = OpenAICompletionsProvider(async_client=client)
 
-    _complete(provider,
+    _complete(
+        provider,
         CompletionRequest(
             model="gpt-4o-mini",
             max_tokens=64,
@@ -332,7 +339,7 @@ def test_multiple_tool_results_lift_to_separate_wire_messages() -> None:
                     ],
                 ),
             ],
-        )
+        ),
     )
 
     messages = client.chat.completions.create.call_args.kwargs["messages"]
@@ -347,7 +354,8 @@ def test_user_text_can_follow_tool_results_in_same_wattle_message() -> None:
     client = _make_client(_fake_response(content="ok"))
     provider = OpenAICompletionsProvider(async_client=client)
 
-    _complete(provider,
+    _complete(
+        provider,
         CompletionRequest(
             model="gpt-4o-mini",
             max_tokens=64,
@@ -365,7 +373,7 @@ def test_user_text_can_follow_tool_results_in_same_wattle_message() -> None:
                     ],
                 ),
             ],
-        )
+        ),
     )
 
     messages = client.chat.completions.create.call_args.kwargs["messages"]
@@ -380,7 +388,8 @@ def test_is_error_prepends_error_marker() -> None:
     client = _make_client(_fake_response(content="ok"))
     provider = OpenAICompletionsProvider(async_client=client)
 
-    _complete(provider,
+    _complete(
+        provider,
         CompletionRequest(
             model="gpt-4o-mini",
             max_tokens=64,
@@ -401,7 +410,7 @@ def test_is_error_prepends_error_marker() -> None:
                     ],
                 ),
             ],
-        )
+        ),
     )
 
     messages = client.chat.completions.create.call_args.kwargs["messages"]
@@ -438,12 +447,13 @@ def test_response_translation_text_and_tool_calls() -> None:
     )
     provider = OpenAICompletionsProvider(async_client=_make_client(response))
 
-    result = _complete(provider,
+    result = _complete(
+        provider,
         CompletionRequest(
             model="gpt-4o-mini",
             max_tokens=128,
             messages=[Message(role="user", content=[TextBlock(text="hi")])],
-        )
+        ),
     )
 
     assert len(result.content) == 3
@@ -474,12 +484,13 @@ def test_usage_includes_cached_tokens_when_reported() -> None:
     )
     provider = OpenAICompletionsProvider(async_client=_make_client(response))
 
-    result = _complete(provider,
+    result = _complete(
+        provider,
         CompletionRequest(
             model="gpt-4o-mini",
             max_tokens=64,
             messages=[Message(role="user", content=[TextBlock(text="hi")])],
-        )
+        ),
     )
 
     assert result.usage == {
@@ -493,12 +504,13 @@ def test_response_with_only_text_no_tool_calls() -> None:
     response = _fake_response(content="all done", tool_calls=None, finish_reason="stop")
     provider = OpenAICompletionsProvider(async_client=_make_client(response))
 
-    result = _complete(provider,
+    result = _complete(
+        provider,
         CompletionRequest(
             model="gpt-4o-mini",
             max_tokens=64,
             messages=[Message(role="user", content=[TextBlock(text="hi")])],
-        )
+        ),
     )
     assert len(result.content) == 1
     assert isinstance(result.content[0], TextBlock)
@@ -513,12 +525,13 @@ def test_response_with_only_tool_calls_no_text() -> None:
     response = _fake_response(content=None, tool_calls=[tool_call], finish_reason="tool_calls")
     provider = OpenAICompletionsProvider(async_client=_make_client(response))
 
-    result = _complete(provider,
+    result = _complete(
+        provider,
         CompletionRequest(
             model="gpt-4o-mini",
             max_tokens=64,
             messages=[Message(role="user", content=[TextBlock(text="hi")])],
-        )
+        ),
     )
     assert len(result.content) == 1
     assert isinstance(result.content[0], ToolUseBlock)
@@ -542,12 +555,13 @@ def test_finish_reason_mapping(finish_reason: str, expected: str) -> None:
     response = _fake_response(content="x", finish_reason=finish_reason)
     provider = OpenAICompletionsProvider(async_client=_make_client(response))
 
-    result = _complete(provider,
+    result = _complete(
+        provider,
         CompletionRequest(
             model="gpt-4o-mini",
             max_tokens=64,
             messages=[Message(role="user", content=[TextBlock(text="hi")])],
-        )
+        ),
     )
     assert result.stop_reason == expected
 
@@ -563,7 +577,8 @@ def test_thinking_blocks_in_input_are_serialized_as_reasoning_content() -> None:
     client = _make_client(_fake_response(content="ok"))
     provider = OpenAICompletionsProvider(async_client=client)
 
-    _complete(provider,
+    _complete(
+        provider,
         CompletionRequest(
             model="gpt-4o-mini",
             max_tokens=64,
@@ -582,7 +597,7 @@ def test_thinking_blocks_in_input_are_serialized_as_reasoning_content() -> None:
                     content=[ToolResultBlock(tool_use_id="c1", content="done")],
                 ),
             ],
-        )
+        ),
     )
 
     messages = client.chat.completions.create.call_args.kwargs["messages"]
@@ -604,7 +619,8 @@ def test_assistant_message_with_only_thinking_blocks_is_skipped() -> None:
     client = _make_client(_fake_response(content="ok"))
     provider = OpenAICompletionsProvider(async_client=client)
 
-    _complete(provider,
+    _complete(
+        provider,
         CompletionRequest(
             model="gpt-4o-mini",
             max_tokens=64,
@@ -616,7 +632,7 @@ def test_assistant_message_with_only_thinking_blocks_is_skipped() -> None:
                 ),
                 Message(role="user", content=[TextBlock(text="still there?")]),
             ],
-        )
+        ),
     )
 
     messages = client.chat.completions.create.call_args.kwargs["messages"]
@@ -637,12 +653,13 @@ def test_response_reasoning_content_becomes_thinking_block() -> None:
     )
     provider = OpenAICompletionsProvider(async_client=_make_client(response))
 
-    result = _complete(provider,
+    result = _complete(
+        provider,
         CompletionRequest(
             model="gpt-4o-mini",
             max_tokens=64,
             messages=[Message(role="user", content=[TextBlock(text="hi")])],
-        )
+        ),
     )
 
     assert isinstance(result.content[0], ThinkingBlock)
@@ -655,12 +672,13 @@ def test_response_without_reasoning_content_has_no_thinking_block() -> None:
     response = _fake_response(content="all done", finish_reason="stop")
     provider = OpenAICompletionsProvider(async_client=_make_client(response))
 
-    result = _complete(provider,
+    result = _complete(
+        provider,
         CompletionRequest(
             model="gpt-4o-mini",
             max_tokens=64,
             messages=[Message(role="user", content=[TextBlock(text="hi")])],
-        )
+        ),
     )
 
     assert not any(isinstance(b, ThinkingBlock) for b in result.content)
@@ -672,12 +690,13 @@ def test_thinking_false_omits_reasoning_effort() -> None:
     client = _make_client(_fake_response(content="ok"))
     provider = OpenAICompletionsProvider(async_client=client)
 
-    _complete(provider,
+    _complete(
+        provider,
         CompletionRequest(
             model="gpt-4o-mini",
             max_tokens=64,
             messages=[Message(role="user", content=[TextBlock(text="hi")])],
-        )
+        ),
     )
 
     kwargs = client.chat.completions.create.call_args.kwargs
@@ -690,14 +709,15 @@ def test_effort_passes_through(effort: str) -> None:
     client = _make_client(_fake_response(content="ok"))
     provider = OpenAICompletionsProvider(async_client=client)
 
-    _complete(provider,
+    _complete(
+        provider,
         CompletionRequest(
             model="gpt-4o-mini",
             max_tokens=64,
             thinking=True,
             effort=effort,  # type: ignore[arg-type]
             messages=[Message(role="user", content=[TextBlock(text="hi")])],
-        )
+        ),
     )
 
     kwargs = client.chat.completions.create.call_args.kwargs
@@ -709,14 +729,15 @@ def test_effort_max_clamps_to_xhigh() -> None:
     client = _make_client(_fake_response(content="ok"))
     provider = OpenAICompletionsProvider(async_client=client)
 
-    _complete(provider,
+    _complete(
+        provider,
         CompletionRequest(
             model="gpt-4o-mini",
             max_tokens=64,
             thinking=True,
             effort="max",
             messages=[Message(role="user", content=[TextBlock(text="hi")])],
-        )
+        ),
     )
 
     kwargs = client.chat.completions.create.call_args.kwargs
@@ -737,14 +758,15 @@ def test_budget_buckets_to_effort(budget: int, expected: str) -> None:
     client = _make_client(_fake_response(content="ok"))
     provider = OpenAICompletionsProvider(async_client=client)
 
-    _complete(provider,
+    _complete(
+        provider,
         CompletionRequest(
             model="gpt-4o-mini",
             max_tokens=64,
             thinking=True,
             budget=budget,
             messages=[Message(role="user", content=[TextBlock(text="hi")])],
-        )
+        ),
     )
 
     kwargs = client.chat.completions.create.call_args.kwargs
@@ -756,7 +778,8 @@ def test_effort_takes_precedence_over_budget() -> None:
     client = _make_client(_fake_response(content="ok"))
     provider = OpenAICompletionsProvider(async_client=client)
 
-    _complete(provider,
+    _complete(
+        provider,
         CompletionRequest(
             model="gpt-4o-mini",
             max_tokens=64,
@@ -764,7 +787,7 @@ def test_effort_takes_precedence_over_budget() -> None:
             effort="high",
             budget=1024,
             messages=[Message(role="user", content=[TextBlock(text="hi")])],
-        )
+        ),
     )
 
     kwargs = client.chat.completions.create.call_args.kwargs
@@ -777,13 +800,14 @@ def test_thinking_true_no_effort_no_budget_omits_reasoning_effort() -> None:
     client = _make_client(_fake_response(content="ok"))
     provider = OpenAICompletionsProvider(async_client=client)
 
-    _complete(provider,
+    _complete(
+        provider,
         CompletionRequest(
             model="gpt-4o-mini",
             max_tokens=64,
             thinking=True,
             messages=[Message(role="user", content=[TextBlock(text="hi")])],
-        )
+        ),
     )
 
     kwargs = client.chat.completions.create.call_args.kwargs
@@ -848,12 +872,13 @@ def test_stream_text_emits_deltas_then_complete_with_usage() -> None:
     provider = OpenAICompletionsProvider(async_client=client)
 
     emitted = list(
-        _stream(provider,
+        _stream(
+            provider,
             CompletionRequest(
                 model="gpt-4o-mini",
                 max_tokens=64,
                 messages=[Message(role="user", content=[TextBlock(text="hi")])],
-            )
+            ),
         )
     )
 
@@ -890,12 +915,13 @@ def test_stream_tool_calls_emit_start_then_argument_fragments() -> None:
     provider = OpenAICompletionsProvider(async_client=client)
 
     emitted = list(
-        _stream(provider,
+        _stream(
+            provider,
             CompletionRequest(
                 model="gpt-4o-mini",
                 max_tokens=64,
                 messages=[Message(role="user", content=[TextBlock(text="run ls")])],
-            )
+            ),
         )
     )
 
@@ -932,12 +958,13 @@ def test_stream_parallel_tool_calls_track_per_index_independently() -> None:
     provider = OpenAICompletionsProvider(async_client=client)
 
     emitted = list(
-        _stream(provider,
+        _stream(
+            provider,
             CompletionRequest(
                 model="gpt-4o-mini",
                 max_tokens=64,
                 messages=[Message(role="user", content=[TextBlock(text="parallel")])],
-            )
+            ),
         )
     )
 
@@ -966,14 +993,104 @@ def test_stream_finish_reason_length_maps_to_max_tokens() -> None:
     provider = OpenAICompletionsProvider(async_client=client)
 
     emitted = list(
-        _stream(provider,
+        _stream(
+            provider,
             CompletionRequest(
                 model="gpt-4o-mini",
                 max_tokens=2,
                 messages=[Message(role="user", content=[TextBlock(text="hi")])],
-            )
+            ),
         )
     )
 
     response = next(e for e in emitted if isinstance(e, StreamComplete)).response
     assert response.stop_reason == "max_tokens"
+
+
+class _ProviderException(Exception):
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        body: object | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.body = body
+        self.headers = headers or {}
+
+
+def test_complete_normalizes_retryable_chat_completion_errors() -> None:
+    client = MagicMock()
+    client.chat.completions.create.side_effect = _ProviderException(
+        "rate limit",
+        status_code=429,
+        body={"error": {"code": "rate_limit_exceeded", "message": "try again in 4s"}},
+    )
+    provider = OpenAICompletionsProvider(async_client=client)
+
+    with pytest.raises(TransientProviderError) as exc_info:
+        _complete(
+            provider,
+            CompletionRequest(
+                model="gpt-4o-mini",
+                max_tokens=64,
+                messages=[Message(role="user", content=[TextBlock(text="hi")])],
+            ),
+        )
+
+    assert exc_info.value.status_code == 429
+    assert exc_info.value.retry_after == 4
+    assert exc_info.value.provider == "openai_completions"
+
+
+def test_complete_normalizes_non_retryable_chat_completion_quota_errors() -> None:
+    client = MagicMock()
+    client.chat.completions.create.side_effect = _ProviderException(
+        "quota",
+        status_code=429,
+        body={"error": {"code": "insufficient_quota", "message": "quota exceeded"}},
+    )
+    provider = OpenAICompletionsProvider(async_client=client)
+
+    with pytest.raises(ProviderQuotaError):
+        _complete(
+            provider,
+            CompletionRequest(
+                model="gpt-4o-mini",
+                max_tokens=64,
+                messages=[Message(role="user", content=[TextBlock(text="hi")])],
+            ),
+        )
+
+
+async def _raising_stream(error: BaseException):
+    yield _text_chunk("before error")
+    raise error
+
+
+def test_stream_normalizes_chat_completion_iteration_errors() -> None:
+    client = MagicMock()
+    client.chat.completions.create.return_value = _raising_stream(
+        _ProviderException(
+            "overloaded",
+            status_code=503,
+            body={"error": {"code": "server_is_overloaded", "message": "busy"}},
+        )
+    )
+    provider = OpenAICompletionsProvider(async_client=client)
+
+    with pytest.raises(TransientProviderError) as exc_info:
+        _stream(
+            provider,
+            CompletionRequest(
+                model="gpt-4o-mini",
+                max_tokens=64,
+                messages=[Message(role="user", content=[TextBlock(text="hi")])],
+            ),
+        )
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.code == "server_is_overloaded"

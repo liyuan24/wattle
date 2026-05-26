@@ -35,6 +35,16 @@ from typing import Any, Literal, Self
 
 from wattle.tools.base import ToolSpec
 
+ProviderErrorKind = Literal[
+    "quota",
+    "auth",
+    "permission",
+    "invalid_request",
+    "billing",
+    "policy",
+    "request_too_large",
+]
+
 # ---------------------------------------------------------------------------
 # Content blocks
 # ---------------------------------------------------------------------------
@@ -146,12 +156,7 @@ class RedactedThinkingBlock:
 
 
 ContentBlock = (
-    TextBlock
-    | ImageBlock
-    | ToolUseBlock
-    | ToolResultBlock
-    | ThinkingBlock
-    | RedactedThinkingBlock
+    TextBlock | ImageBlock | ToolUseBlock | ToolResultBlock | ThinkingBlock | RedactedThinkingBlock
 )
 
 
@@ -322,6 +327,67 @@ class IncompleteStreamError(RuntimeError):
     """Raised when a provider stream closes before its terminal completion event."""
 
 
+class ProviderError(RuntimeError):
+    """Normalized non-retryable provider failure."""
+
+    kind: ProviderErrorKind
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        kind: ProviderErrorKind,
+        status_code: int | None = None,
+        code: str | None = None,
+        retry_after: float | None = None,
+        request_id: str | None = None,
+        provider: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.message = message
+        self.kind = kind
+        self.status_code = status_code
+        self.code = code
+        self.retry_after = retry_after
+        self.request_id = request_id
+        self.provider = provider
+
+
+class ProviderQuotaError(ProviderError):
+    def __init__(self, message: str, **metadata: Any) -> None:
+        super().__init__(message, kind="quota", **metadata)
+
+
+class ProviderAuthError(ProviderError):
+    def __init__(self, message: str, **metadata: Any) -> None:
+        super().__init__(message, kind="auth", **metadata)
+
+
+class ProviderPermissionError(ProviderError):
+    def __init__(self, message: str, **metadata: Any) -> None:
+        super().__init__(message, kind="permission", **metadata)
+
+
+class ProviderInvalidRequestError(ProviderError):
+    def __init__(self, message: str, **metadata: Any) -> None:
+        super().__init__(message, kind="invalid_request", **metadata)
+
+
+class ProviderBillingError(ProviderError):
+    def __init__(self, message: str, **metadata: Any) -> None:
+        super().__init__(message, kind="billing", **metadata)
+
+
+class ProviderPolicyError(ProviderError):
+    def __init__(self, message: str, **metadata: Any) -> None:
+        super().__init__(message, kind="policy", **metadata)
+
+
+class ProviderRequestTooLargeError(ProviderError):
+    def __init__(self, message: str, **metadata: Any) -> None:
+        super().__init__(message, kind="request_too_large", **metadata)
+
+
 class TransientProviderError(RuntimeError):
     """Raised when retrying the same provider request can reasonably recover."""
 
@@ -331,10 +397,17 @@ class TransientProviderError(RuntimeError):
         *,
         status_code: int | None = None,
         retry_after: float | None = None,
+        code: str | None = None,
+        request_id: str | None = None,
+        provider: str | None = None,
     ) -> None:
         super().__init__(message)
+        self.message = message
         self.status_code = status_code
         self.retry_after = retry_after
+        self.code = code
+        self.request_id = request_id
+        self.provider = provider
 
 
 # ---------------------------------------------------------------------------

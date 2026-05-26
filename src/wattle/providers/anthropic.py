@@ -55,6 +55,8 @@ from typing import Any
 
 import anthropic
 
+from wattle.provider_errors import raise_normalized_provider_error
+
 from .base import (
     CompletionRequest,
     CompletionResponse,
@@ -101,44 +103,50 @@ class AnthropicProvider(Provider):
         return AnthropicProvider(async_client=self._async_client)
 
     async def acomplete(self, request: CompletionRequest) -> CompletionResponse:
-        response = await _maybe_await(
-            self.async_client.messages.create(**self._build_kwargs(request))
-        )
+        try:
+            response = await _maybe_await(
+                self.async_client.messages.create(**self._build_kwargs(request))
+            )
+        except Exception as exc:
+            raise_normalized_provider_error(exc, provider="anthropic")
         return _response_from_api(response)
 
     async def astream(self, request: CompletionRequest) -> AsyncIterator[StreamEvent]:
         """Async-native streaming path backed by ``anthropic.AsyncAnthropic``."""
         kwargs = self._build_kwargs(request)
 
-        async with self.async_client.messages.stream(**kwargs) as stream:
-            current_tool_use_id: str | None = None
-            async for event in stream:
-                etype = event.type
-                if etype == "content_block_start":
-                    block = event.content_block
-                    if block.type == "tool_use":
-                        current_tool_use_id = block.id
-                        yield ToolUseDelta(
-                            id=block.id,
-                            name=block.name,
-                            partial_json=None,
-                        )
-                elif etype == "content_block_delta":
-                    delta = event.delta
-                    dtype = delta.type
-                    if dtype == "text_delta":
-                        yield TextDelta(text=delta.text)
-                    elif dtype == "thinking_delta":
-                        yield ThinkingDelta(thinking=delta.thinking)
-                    elif dtype == "input_json_delta":
-                        assert current_tool_use_id is not None
-                        yield ToolUseDelta(
-                            id=current_tool_use_id,
-                            name=None,
-                            partial_json=delta.partial_json,
-                        )
+        try:
+            async with self.async_client.messages.stream(**kwargs) as stream:
+                current_tool_use_id: str | None = None
+                async for event in stream:
+                    etype = event.type
+                    if etype == "content_block_start":
+                        block = event.content_block
+                        if block.type == "tool_use":
+                            current_tool_use_id = block.id
+                            yield ToolUseDelta(
+                                id=block.id,
+                                name=block.name,
+                                partial_json=None,
+                            )
+                    elif etype == "content_block_delta":
+                        delta = event.delta
+                        dtype = delta.type
+                        if dtype == "text_delta":
+                            yield TextDelta(text=delta.text)
+                        elif dtype == "thinking_delta":
+                            yield ThinkingDelta(thinking=delta.thinking)
+                        elif dtype == "input_json_delta":
+                            assert current_tool_use_id is not None
+                            yield ToolUseDelta(
+                                id=current_tool_use_id,
+                                name=None,
+                                partial_json=delta.partial_json,
+                            )
 
-            final_message = await _maybe_await(stream.get_final_message())
+                final_message = await _maybe_await(stream.get_final_message())
+        except Exception as exc:
+            raise_normalized_provider_error(exc, provider="anthropic")
 
         yield StreamComplete(response=_response_from_api(final_message))
 
@@ -172,7 +180,6 @@ async def _maybe_await(value: Any) -> Any:
     if inspect.isawaitable(value):
         return await value
     return value
-
 
 
 # Any: SDK Message/RawMessage object. We read `.content`, `.stop_reason`,

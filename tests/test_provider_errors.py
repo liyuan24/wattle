@@ -2,7 +2,15 @@ from __future__ import annotations
 
 import pytest
 
-from wattle.provider_errors import is_context_length_error
+from wattle.provider_errors import is_context_length_error, normalize_provider_error
+from wattle.providers import (
+    ProviderAuthError,
+    ProviderBillingError,
+    ProviderInvalidRequestError,
+    ProviderQuotaError,
+    ProviderRequestTooLargeError,
+    TransientProviderError,
+)
 
 
 @pytest.mark.parametrize(
@@ -69,3 +77,152 @@ def test_is_context_length_error_reads_exception_chain() -> None:
         raise ValueError("provider request failed") from cause
     except ValueError as exc:
         assert is_context_length_error(exc) is True
+
+
+class _ProviderException(Exception):
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        body: object | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.body = body
+        self.headers = headers or {}
+
+
+class _ResponseException(Exception):
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int,
+        body: object | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.body = body
+        self.response = type(
+            "Response",
+            (),
+            {"status_code": status_code, "headers": headers or {}},
+        )()
+
+
+def test_normalize_openai_429_rate_limit_payload_is_retryable() -> None:
+    err = _ProviderException(
+        "rate limit",
+        status_code=429,
+        body={"error": {"code": "rate_limit_exceeded", "message": "try again in 2s"}},
+    )
+
+    normalized = normalize_provider_error(err, provider="openai")
+
+    assert isinstance(normalized, TransientProviderError)
+    assert normalized.status_code == 429
+    assert normalized.retry_after == 2
+    assert normalized.provider == "openai"
+
+
+def test_normalize_openai_429_quota_payload_is_non_retryable() -> None:
+    err = _ProviderException(
+        "quota",
+        status_code=429,
+        body={"error": {"code": "insufficient_quota", "message": "quota exceeded"}},
+    )
+
+    normalized = normalize_provider_error(err)
+
+    assert isinstance(normalized, ProviderQuotaError)
+    assert normalized.status_code == 429
+
+
+def test_normalize_openai_503_overload_is_retryable() -> None:
+    err = _ProviderException(
+        "overload",
+        status_code=503,
+        body={"error": {"code": "server_is_overloaded", "message": "busy"}},
+    )
+
+    normalized = normalize_provider_error(err)
+
+    assert isinstance(normalized, TransientProviderError)
+    assert normalized.code == "server_is_overloaded"
+
+
+def test_normalize_anthropic_529_overloaded_is_retryable() -> None:
+    err = _ProviderException(
+        "overloaded",
+        status_code=529,
+        body={
+            "type": "error",
+            "request_id": "req_123",
+            "error": {"type": "overloaded_error", "message": "overloaded"},
+        },
+    )
+
+    normalized = normalize_provider_error(err, provider="anthropic")
+
+    assert isinstance(normalized, TransientProviderError)
+    assert normalized.status_code == 529
+    assert normalized.request_id == "req_123"
+
+
+def test_normalize_anthropic_429_rate_limit_uses_retry_after() -> None:
+    err = _ProviderException(
+        "rate limit",
+        status_code=429,
+        body={"error": {"type": "rate_limit_error", "message": "rate limit"}},
+        headers={"retry-after": "6"},
+    )
+
+    normalized = normalize_provider_error(err)
+
+    assert isinstance(normalized, TransientProviderError)
+    assert normalized.retry_after == 6
+
+
+def test_normalize_anthropic_billing_and_request_too_large_are_non_retryable() -> None:
+    billing = normalize_provider_error(
+        _ProviderException(
+            "billing",
+            status_code=402,
+            body={"error": {"type": "billing_error", "message": "billing required"}},
+        )
+    )
+    large = normalize_provider_error(
+        _ProviderException(
+            "too large",
+            status_code=413,
+            body={"error": {"type": "request_too_large", "message": "too large"}},
+        )
+    )
+
+    assert isinstance(billing, ProviderBillingError)
+    assert isinstance(large, ProviderRequestTooLargeError)
+
+
+def test_normalize_context_payload_preserves_compaction_signal() -> None:
+    err = _ProviderException(
+        "bad request",
+        status_code=400,
+        body={"error": {"code": "context_length_exceeded", "message": "too long"}},
+    )
+
+    normalized = normalize_provider_error(err)
+
+    assert isinstance(normalized, RuntimeError)
+    assert is_context_length_error(normalized)
+
+
+def test_normalize_unknown_status_fallbacks_are_conservative() -> None:
+    retryable = normalize_provider_error(_ProviderException("bad gateway", status_code=502))
+    non_retryable = normalize_provider_error(_ProviderException("bad request", status_code=400))
+    auth = normalize_provider_error(_ResponseException("auth", status_code=401))
+
+    assert isinstance(retryable, TransientProviderError)
+    assert isinstance(non_retryable, ProviderInvalidRequestError)
+    assert isinstance(auth, ProviderAuthError)

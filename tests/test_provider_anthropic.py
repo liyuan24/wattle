@@ -6,10 +6,10 @@ exercise the request/response translation logic.
 
 from __future__ import annotations
 
-import anyio
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import anyio
 import pytest
 
 from wattle.providers import (
@@ -17,6 +17,7 @@ from wattle.providers import (
     CompletionRequest,
     ImageBlock,
     Message,
+    ProviderBillingError,
     RedactedThinkingBlock,
     StreamComplete,
     TextBlock,
@@ -26,6 +27,7 @@ from wattle.providers import (
     ToolResultBlock,
     ToolUseBlock,
     ToolUseDelta,
+    TransientProviderError,
 )
 
 
@@ -328,14 +330,15 @@ def test_thinking_block_round_trip_in_outgoing_messages() -> None:
 def test_manual_thinking_propagates_to_kwargs() -> None:
     provider, client = _make_provider(_canned_response())
 
-    _complete(provider,
+    _complete(
+        provider,
         CompletionRequest(
             model="claude-opus-4-7",
             max_tokens=64,
             thinking=True,
             budget=10_000,
             messages=[Message(role="user", content=[TextBlock(text="hi")])],
-        )
+        ),
     )
 
     kwargs = client.messages.create.call_args.kwargs
@@ -346,12 +349,13 @@ def test_manual_thinking_propagates_to_kwargs() -> None:
 def test_thinking_false_omits_thinking_kwarg() -> None:
     provider, client = _make_provider(_canned_response())
 
-    _complete(provider,
+    _complete(
+        provider,
         CompletionRequest(
             model="claude-opus-4-7",
             max_tokens=64,
             messages=[Message(role="user", content=[TextBlock(text="hi")])],
-        )
+        ),
     )
 
     kwargs = client.messages.create.call_args.kwargs
@@ -362,14 +366,15 @@ def test_thinking_false_omits_thinking_kwarg() -> None:
 def test_adaptive_thinking_with_effort_emits_output_config() -> None:
     provider, client = _make_provider(_canned_response())
 
-    _complete(provider,
+    _complete(
+        provider,
         CompletionRequest(
             model="claude-opus-4-7",
             max_tokens=64,
             thinking=True,
             effort="high",
             messages=[Message(role="user", content=[TextBlock(text="hi")])],
-        )
+        ),
     )
 
     kwargs = client.messages.create.call_args.kwargs
@@ -380,13 +385,14 @@ def test_adaptive_thinking_with_effort_emits_output_config() -> None:
 def test_adaptive_thinking_no_effort_omits_output_config() -> None:
     provider, client = _make_provider(_canned_response())
 
-    _complete(provider,
+    _complete(
+        provider,
         CompletionRequest(
             model="claude-opus-4-7",
             max_tokens=64,
             thinking=True,
             messages=[Message(role="user", content=[TextBlock(text="hi")])],
-        )
+        ),
     )
 
     kwargs = client.messages.create.call_args.kwargs
@@ -397,7 +403,8 @@ def test_adaptive_thinking_no_effort_omits_output_config() -> None:
 def test_manual_thinking_ignores_effort() -> None:
     provider, client = _make_provider(_canned_response())
 
-    _complete(provider,
+    _complete(
+        provider,
         CompletionRequest(
             model="claude-opus-4-7",
             max_tokens=64,
@@ -405,7 +412,7 @@ def test_manual_thinking_ignores_effort() -> None:
             budget=4096,
             effort="medium",
             messages=[Message(role="user", content=[TextBlock(text="hi")])],
-        )
+        ),
     )
 
     kwargs = client.messages.create.call_args.kwargs
@@ -417,14 +424,15 @@ def test_manual_thinking_ignores_effort() -> None:
 def test_adaptive_effort_literals_pass_through(effort: str) -> None:
     provider, client = _make_provider(_canned_response())
 
-    _complete(provider,
+    _complete(
+        provider,
         CompletionRequest(
             model="claude-opus-4-7",
             max_tokens=64,
             thinking=True,
             effort=effort,  # type: ignore[arg-type]
             messages=[Message(role="user", content=[TextBlock(text="hi")])],
-        )
+        ),
     )
 
     kwargs = client.messages.create.call_args.kwargs
@@ -443,12 +451,13 @@ def test_thinking_block_response_translation() -> None:
     response = _canned_response(content=[api_thinking, api_text])
     provider, _client = _make_provider(response)
 
-    result = _complete(provider,
+    result = _complete(
+        provider,
         CompletionRequest(
             model="claude-opus-4-7",
             max_tokens=64,
             messages=[Message(role="user", content=[TextBlock(text="hi")])],
-        )
+        ),
     )
 
     assert len(result.content) == 2
@@ -464,7 +473,8 @@ def test_redacted_thinking_round_trip() -> None:
     distinct type carrying the opaque `data` payload."""
     # Outgoing serialization.
     provider, client = _make_provider(_canned_response())
-    _complete(provider,
+    _complete(
+        provider,
         CompletionRequest(
             model="claude-opus-4-7",
             max_tokens=64,
@@ -475,7 +485,7 @@ def test_redacted_thinking_round_trip() -> None:
                     content=[RedactedThinkingBlock(data="enc_payload")],
                 ),
             ],
-        )
+        ),
     )
     kwargs = client.messages.create.call_args.kwargs
     assert kwargs["messages"][1]["content"] == [
@@ -486,12 +496,13 @@ def test_redacted_thinking_round_trip() -> None:
     api_redacted = SimpleNamespace(type="redacted_thinking", data="enc_in")
     response = _canned_response(content=[api_redacted])
     provider2, _ = _make_provider(response)
-    result = _complete(provider2, 
+    result = _complete(
+        provider2,
         CompletionRequest(
             model="claude-opus-4-7",
             max_tokens=64,
             messages=[Message(role="user", content=[TextBlock(text="hi")])],
-        )
+        ),
     )
     assert len(result.content) == 1
     block = result.content[0]
@@ -754,12 +765,13 @@ def test_stream_redacted_thinking_yields_no_event_but_appears_in_response() -> N
     provider, _client = _stream_provider(events, final)
 
     emitted = list(
-        _stream(provider,
+        _stream(
+            provider,
             CompletionRequest(
                 model="claude-opus-4-7",
                 max_tokens=64,
                 messages=[Message(role="user", content=[TextBlock(text="x")])],
-            )
+            ),
         )
     )
 
@@ -770,3 +782,112 @@ def test_stream_redacted_thinking_yields_no_event_but_appears_in_response() -> N
     final_resp = next(e for e in emitted if isinstance(e, StreamComplete)).response
     assert isinstance(final_resp.content[0], RedactedThinkingBlock)
     assert final_resp.content[0].data == "enc_blob"
+
+
+class _ProviderException(Exception):
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        body: object | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.body = body
+        self.headers = headers or {}
+
+
+def test_complete_normalizes_retryable_anthropic_errors() -> None:
+    client = MagicMock()
+    client.messages.create.side_effect = _ProviderException(
+        "overloaded",
+        status_code=529,
+        body={
+            "type": "error",
+            "request_id": "req_anthropic",
+            "error": {"type": "overloaded_error", "message": "overloaded"},
+        },
+    )
+    provider = AnthropicProvider(async_client=client)
+
+    with pytest.raises(TransientProviderError) as exc_info:
+        _complete(
+            provider,
+            CompletionRequest(
+                model="claude-opus-4-7",
+                max_tokens=64,
+                messages=[Message(role="user", content=[TextBlock(text="hi")])],
+            ),
+        )
+
+    assert exc_info.value.status_code == 529
+    assert exc_info.value.request_id == "req_anthropic"
+    assert exc_info.value.provider == "anthropic"
+
+
+def test_complete_normalizes_non_retryable_anthropic_billing_errors() -> None:
+    client = MagicMock()
+    client.messages.create.side_effect = _ProviderException(
+        "billing",
+        status_code=402,
+        body={"error": {"type": "billing_error", "message": "billing required"}},
+    )
+    provider = AnthropicProvider(async_client=client)
+
+    with pytest.raises(ProviderBillingError):
+        _complete(
+            provider,
+            CompletionRequest(
+                model="claude-opus-4-7",
+                max_tokens=64,
+                messages=[Message(role="user", content=[TextBlock(text="hi")])],
+            ),
+        )
+
+
+async def _raising_events(error: BaseException):
+    yield _delta(SimpleNamespace(type="text_delta", text="before error"))
+    raise error
+
+
+class _RaisingAnthropicStream:
+    async def __aenter__(self) -> _RaisingAnthropicStream:
+        return self
+
+    async def __aexit__(self, *_exc: object) -> None:
+        return None
+
+    async def __aiter__(self):
+        async for event in _raising_events(
+            _ProviderException(
+                "rate limit",
+                status_code=429,
+                body={"error": {"type": "rate_limit_error", "message": "rate limit"}},
+                headers={"retry-after": "7"},
+            )
+        ):
+            yield event
+
+    def get_final_message(self) -> SimpleNamespace:
+        raise AssertionError("stream error should abort before final message")
+
+
+def test_stream_normalizes_anthropic_iteration_errors() -> None:
+    client = MagicMock()
+    client.messages.stream.return_value = _RaisingAnthropicStream()
+    provider = AnthropicProvider(async_client=client)
+
+    with pytest.raises(TransientProviderError) as exc_info:
+        _stream(
+            provider,
+            CompletionRequest(
+                model="claude-opus-4-7",
+                max_tokens=64,
+                messages=[Message(role="user", content=[TextBlock(text="hi")])],
+            ),
+        )
+
+    assert exc_info.value.status_code == 429
+    assert exc_info.value.retry_after == 7
