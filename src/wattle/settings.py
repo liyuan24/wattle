@@ -23,6 +23,7 @@ def _default_statusline_fields() -> tuple[str, ...]:
 @dataclass(frozen=True, slots=True)
 class TuiSettings:
     statusline: tuple[str, ...] = field(default_factory=_default_statusline_fields)
+    show_thinking: bool = False
 
     @property
     def statusline_fields(self) -> tuple[str, ...]:
@@ -88,6 +89,7 @@ def settings_to_dict(settings: WattleSettings) -> dict[str, Any]:
         "permission_mode": settings.permission_mode.value,
         "tui": {
             "statusline": list(settings.tui.statusline),
+            "show_thinking": settings.tui.show_thinking,
         },
         "enabled_models": list(settings.enabled_models),
         "compaction_keep_recent_tokens": settings.compaction_keep_recent_tokens,
@@ -158,17 +160,30 @@ def _permission_mode(value: object, default: PermissionMode) -> PermissionMode:
 
 
 def _tui_settings(value: object, root: dict[str, Any]) -> TuiSettings:
+    defaults = TuiSettings()
+    show_thinking = defaults.show_thinking
     if isinstance(value, dict):
+        show_thinking = _bool(value.get("show_thinking"), defaults.show_thinking)
         if "statusline" in value:
             statusline = value.get("statusline")
             if isinstance(statusline, dict):
                 fields = statusline.get("fields")
                 if fields is None:
                     fields = statusline.get("statusline_fields")
-                return TuiSettings(statusline=_str_tuple(fields))
-            return TuiSettings(statusline=_str_tuple(statusline))
+                return TuiSettings(
+                    statusline=_str_tuple(fields),
+                    show_thinking=show_thinking,
+                )
+            return TuiSettings(
+                statusline=_str_tuple(statusline),
+                show_thinking=show_thinking,
+            )
         if "statusline_fields" in value:
-            return TuiSettings(statusline=_str_tuple(value.get("statusline_fields")))
+            return TuiSettings(
+                statusline=_str_tuple(value.get("statusline_fields")),
+                show_thinking=show_thinking,
+            )
+        return TuiSettings(show_thinking=show_thinking)
     if "statusline_fields" in root:
         return TuiSettings(statusline=_str_tuple(root.get("statusline_fields")))
     legacy_statusline = root.get("statusline")

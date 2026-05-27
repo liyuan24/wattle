@@ -3755,7 +3755,7 @@ def test_live_ignores_stale_stream_and_complete_events_after_interrupt() -> None
     assert "stale final" not in out.getvalue()
 
 
-def test_terminal_streams_text_thinking_and_tool_markers_in_order(
+def test_terminal_hides_thinking_content_by_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     tool = _RecordingTool()
@@ -3779,6 +3779,45 @@ def test_terminal_streams_text_thinking_and_tool_markers_in_order(
             [TextDelta(text="done"), StreamComplete(response=end_response)],
         ]
     )
+
+    out, _app = _drive(provider, ["use tool", "/exit"])
+
+    assert tool.calls == [{"message": "hi"}]
+    assert "reasoning" not in out
+    assert "answer" in out
+    assert "| echo ok" in out
+    assert "echoed: hi" in out
+    assert "done" in out
+
+
+def test_terminal_streams_text_thinking_and_tool_markers_in_order(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    tool = _RecordingTool()
+    monkeypatch.setitem(TOOLS_BY_NAME, tool.name, tool)
+    tool_use_response = CompletionResponse(
+        content=[ToolUseBlock(id="call_1", name="echo", input={"message": "hi"})],
+        stop_reason="tool_use",
+    )
+    end_response = CompletionResponse(
+        content=[TextBlock(text="done")],
+        stop_reason="end_turn",
+    )
+    provider = _ScriptedStreamProvider(
+        [
+            [
+                ThinkingDelta(thinking="reasoning"),
+                TextDelta(text="answer"),
+                ToolUseDelta(id="call_1", name="echo", partial_json=None),
+                StreamComplete(response=tool_use_response),
+            ],
+            [TextDelta(text="done"), StreamComplete(response=end_response)],
+        ]
+    )
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text('{"tui": {"show_thinking": true}}', encoding="utf-8")
+    monkeypatch.setenv(settings.SETTINGS_PATH_ENV, str(settings_path))
 
     out, _app = _drive(provider, ["use tool", "/exit"])
 
@@ -5906,6 +5945,23 @@ def test_terminal_login_xiaomi_token_plan_preserves_current_model(
     assert saved_settings.model == "gpt-5.5"
 
 
+def test_tui_thinking_content_visibility_loads_from_settings_section(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(settings.SETTINGS_PATH_ENV, str(tmp_path / "settings.json"))
+    (tmp_path / "settings.json").write_text(
+        '{"tui": {"show_thinking": true}}',
+        encoding="utf-8",
+    )
+
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=io.StringIO())
+    saved = settings.load_settings()
+
+    assert saved.tui.show_thinking is True
+    assert app.show_thinking_content is True
+
+
 def test_tui_statusline_defaults_to_model_thinking_and_cwd(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -6101,6 +6157,7 @@ def test_live_statusline_selector_toggles_and_persists(
     saved = settings.load_settings()
     assert app._statusline_fields == ("model", "thinking", "context_used", "cwd")
     assert saved.tui.statusline == ("model", "thinking", "context_used", "cwd")
+    assert saved.tui.show_thinking is False
     assert "Statusline updated: model | thinking | context_used | cwd" in app.out.getvalue()
 
 
@@ -6144,5 +6201,6 @@ def test_terminal_effort_and_permissions_update_settings(
     assert saved.thinking is True
     assert saved.effort == "high"
     assert saved.permission_mode == tui.PermissionMode.READ_ONLY
+    assert saved.tui.show_thinking is False
     assert "Effort set to high" in out
     assert "Permission mode set to read_only" in out

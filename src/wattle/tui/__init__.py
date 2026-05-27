@@ -2403,6 +2403,7 @@ class WattleApp:
         self.current_model: str = args.model
         self.max_tokens: int = args.max_tokens
         self.thinking: bool = bool(getattr(args, "thinking", False))
+        self.show_thinking_content: bool = bool(self._settings.tui.show_thinking)
         self.effort: str | None = cast(str | None, getattr(args, "effort", None))
         self.enabled_models: tuple[str, ...] = tuple(
             cast(tuple[str, ...], getattr(args, "enabled_models", ()))
@@ -2662,6 +2663,7 @@ class WattleApp:
             "system": self.system,
             "max_tokens": self.max_tokens,
             "thinking": self.thinking,
+            "show_thinking_content": self.show_thinking_content,
             "effort": self.effort,
             "permission_mode": self.permission_mode,
             "enabled_models": self.enabled_models,
@@ -2686,6 +2688,9 @@ class WattleApp:
         self.system = cast(str | None, state.get("system", self.system))
         self.max_tokens = int(cast(Any, state.get("max_tokens", self.max_tokens)))
         self.thinking = bool(state.get("thinking", self.thinking))
+        self.show_thinking_content = bool(
+            state.get("show_thinking_content", self.show_thinking_content)
+        )
         self.effort = cast(str | None, state.get("effort", self.effort))
         self.permission_mode = cast(
             PermissionMode,
@@ -2915,6 +2920,8 @@ class WattleApp:
                     in_text = True
                     wrote_content = True
                 elif isinstance(event, ThinkingDelta):
+                    if not self.show_thinking_content:
+                        continue
                     if not in_thinking:
                         if in_text:
                             flush_text_buffer()
@@ -3870,12 +3877,22 @@ class WattleApp:
         )
 
     def _persist_user_settings(self, **changes: Any) -> None:
+        if "tui" not in changes:
+            changes["tui"] = TuiSettings(
+                statusline=self._statusline_fields,
+                show_thinking=self.show_thinking_content,
+            )
         self._settings = update_settings(**changes)
 
     def _set_statusline_fields(self, fields: tuple[str, ...]) -> None:
         self._statusline_fields = _normalize_statusline_fields(list(fields))
         self._statusline_enabled = bool(self._statusline_fields)
-        self._persist_user_settings(tui=TuiSettings(statusline=self._statusline_fields))
+        self._persist_user_settings(
+            tui=TuiSettings(
+                statusline=self._statusline_fields,
+                show_thinking=self.show_thinking_content,
+            )
+        )
 
     def _write_statusline_update(self) -> None:
         if self._statusline_enabled:
@@ -4160,16 +4177,17 @@ class WattleApp:
             else:
                 redacted_thinking += 1
 
-        if thinking_parts:
-            self._write_panel("thinking", "\n".join(thinking_parts), THINKING_STYLE)
-            displayed = True
-        elif redacted_thinking:
-            self._write_panel(
-                "thinking",
-                f"[{redacted_thinking} redacted thinking block(s)]",
-                THINKING_STYLE,
-            )
-            displayed = True
+        if self.show_thinking_content:
+            if thinking_parts:
+                self._write_panel("thinking", "\n".join(thinking_parts), THINKING_STYLE)
+                displayed = True
+            elif redacted_thinking:
+                self._write_panel(
+                    "thinking",
+                    f"[{redacted_thinking} redacted thinking block(s)]",
+                    THINKING_STYLE,
+                )
+                displayed = True
 
         text = "\n".join(part for part in text_parts if part)
         if images and (message.role != "user" or not text):
@@ -5787,7 +5805,7 @@ class _LiveTerminal:
     def _flush_stream_buffer(self) -> None:
         thinking = "".join(self.stream_thinking)
         text = "".join(self.stream_text)
-        if thinking:
+        if thinking and self.app.show_thinking_content:
             self.app._write_block(thinking, THINKING_STYLE)
         if text:
             self.app._write_block(text, ASSISTANT_STYLE)
