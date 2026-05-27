@@ -10,7 +10,7 @@ provider is a one-line change to ``_PROVIDER_DISPATCH``.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -33,6 +33,7 @@ from wattle.providers import (
 from wattle.skills import load_available_skills
 from wattle.system_prompt import build_system_prompt
 from wattle.tools import TOOLS_BY_NAME
+from wattle.tools.base import Tool
 
 # Public mapping: provider name -> vendor name in wattle.auth. Multiple
 # OpenAI-backed provider adapters can still use distinct vendor credentials.
@@ -156,7 +157,9 @@ class AgentRunResult:
 def _build_provider_and_system(
     provider_name: str,
     permission_mode: PermissionMode,
-) -> tuple[Provider, str]:
+    *,
+    model: str,
+) -> tuple[Provider, str, Mapping[str, Tool]]:
     spec = _PROVIDER_DISPATCH.get(provider_name)
     if spec is None:
         raise ValueError(
@@ -171,12 +174,13 @@ def _build_provider_and_system(
     else:
         credential = get_credential(spec.vendor)
     provider = spec.build(credential.bearer_token)
+    model_tools_by_name = loop._tools_for_model(TOOLS_BY_NAME, model)
     built_system = build_system_prompt(
-        tools_by_name=TOOLS_BY_NAME,
+        tools_by_name=model_tools_by_name,
         skills=load_available_skills(Path.cwd()),
         permission_mode=permission_mode,
     )
-    return provider, built_system
+    return provider, built_system, TOOLS_BY_NAME
 
 
 def run_agent(
@@ -230,10 +234,14 @@ async def arun_agent(
     effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None,
 ) -> CompletionResponse:
     """Async implementation of :func:`run_agent`."""
-    provider, built_system = _build_provider_and_system(provider_name, permission_mode)
+    provider, built_system, tools_by_name = _build_provider_and_system(
+        provider_name,
+        permission_mode,
+        model=model,
+    )
     return await loop.arun(
         provider,
-        TOOLS_BY_NAME,
+        tools_by_name,
         built_system,
         user_input,
         model,
@@ -281,11 +289,15 @@ async def arun_agent_with_history(
     effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None,
 ) -> AgentRunResult:
     """Async headless agent runner returning the full transcript."""
-    provider, built_system = _build_provider_and_system(provider_name, permission_mode)
+    provider, built_system, tools_by_name = _build_provider_and_system(
+        provider_name,
+        permission_mode,
+        model=model,
+    )
     messages: list[Message] = []
     response = await loop.arun(
         provider,
-        TOOLS_BY_NAME,
+        tools_by_name,
         built_system,
         user_input,
         model,

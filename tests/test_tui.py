@@ -1342,6 +1342,81 @@ def test_tui_attaches_local_image_from_user_text(tmp_path: Path) -> None:
     assert "[image] debug shot.png" not in rendered
 
 
+def test_text_only_model_omits_submitted_images_with_notice(tmp_path: Path) -> None:
+    image = tmp_path / "debug shot.png"
+    image.write_bytes(b"fake-png")
+    out = _TTYBuffer()
+    app = tui.WattleApp(
+        _make_args(model="deepseek-v4-flash"),
+        _ScriptedStreamProvider([]),
+        out=out,
+    )
+
+    assert app._submit_user_text(f'check image at "{image}"', render=True)
+
+    message = app.messages[-1]
+    assert message.role == "user"
+    assert message.content == [
+        TextBlock(text="check image at [image#1]"),
+        TextBlock(
+            text=(
+                "[image omitted: model deepseek-v4-flash "
+                "does not support image inputs]"
+            )
+        ),
+    ]
+    rendered = out.getvalue()
+    assert "check image at [image#1]" in rendered
+    assert "Images were not sent because model deepseek-v4-flash" in rendered
+    assert str(image) not in rendered
+
+
+def test_text_only_model_hides_view_image_tool() -> None:
+    app = tui.WattleApp(
+        _make_args(model="deepseek-v4-flash"),
+        _ScriptedStreamProvider([]),
+        out=io.StringIO(),
+    )
+
+    assert "view_image" not in {spec["name"] for spec in app.tool_specs}
+    assert app.system is not None
+    assert "view_image" not in app.system
+
+
+def test_tui_subagents_full_tool_set_includes_custom_tools(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tool = _RecordingTool()
+    monkeypatch.setitem(TOOLS_BY_NAME, tool.name, tool)
+    app = tui.WattleApp(
+        _make_args(model="deepseek-v4-flash"),
+        _ParentChildProvider(),
+        out=io.StringIO(),
+    )
+
+    app._configure_subagents()
+
+    config = app.runtime.subagents._config
+    assert config is not None
+    assert "echo" in config.full_tools_by_name
+
+
+def test_raw_model_command_refreshes_model_dependent_context() -> None:
+    app = tui.WattleApp(
+        _make_args(model="gpt-5.5"),
+        _ScriptedStreamProvider([]),
+        out=io.StringIO(),
+    )
+    assert "view_image" in {spec["name"] for spec in app.tool_specs}
+
+    app._handle_model("deepseek-v4-flash")
+
+    assert app.current_model == "deepseek-v4-flash"
+    assert "view_image" not in {spec["name"] for spec in app.tool_specs}
+    assert app.system is not None
+    assert "view_image" not in app.system
+
+
 def test_history_replay_keeps_user_image_anchor_without_summary(tmp_path: Path) -> None:
     image = tmp_path / "debug shot.png"
     image.write_bytes(b"fake-png")
@@ -3275,6 +3350,31 @@ def test_live_interrupt_current_turn_clears_transient_inflight_tool_results() ->
     assert live.streaming is False
     assert live.inflight_tool_results == []
     assert live.active_turn_id == 5
+
+
+def test_live_dispatch_uses_inflight_tools_after_model_switch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tool = _RecordingTool()
+    monkeypatch.setitem(TOOLS_BY_NAME, tool.name, tool)
+    out = _TTYBuffer()
+    app = tui.WattleApp(_make_args(model="gpt-5.5"), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+    live = tui._LiveTerminal(app)
+    live.streaming = True
+    live.inflight_tools_by_name = app._available_tools()
+    app.current_model = "deepseek-v4-flash"
+    app._refresh_model_dependent_context()
+
+    blocks = live._dispatch_tool_with_animated_prompt(
+        ToolUseBlock(id="call_1", name="echo", input={"message": "hi"})
+    )
+
+    assert tool.calls == [{"message": "hi"}]
+    assert any(
+        isinstance(block, ToolResultBlock) and block.tool_use_id == "call_1" and not block.is_error
+        for block in blocks
+    )
 
 
 def test_live_inflight_resize_replay_tracks_only_tool_results() -> None:

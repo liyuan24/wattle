@@ -81,6 +81,22 @@ def test_model_catalog_includes_supported_effort_levels() -> None:
     )
 
 
+def test_model_catalog_includes_supported_modalities() -> None:
+    by_model = {choice.model: choice.supported_modalities for choice in models.MODEL_CATALOG}
+
+    assert by_model["gpt-5.5"] == ("text", "image")
+    assert by_model["claude-sonnet-4-6"] == ("text", "image")
+    assert by_model["kimi-k2.6"] == ("text", "image")
+    assert by_model["kimi-k2.5"] == ("text", "image")
+    assert by_model["mimo-v2.5"] == ("text", "image")
+    assert by_model["deepseek-v4-flash"] == ("text",)
+    assert by_model["deepseek-v4-pro"] == ("text",)
+    assert by_model["MiniMax-M2.7"] == ("text",)
+    assert by_model["MiniMax-M2.7-highspeed"] == ("text",)
+    assert by_model["mimo-v2.5-pro"] == ("text",)
+    assert models.model_supports_modality("future-model", "image")
+
+
 def test_request_preparation_uses_model_catalog_context_windows() -> None:
     for choice in models.MODEL_CATALOG:
         assert request_preparation.context_window_for_model(choice.model) == choice.context_window

@@ -20,6 +20,7 @@ from collections.abc import Callable, Mapping, MutableSequence
 from typing import Any, Literal, cast
 
 from .message_history import monitor_event_text_blocks
+from .models import model_supports_modality
 from .permissions import PermissionGate
 from .providers.base import (
     CompletionResponse,
@@ -85,6 +86,12 @@ def run(
     )
 
 
+def _tools_for_model(tools_by_name: Mapping[str, Tool], model: str) -> dict[str, Tool]:
+    if model_supports_modality(model, "image"):
+        return dict(tools_by_name)
+    return {name: tool for name, tool in tools_by_name.items() if name != "view_image"}
+
+
 async def arun(
     provider: Provider,
     tools_by_name: Mapping[str, Tool],
@@ -100,12 +107,14 @@ async def arun(
 ) -> CompletionResponse:
     """Async version of :func:`run`."""
 
-    tool_specs = [t.spec() for t in tools_by_name.values()]
-    runtime = _runtime_from_tools(tools_by_name)
+    model_tools_by_name = _tools_for_model(tools_by_name, model)
+    tool_specs = [t.spec() for t in model_tools_by_name.values()]
+    runtime = _runtime_from_tools(model_tools_by_name)
     _configure_subagent_runtime(
         runtime,
         provider=provider,
-        tools_by_name=tools_by_name,
+        tools_by_name=model_tools_by_name,
+        full_tools_by_name=tools_by_name,
         system=system,
         model=model,
         max_tokens=max_tokens,
@@ -146,7 +155,7 @@ async def arun(
             if not isinstance(block, ToolUseBlock):
                 continue
             tool_results.extend(
-                await dispatch_tool_blocks_async(block, tools_by_name, permission_gate)
+                await dispatch_tool_blocks_async(block, model_tools_by_name, permission_gate)
             )
         monitor_blocks = _drain_monitor_event_blocks(runtime)
 
@@ -222,12 +231,14 @@ async def arun_streaming(
 ) -> CompletionResponse:
     """Async version of :func:`run_streaming`."""
 
-    tool_specs = [t.spec() for t in tools_by_name.values()]
-    runtime = _runtime_from_tools(tools_by_name)
+    model_tools_by_name = _tools_for_model(tools_by_name, model)
+    tool_specs = [t.spec() for t in model_tools_by_name.values()]
+    runtime = _runtime_from_tools(model_tools_by_name)
     _configure_subagent_runtime(
         runtime,
         provider=provider,
-        tools_by_name=tools_by_name,
+        tools_by_name=model_tools_by_name,
+        full_tools_by_name=tools_by_name,
         system=system,
         model=model,
         max_tokens=max_tokens,
@@ -275,7 +286,7 @@ async def arun_streaming(
             if not isinstance(block, ToolUseBlock):
                 continue
             tool_results.extend(
-                await dispatch_tool_blocks_async(block, tools_by_name, permission_gate)
+                await dispatch_tool_blocks_async(block, model_tools_by_name, permission_gate)
             )
         monitor_blocks = _drain_monitor_event_blocks(runtime)
 
@@ -486,6 +497,7 @@ def _configure_subagent_runtime(
     *,
     provider: Provider,
     tools_by_name: Mapping[str, Tool],
+    full_tools_by_name: Mapping[str, Tool],
     system: str | None,
     model: str,
     max_tokens: int,
@@ -504,6 +516,7 @@ def _configure_subagent_runtime(
         tools_by_name=tools_by_name,
         system=system,
         model=model,
+        full_tools_by_name=full_tools_by_name,
         max_tokens=max_tokens,
         permission_gate=permission_gate,
         context_window=context_window,

@@ -19,15 +19,17 @@ from wattle.compaction import (
     amaybe_compact_messages,
     estimate_request_context_tokens,
 )
-from wattle.models import context_window_for_model
+from wattle.models import context_window_for_model, model_supports_modality
 from wattle.provider_errors import is_context_length_error
 from wattle.providers import (
     CompletionRequest,
     CompletionResponse,
+    ImageBlock,
     IncompleteStreamError,
     Message,
     Provider,
     StreamEvent,
+    TextBlock,
     TransientProviderError,
 )
 from wattle.providers.base import stream_idle_timeout_seconds_from_env
@@ -104,16 +106,20 @@ class RequestPreparer:
         compaction_instructions: str | None = None,
     ) -> PreparedRequest:
         previous_state = self.state
+        projected_input_messages = project_messages_for_model_modalities(
+            messages,
+            model=self.model,
+        )
         raw_context_tokens = estimate_request_context_tokens(
             system=self.system,
-            messages=messages,
+            messages=projected_input_messages,
             tools=self.tools,
         )
         request_messages, state = await amaybe_compact_messages(
             provider=self.provider,
             model=self.model,
             system=self.system,
-            messages=messages,
+            messages=projected_input_messages,
             tools=self.tools,
             max_tokens=self.max_tokens,
             context_window=self.context_window,
@@ -128,9 +134,13 @@ class RequestPreparer:
         compacted = state is not None
         if compacted and reset_provider:
             await self.provider.areset_conversation()
+        projected_messages = project_messages_for_model_modalities(
+            request_messages,
+            model=self.model,
+        )
         context_tokens = estimate_request_context_tokens(
             system=self.system,
-            messages=request_messages,
+            messages=projected_messages,
             tools=self.tools,
         )
         if (
@@ -143,7 +153,7 @@ class RequestPreparer:
         return PreparedRequest(
             request=CompletionRequest(
                 model=self.model,
-                messages=request_messages,
+                messages=projected_messages,
                 max_tokens=self.max_tokens,
                 system=self.system,
                 tools=self.tools,
@@ -153,7 +163,7 @@ class RequestPreparer:
             context_tokens=context_tokens,
             request_bytes=estimate_serialized_request_bytes(
                 model=self.model,
-                messages=request_messages,
+                messages=projected_messages,
                 max_tokens=self.max_tokens,
                 system=self.system,
                 tools=self.tools,
@@ -162,6 +172,42 @@ class RequestPreparer:
             ),
             compacted=compacted,
         )
+
+
+def project_messages_for_model_modalities(
+    messages: list[Message],
+    *,
+    model: str,
+) -> list[Message]:
+    """Return the provider request projection allowed by model input modalities."""
+
+    if model_supports_modality(model, "image"):
+        return messages
+    return [_replace_images_with_text(message, model=model) for message in messages]
+
+
+def _replace_images_with_text(message: Message, *, model: str) -> Message:
+    content = [
+        (
+            TextBlock(text=_unsupported_image_text(block, model=model))
+            if isinstance(block, ImageBlock)
+            else block
+        )
+        for block in message.content
+    ]
+    if content == message.content:
+        return message
+    return Message(
+        role=message.role,
+        content=content,
+        input_tokens=message.input_tokens,
+        output_tokens=message.output_tokens,
+        cached_tokens=message.cached_tokens,
+    )
+
+
+def _unsupported_image_text(block: ImageBlock, *, model: str) -> str:
+    return f"[image omitted: model {model} does not support image inputs]"
 
 
 async def acomplete_with_recovery(

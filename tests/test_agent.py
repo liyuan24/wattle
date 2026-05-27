@@ -130,6 +130,31 @@ def test_anthropic_provider_wires_anthropic_vendor_key(
     assert result is loop_run_sentinel.sentinel
 
 
+def test_text_only_headless_agent_passes_full_tool_map_to_loop() -> None:
+    fake_provider = object()
+    with (
+        patch.object(
+            agent,
+            "get_credential",
+            return_value=AuthCredential(
+                kind="api_key",
+                bearer_token="fake-deepseek-key",
+                source="test",
+            ),
+        ),
+        patch.object(agent.openai, "AsyncOpenAI", return_value=object()),
+        patch.object(agent, "OpenAICompletionsProvider", return_value=fake_provider),
+        patch.object(agent.loop, "arun", new_callable=AsyncMock, return_value=object()) as mock_run,
+        patch.object(agent, "build_system_prompt", return_value="built system") as mock_system,
+    ):
+        run_agent("deepseek", model="deepseek-v4-flash", user_input="hi")
+
+    assert mock_run.call_args.args[1] is agent.TOOLS_BY_NAME
+    assert "view_image" in mock_run.call_args.args[1]
+    system_tools = mock_system.call_args.kwargs["tools_by_name"]
+    assert "view_image" not in system_tools
+
+
 def test_openai_codex_provider_wires_openai_oauth_bearer(
     loop_run_sentinel: MagicMock,
 ) -> None:

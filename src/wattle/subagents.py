@@ -9,11 +9,13 @@ import uuid
 from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Literal, cast
 
 from wattle.loop import dispatch_tool_blocks_async
 from wattle.message_history import monitor_event_text_blocks
-from wattle.permissions import PermissionGate
+from wattle.models import context_window_for_model, effort_levels_for_model, model_supports_modality
+from wattle.permissions import PermissionGate, PermissionMode
 from wattle.providers import (
     CompletionResponse,
     ContentBlock,
@@ -23,6 +25,8 @@ from wattle.providers import (
     ToolUseBlock,
 )
 from wattle.request_preparation import RequestPreparer, acomplete_with_recovery
+from wattle.skills import load_available_skills
+from wattle.system_prompt import DEFAULT_SYSTEM_PROMPT, build_system_prompt
 from wattle.tools.base import Tool, ToolSpec
 
 SubagentStatus = Literal[
@@ -39,6 +43,13 @@ COLLABORATION_TOOL_NAMES = frozenset(
 )
 
 DEFAULT_AGENT_TYPE = "default"
+
+
+def _tools_for_model(tools_by_name: Mapping[str, Tool], model: str) -> dict[str, Tool]:
+    if model_supports_modality(model, "image"):
+        return dict(tools_by_name)
+    return {name: tool for name, tool in tools_by_name.items() if name != "view_image"}
+
 
 SUBAGENT_DISPLAY_NAMES = (
     "Hopper",
@@ -86,6 +97,7 @@ class SubagentRecord:
 class _SubagentConfig:
     provider: Provider
     tools_by_name: Mapping[str, Tool]
+    full_tools_by_name: Mapping[str, Tool]
     system: str | None
     model: str
     max_tokens: int
@@ -136,6 +148,7 @@ class SubagentManager:
         tools_by_name: Mapping[str, Tool],
         system: str | None,
         model: str,
+        full_tools_by_name: Mapping[str, Tool] | None = None,
         max_tokens: int,
         permission_gate: PermissionGate | None = None,
         context_window: int | None = None,
@@ -146,6 +159,7 @@ class SubagentManager:
             self._config = _SubagentConfig(
                 provider=provider,
                 tools_by_name=tools_by_name,
+                full_tools_by_name=full_tools_by_name or tools_by_name,
                 system=system,
                 model=model,
                 max_tokens=max_tokens,
@@ -171,8 +185,13 @@ class SubagentManager:
         if not clean_task:
             raise ValueError("task must not be empty")
 
-        selected_tools = self._select_tools(config.tools_by_name, tool_names)
         resolved_model = model or config.model
+        available_tools = _tools_for_model(config.full_tools_by_name, resolved_model)
+        selected_tools = self._select_tools(available_tools, tool_names)
+        resolved_effort = _effort_for_model(config.effort, resolved_model)
+        resolved_context_window = context_window_for_model(resolved_model)
+        if resolved_context_window is None:
+            resolved_context_window = config.context_window
         resolved_agent_type = _normalize_agent_type(agent_type)
         subagent_id = f"subagent-{uuid.uuid4().hex[:12]}"
         now = time.time()
@@ -188,8 +207,8 @@ class SubagentManager:
             instructions=instructions.strip() if instructions else None,
             context=context.strip() if context else None,
             model=resolved_model,
-            effort=config.effort,
-            workspace=_workspace_from_tools(config.tools_by_name),
+            effort=resolved_effort,
+            workspace=_workspace_from_tools(selected_tools),
             tool_names=sorted(selected_tools),
             status="pending",
             started_at=now,
@@ -197,15 +216,22 @@ class SubagentManager:
         )
         session = _SubagentSession(
             record=record,
-            system=self._subagent_system(config.system, record.instructions),
+            system=self._subagent_system(
+                config.system,
+                selected_tools,
+                record.instructions,
+                permission_mode=config.permission_gate.mode
+                if config.permission_gate is not None
+                else PermissionMode.YOLO,
+            ),
             tools_by_name=selected_tools,
             tool_specs=[tool.spec() for tool in selected_tools.values()],
             provider=config.provider.fork(),
             max_tokens=max_tokens or config.max_tokens,
             permission_gate=config.permission_gate,
-            context_window=config.context_window,
-            thinking=config.thinking,
-            effort=config.effort,
+            context_window=resolved_context_window,
+            thinking=config.thinking and resolved_effort is not None,
+            effort=resolved_effort,
         )
         with self._lock:
             self._sessions[subagent_id] = session
@@ -523,7 +549,21 @@ class SubagentManager:
         return selected
 
     @staticmethod
-    def _subagent_system(system: str | None, instructions: str | None) -> str | None:
+    def _subagent_system(
+        base_system: str | None,
+        tools_by_name: Mapping[str, Tool],
+        instructions: str | None,
+        *,
+        permission_mode: PermissionMode,
+    ) -> str:
+        system = build_system_prompt(
+            tools_by_name=tools_by_name,
+            skills=load_available_skills(Path.cwd()),
+            permission_mode=permission_mode,
+        )
+        parent_context = _parent_system_context(base_system, regenerated_system=system)
+        if parent_context:
+            system = f"{system}\n\nParent system context:\n{parent_context}"
         if not instructions:
             return system
         addition = (
@@ -531,7 +571,7 @@ class SubagentManager:
             "delegated task and return concise findings or results to the parent.\n\n"
             f"Subagent-specific instructions:\n{instructions}"
         )
-        return f"{system}\n\n{addition}" if system else addition
+        return f"{system}\n\n{addition}"
 
     @staticmethod
     def _initial_user_text(record: SubagentRecord) -> str:
@@ -635,6 +675,52 @@ def _response_text(response: CompletionResponse) -> str:
         if text:
             parts.append(text)
     return "\n".join(parts)
+
+
+def _effort_for_model(
+    effort: Literal["low", "medium", "high", "xhigh", "max"] | None,
+    model: str,
+) -> Literal["low", "medium", "high", "xhigh", "max"] | None:
+    if effort is None:
+        return None
+    levels = effort_levels_for_model(model)
+    if effort in levels:
+        return effort
+    return levels[-1] if levels else None
+
+
+def _parent_system_context(
+    system: str | None,
+    *,
+    regenerated_system: str,
+) -> str:
+    if not system or system == regenerated_system:
+        return ""
+    if not _looks_like_wattle_system_prompt(system):
+        return system
+    return _custom_parent_system_suffix(system)
+
+
+def _looks_like_wattle_system_prompt(system: str) -> bool:
+    return (
+        DEFAULT_SYSTEM_PROMPT in system
+        and "Available tools:\n" in system
+        and "Guidelines:\n" in system
+    )
+
+
+def _custom_parent_system_suffix(system: str) -> str:
+    index = system.find(DEFAULT_SYSTEM_PROMPT)
+    if index == -1:
+        return ""
+    parts = [system[:index].strip()]
+    current_working_directory = "\n\nCurrent working directory: "
+    cwd_index = system.rfind(current_working_directory)
+    if cwd_index != -1:
+        after_cwd = system.find("\n\n", cwd_index + len(current_working_directory))
+        if after_cwd != -1:
+            parts.append(system[after_cwd:].strip())
+    return "\n\n".join(part for part in parts if part)
 
 
 def _normalize_agent_type(agent_type: str | None) -> str:

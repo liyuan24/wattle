@@ -13,8 +13,11 @@ CODEX_DEFAULT_MODEL = "gpt-5.5"
 XIAOMI_TOKEN_PLAN_SGP_PROVIDER = "xiaomi-token-plan-sgp"
 XIAOMI_DEFAULT_MODEL = "mimo-v2.5-pro"
 type EffortLevel = Literal["low", "medium", "high", "xhigh", "max"]
+type InputModality = Literal["text", "image"]
 
 DEFAULT_EFFORT_LEVELS: tuple[EffortLevel, ...] = ("low", "medium", "high", "xhigh", "max")
+DEFAULT_INPUT_MODALITIES: tuple[InputModality, ...] = ("text", "image")
+TEXT_ONLY_MODALITIES: tuple[InputModality, ...] = ("text",)
 OPENAI_CODEX_EFFORT_LEVELS: tuple[EffortLevel, ...] = ("low", "medium", "high", "xhigh")
 XIAOMI_EFFORT_LEVELS: tuple[EffortLevel, ...] = ("low", "medium", "high")
 
@@ -39,6 +42,7 @@ class ModelChoice:
     context_window: int | None = None
     source_url: str = ""
     effort_levels: tuple[EffortLevel, ...] = DEFAULT_EFFORT_LEVELS
+    supported_modalities: tuple[InputModality, ...] = DEFAULT_INPUT_MODALITIES
 
 
 OPENAI_MODELS_URL = "https://developers.openai.com/api/docs/models/compare"
@@ -169,6 +173,7 @@ MODEL_CATALOG: tuple[ModelChoice, ...] = (
         description="DeepSeek fast model with 1M context and tool calling.",
         context_window=1_000_000,
         source_url=DEEPSEEK_MODELS_URL,
+        supported_modalities=TEXT_ONLY_MODALITIES,
     ),
     ModelChoice(
         model="deepseek-v4-pro",
@@ -177,6 +182,7 @@ MODEL_CATALOG: tuple[ModelChoice, ...] = (
         description="DeepSeek stronger model with 1M context and tool calling.",
         context_window=1_000_000,
         source_url=DEEPSEEK_MODELS_URL,
+        supported_modalities=TEXT_ONLY_MODALITIES,
     ),
     ModelChoice(
         model="kimi-k2.6",
@@ -201,6 +207,7 @@ MODEL_CATALOG: tuple[ModelChoice, ...] = (
         description="MiniMax latest OpenAI-compatible coding model.",
         context_window=204_800,
         source_url=MINIMAX_MODELS_URL,
+        supported_modalities=TEXT_ONLY_MODALITIES,
     ),
     ModelChoice(
         model="MiniMax-M2.7-highspeed",
@@ -209,6 +216,7 @@ MODEL_CATALOG: tuple[ModelChoice, ...] = (
         description="MiniMax M2.7 optimized for faster output.",
         context_window=204_800,
         source_url=MINIMAX_MODELS_URL,
+        supported_modalities=TEXT_ONLY_MODALITIES,
     ),
     ModelChoice(
         model=XIAOMI_DEFAULT_MODEL,
@@ -218,6 +226,7 @@ MODEL_CATALOG: tuple[ModelChoice, ...] = (
         context_window=1_000_000,
         source_url=XIAOMI_MODELS_URL,
         effort_levels=XIAOMI_EFFORT_LEVELS,
+        supported_modalities=TEXT_ONLY_MODALITIES,
     ),
     ModelChoice(
         model="mimo-v2.5",
@@ -299,6 +308,23 @@ def effort_levels_for_model(model: str) -> tuple[EffortLevel, ...]:
     if choice is not None:
         return choice.effort_levels
     return DEFAULT_EFFORT_LEVELS
+
+
+def supported_modalities_for_model(model: str) -> tuple[InputModality, ...]:
+    """Return input modalities Wattle should send to ``model``.
+
+    Unknown models keep the compatibility default of text and image, matching
+    Codex's behavior for model metadata that predates modality declarations.
+    """
+    choice = MODEL_CHOICES_BY_MODEL.get(model)
+    if choice is not None:
+        return choice.supported_modalities
+    return DEFAULT_INPUT_MODALITIES
+
+
+def model_supports_modality(model: str, modality: InputModality) -> bool:
+    """Return whether ``model`` accepts the given input modality."""
+    return modality in supported_modalities_for_model(model)
 
 
 def find_model_choice(selector: str, choices: list[ModelChoice]) -> ModelChoice | None:

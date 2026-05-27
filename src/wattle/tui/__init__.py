@@ -62,6 +62,7 @@ from wattle.models import (
     available_model_choices,
     effort_levels_for_model,
     find_model_choice,
+    model_supports_modality,
     render_model_choices,
 )
 from wattle.permissions import (
@@ -93,6 +94,7 @@ from wattle.request_preparation import (
     RequestPreparer,
     astream_with_recovery,
     context_window_for_model,
+    project_messages_for_model_modalities,
 )
 from wattle.session import (
     SessionCompaction,
@@ -2285,6 +2287,10 @@ def _first_text_block_text(
     return fallback
 
 
+def _content_has_images(content: list[ContentBlock]) -> bool:
+    return any(isinstance(block, ImageBlock) for block in content)
+
+
 def _shell_like_tokens_with_indexes(text: str) -> list[tuple[str, list[int]]]:
     tokens: list[tuple[str, list[int]]] = []
     index = 0
@@ -2413,7 +2419,7 @@ class WattleApp:
         )
         self.messages: list[Message] = []
         self.runtime = DEFAULT_RUNTIME
-        self.tool_specs = [tool.spec() for tool in TOOLS_BY_NAME.values()]
+        self.tool_specs = [tool.spec() for tool in self._available_tools().values()]
         self.permission_mode: PermissionMode = getattr(
             args,
             "permission_mode",
@@ -2424,7 +2430,7 @@ class WattleApp:
             prompt=self._ask_tool_permission,
         )
         self.system: str | None = build_system_prompt(
-            tools_by_name=TOOLS_BY_NAME,
+            tools_by_name=self._available_tools(),
             skills=load_available_skills(Path.cwd()),
             permission_mode=self.permission_mode,
         )
@@ -2530,6 +2536,7 @@ class WattleApp:
         except ValueError as exc:
             self._write_panel("error", str(exc), ERROR_STYLE)
             return False
+        omitted_images = _content_has_images(content) and not self._current_model_supports_images()
         if render:
             self._cleared_empty_screen_active = False
             self._write_block(
@@ -2540,6 +2547,10 @@ class WattleApp:
                 ),
                 USER_STYLE,
             )
+            if omitted_images:
+                self._write_unsupported_image_notice()
+        if omitted_images:
+            content = self._project_content_for_current_model(content)
         self.messages.append(Message(role="user", content=content))
         self._persist_session()
         return True
@@ -2573,6 +2584,42 @@ class WattleApp:
         if prefer_content_text and content and isinstance(content[0], TextBlock):
             display_text = content[0].text
         return display_text
+
+    def _current_model_supports_images(self) -> bool:
+        return model_supports_modality(self.current_model, "image")
+
+    def _unsupported_image_notice_text(self) -> str:
+        return (
+            f"Images were not sent because model {self.current_model} "
+            "does not support image inputs."
+        )
+
+    def _write_unsupported_image_notice(self) -> None:
+        self._write_panel("notice", self._unsupported_image_notice_text(), STATUS_STYLE)
+
+    def _project_content_for_current_model(
+        self,
+        content: list[ContentBlock],
+    ) -> list[ContentBlock]:
+        message = Message(role="user", content=content)
+        return project_messages_for_model_modalities(
+            [message],
+            model=self.current_model,
+        )[0].content
+
+    def _available_tools(self) -> dict[str, Tool]:
+        if self._current_model_supports_images():
+            return dict(TOOLS_BY_NAME)
+        return {name: tool for name, tool in TOOLS_BY_NAME.items() if name != "view_image"}
+
+    def _refresh_model_dependent_context(self) -> None:
+        tools_by_name = self._available_tools()
+        self.tool_specs = [tool.spec() for tool in tools_by_name.values()]
+        self.system = build_system_prompt(
+            tools_by_name=tools_by_name,
+            skills=load_available_skills(Path.cwd()),
+            permission_mode=self.permission_mode,
+        )
 
     def _image_placeholders_from_text(
         self,
@@ -2826,6 +2873,7 @@ class WattleApp:
         on_stream_retry: Callable[[int, int, BaseException, float], None] | None = None,
     ) -> RequestPreparer:
         self._coerce_effort_for_current_model()
+        self._refresh_model_dependent_context()
         return RequestPreparer(
             provider=provider or self.provider,
             model=self.current_model,
@@ -2847,11 +2895,13 @@ class WattleApp:
 
     def _configure_subagents(self, *, provider: Provider | None = None) -> None:
         self._coerce_effort_for_current_model()
+        tools_by_name = self._available_tools()
         self.runtime.subagents.configure(
             provider=provider or self.provider,
-            tools_by_name=TOOLS_BY_NAME,
+            tools_by_name=tools_by_name,
             system=self.system,
             model=self.current_model,
+            full_tools_by_name=TOOLS_BY_NAME,
             max_tokens=self.max_tokens,
             permission_gate=self.permission_gate,
             context_window=_context_window_for_model(self.current_model),
@@ -2973,7 +3023,7 @@ class WattleApp:
                 continue
             blocks = await dispatch_tool_blocks_async(
                 block,
-                TOOLS_BY_NAME,
+                self._available_tools(),
                 self.permission_gate,
             )
             result = _first_tool_result(block, blocks)
@@ -3655,6 +3705,7 @@ class WattleApp:
         if choice is None:
             self.current_model = rest
             self._coerce_effort_for_current_model()
+            self._refresh_model_dependent_context()
             self._write_panel("model", f"Model set to {self.current_model!r}.", STATUS_STYLE)
             self._persist_user_settings(
                 provider=self.current_provider_name,
@@ -3674,6 +3725,7 @@ class WattleApp:
             self.provider = _build_provider(choice.provider)
             self.current_provider_name = choice.provider
         self._coerce_effort_for_current_model()
+        self._refresh_model_dependent_context()
         self._persist_user_settings(
             provider=self.current_provider_name,
             model=self.current_model,
@@ -3817,11 +3869,7 @@ class WattleApp:
             return
         self.permission_mode = mode
         self.permission_gate = PermissionGate(mode, prompt=self._ask_tool_permission)
-        self.system = build_system_prompt(
-            tools_by_name=TOOLS_BY_NAME,
-            skills=load_available_skills(Path.cwd()),
-            permission_mode=self.permission_mode,
-        )
+        self._refresh_model_dependent_context()
         self._persist_user_settings(permission_mode=mode)
         self._persist_session()
         self._write_panel("permissions", f"Permission mode set to {mode.value}.", STATUS_STYLE)
@@ -4523,6 +4571,7 @@ class _LiveTerminal:
         self.stream_thinking: list[str] = []
         self.stream_tool_names: list[str] = []
         self.inflight_tool_results: list[ToolResultBlock] = []
+        self.inflight_tools_by_name: dict[str, Tool] = {}
         self.active_tool_status: str | None = None
         self.active_exec_cells: dict[str, _BashExecCell] = {}
         self._tool_event_queue: queue.Queue[ToolRunEvent] = queue.Queue()
@@ -5132,6 +5181,12 @@ class _LiveTerminal:
             ),
             USER_STYLE,
         )
+        omitted_images = (
+            _content_has_images(message_content)
+            and not self.app._current_model_supports_images()
+        )
+        if omitted_images:
+            self.app._write_unsupported_image_notice()
         if self.interrupted_user_inputs:
             submitted_text = _first_text_block_text(message_content, fallback=message_text)
             content = interrupted_user_text_blocks(
@@ -5142,6 +5197,8 @@ class _LiveTerminal:
             self.interrupted_user_inputs = []
         else:
             content = message_content
+        if omitted_images:
+            content = self.app._project_content_for_current_model(content)
         self.app.messages.append(Message(role="user", content=content))
         self.app._persist_session()
         self._start_worker()
@@ -5257,6 +5314,7 @@ class _LiveTerminal:
         self.streaming = False
         self.compacting = False
         self.inflight_tool_results = []
+        self.inflight_tools_by_name = {}
         self.active_tool_status = None
         self.working_started_at = None
         self.turn_started_at = None
@@ -5367,10 +5425,22 @@ class _LiveTerminal:
                     self.app._write_panel("error", str(exc), ERROR_STYLE)
                 continue
             image_index += sum(isinstance(block, ImageBlock) for block in content)
+            omitted_images = (
+                _content_has_images(content)
+                and not self.app._current_model_supports_images()
+            )
             prepared_pending.append(_first_text_block_text(content, fallback=text))
-            attachment_blocks.extend(content[1:])
+            if omitted_images:
+                projected = self.app._project_content_for_current_model(content)
+                attachment_blocks.extend(
+                    block for block in projected[1:] if not isinstance(block, ImageBlock)
+                )
+            else:
+                attachment_blocks.extend(content[1:])
             if render:
                 self.app._write_block(self.app._user_display_text(text, content), USER_STYLE)
+                if omitted_images:
+                    self.app._write_unsupported_image_notice()
         return prepared_pending, attachment_blocks
 
     def _handle_live_queue_command(self, text: str) -> bool:
@@ -5426,6 +5496,8 @@ class _LiveTerminal:
         self._clear_stream_buffers()
         turn_id = self.active_turn_id
         provider = self.app.provider
+        tools_by_name = self.app._available_tools()
+        self.inflight_tools_by_name = tools_by_name
         self.app._configure_subagents(provider=provider)
         self.worker = threading.Thread(
             target=self._worker_main,
@@ -5497,6 +5569,7 @@ class _LiveTerminal:
                 self.streaming = False
                 self.compacting = False
                 self.inflight_tool_results = []
+                self.inflight_tools_by_name = {}
                 self.worker = None
                 self.active_tool_status = None
                 self.working_started_at = None
@@ -5581,6 +5654,7 @@ class _LiveTerminal:
             if has_tool_uses and tool_results:
                 self.app._append_followup_user(list(tool_results))
             self.inflight_tool_results = []
+            self.inflight_tools_by_name = {}
             self._remember_worked_duration()
             return
         pending_monitor_texts = self.pending_monitor_inputs
@@ -5633,6 +5707,7 @@ class _LiveTerminal:
             self._start_worker()
         else:
             self.inflight_tool_results = []
+            self.inflight_tools_by_name = {}
             self.active_tool_status = None
             self.streaming = False
             self.working_started_at = None
@@ -5700,7 +5775,8 @@ class _LiveTerminal:
         return results
 
     def _dispatch_tool_with_animated_prompt(self, block: ToolUseBlock) -> list[ContentBlock]:
-        tool = TOOLS_BY_NAME.get(block.name)
+        tools_by_name = self.inflight_tools_by_name or self.app._available_tools()
+        tool = tools_by_name.get(block.name)
         if tool is None:
             return [
                 ToolResultBlock(
