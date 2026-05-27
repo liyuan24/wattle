@@ -1,0 +1,43 @@
+site_name: Wattle
+site_description: Pure-Python coding agent for serious terminal work.
+site_url: https://wattleagent.com
+repo_url: https://github.com/liyuan24/wattle
+repo_name: liyuan24/wattle
+
+docs_dir: docs
+site_dir: site
+
+theme:
+  name: material
+  palette:
+    scheme: slate
+    primary: green
+    accent: lime
+  features:
+    - navigation.sections
+    - navigation.instant
+    - navigation.top
+    - search.suggest
+    - search.highlight
+
+markdown_extensions:
+  - admonition
+  - toc:
+      permalink: true
+  - pymdownx.highlight
+  - pymdownx.superfences
+
+nav:
+  - Overview: index.md
+  - Quickstart: quickstart.md
+  - Using Wattle: usage.md
+  - Providers and Models: providers.md
+  - Settings: settings.md
+  - Permissions: permissions.md
+  - Sessions: sessions.md
+  - Compaction: compaction.md
+  - Agent Capabilities:
+      - Tools: tools.md
+      - Subagents: subagents.md
+      - Skills: skills.md
+  - Development: development.md
