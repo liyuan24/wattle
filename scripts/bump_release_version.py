@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import subprocess
@@ -13,6 +14,10 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PYPROJECT = REPO_ROOT / "pyproject.toml"
 UV_LOCK = REPO_ROOT / "uv.lock"
+LATEST_VERSION_API = REPO_ROOT / "docs" / "api" / "latest-version"
+LATEST_VERSION_JSON = REPO_ROOT / "docs" / "api" / "latest-version.json"
+REPO_URL = "https://github.com/liyuan24/wattle"
+INSTALL_URL = "https://wattleagent.com/install.sh"
 VERSION_RE = re.compile(r'(?m)^(version = ")(?P<version>\d+\.\d+\.\d+)(")$')
 LOCK_WATTLE_RE = re.compile(
     r'(?m)^(name = "wattle"\nversion = ")(?P<version>\d+\.\d+\.\d+)(")$'
@@ -122,6 +127,30 @@ def _write_version(new_version: Version, *, dry_run: bool) -> None:
         raise
 
 
+def _latest_version_payload(new_version: Version) -> dict[str, str | bool]:
+    tag = f"v{new_version}"
+    return {
+        "ok": True,
+        "version": str(new_version),
+        "tag": tag,
+        "repo": REPO_URL,
+        "releaseUrl": f"{REPO_URL}/releases/tag/{tag}",
+        "installUrl": INSTALL_URL,
+    }
+
+
+def _write_latest_version_api(new_version: Version, *, dry_run: bool) -> None:
+    if dry_run:
+        print(f"dry-run: update docs/api/latest-version to {new_version}")
+        print(f"dry-run: update docs/api/latest-version.json to {new_version}")
+        return
+
+    content = json.dumps(_latest_version_payload(new_version), indent=2, sort_keys=True) + "\n"
+    LATEST_VERSION_API.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_write(LATEST_VERSION_API, content)
+    _atomic_write(LATEST_VERSION_JSON, content)
+
+
 def _tag_exists(tag: str) -> bool:
     result = subprocess.run(
         ["git", "rev-parse", "--verify", "--quiet", f"refs/tags/{tag}"],
@@ -156,9 +185,20 @@ def main() -> int:
 
     print(f"Bumping Wattle version: {current} -> {new_version}")
     _write_version(new_version, dry_run=args.dry_run)
+    _write_latest_version_api(new_version, dry_run=args.dry_run)
 
     _run(["uv", "run", "pytest"], dry_run=args.dry_run)
-    _run(["git", "add", "pyproject.toml", "uv.lock"], dry_run=args.dry_run)
+    _run(
+        [
+            "git",
+            "add",
+            "pyproject.toml",
+            "uv.lock",
+            "docs/api/latest-version",
+            "docs/api/latest-version.json",
+        ],
+        dry_run=args.dry_run,
+    )
     _run(["git", "commit", "-m", f"Release {tag}"], dry_run=args.dry_run)
     _run(["git", "tag", tag], dry_run=args.dry_run)
     if args.dry_run:
