@@ -39,6 +39,7 @@ from wattle.providers import (
 )
 from wattle.tools import TOOLS_BY_NAME
 from wattle.tools.base import Tool
+from wattle.version import get_wattle_version
 
 ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
@@ -1322,7 +1323,7 @@ def test_terminal_appends_without_rewriting_scrollback() -> None:
 
     out, _app = _drive(provider, ["hello", "/exit"])
 
-    assert "Wattle Agent" in out
+    assert f"Wattle Agent {get_wattle_version()}" in out
     assert "~~ \\|/ ~~" in out
     assert "model:     gpt-5.5" in out
     assert "directory:" in out
@@ -2507,6 +2508,16 @@ def test_live_prompt_redraw_flushes_one_frame() -> None:
     assert " > a" in rendered
 
 
+def test_welcome_card_includes_version_after_title() -> None:
+    out = io.StringIO()
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+
+    app._write_welcome_card()
+
+    rendered = out.getvalue()
+    assert f"Wattle Agent {get_wattle_version()}" in rendered
+
+
 def test_welcome_card_keeps_compact_width() -> None:
     out = io.StringIO()
     app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
@@ -2516,6 +2527,28 @@ def test_welcome_card_keeps_compact_width() -> None:
 
     first_line = out.getvalue().splitlines()[0]
     assert len(first_line) == 36
+
+
+@pytest.mark.parametrize("styled", [False, True])
+@pytest.mark.parametrize("terminal_width", [2, 4, 5, 14])
+def test_welcome_card_truncates_title_to_narrow_terminal(
+    styled: bool,
+    terminal_width: int,
+) -> None:
+    out: io.StringIO | _TTYBuffer = _TTYBuffer() if styled else io.StringIO()
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = not styled
+    app._terminal_width = lambda: terminal_width  # type: ignore[method-assign]
+
+    app._write_welcome_card()
+
+    lines = [ANSI_RE.sub("", line) for line in out.getvalue().splitlines()]
+    if terminal_width <= 5:
+        assert len(lines) == 1
+        assert len(lines[0]) == terminal_width
+    else:
+        assert all(len(line) == terminal_width - 2 for line in lines)
+        assert "Wattle" in lines[4]
 
 
 def test_live_prompt_shows_slash_command_hints_for_prefix() -> None:
@@ -6114,6 +6147,8 @@ def test_terminal_login_xiaomi_token_plan_preserves_current_model(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from wattle import cli
+
     monkeypatch.setenv(settings.SETTINGS_PATH_ENV, str(tmp_path / "settings.json"))
     monkeypatch.setattr(auth, "AUTH_PATH", tmp_path / "auth.json")
     reloaded_provider = _ScriptedStreamProvider([])

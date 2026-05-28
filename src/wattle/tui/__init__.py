@@ -125,6 +125,7 @@ from wattle.tools.plan import PlanUpdate, parse_plan_update_input
 from wattle.tui import terminal as terminal_rendering
 from wattle.tui_flowers import Flower, flower_for_elapsed
 from wattle.turns import append_turn_step, build_turn_step
+from wattle.version import get_wattle_version
 
 _default_terminal_line = terminal_rendering.default_terminal_line
 _filled_terminal_line = terminal_rendering.filled_terminal_line
@@ -433,6 +434,16 @@ def _compact_head_tail_lines(
 
 def _truncate_preview_line(line: str, *, max_width: int) -> str:
     return line if len(line) <= max_width else line[: max_width - 3] + "..."
+
+
+def _truncate_cell_text(text: str, max_width: int) -> str:
+    if max_width <= 0:
+        return ""
+    if len(text) <= max_width:
+        return text
+    if max_width <= 3:
+        return text[:max_width]
+    return text[: max_width - 3] + "..."
 
 
 def _bash_preview_content(content: str) -> str:
@@ -4433,37 +4444,58 @@ class WattleApp:
             ("model:", self.current_model),
             ("directory:", _display_cwd()),
         ]
+        title = f"{WELCOME_TITLE} {get_wattle_version()}"
+        max_text_width = max(0, self._terminal_width() - 5)
+        visible_title = _truncate_cell_text(title, max_text_width)
+        visible_logo_lines = tuple(
+            _truncate_cell_text(line, max_text_width) for line in WATTLE_LOGO_LINES
+        )
+        terminal_width = self._terminal_width()
+        if terminal_width <= 5:
+            tiny_title = _truncate_cell_text(title, terminal_width)
+            if self._styles_enabled():
+                self._write(f"{WELCOME_TITLE_STYLE}{tiny_title}{RESET}\n")
+            else:
+                self._write_line(tiny_title)
+            return
+
         content_width = max(
-            len(WELCOME_TITLE),
-            *(len(line) for line in WATTLE_LOGO_LINES),
+            len(visible_title),
+            *(len(line) for line in visible_logo_lines),
             *(len(label) + 2 + len(value) for label, value in rows),
         )
-        width = min(self._terminal_width() - 2, max(36, content_width + 4))
+        width = min(terminal_width - 2, max(36, content_width + 4))
         inner_width = width - 2
 
         if not self._styles_enabled():
             self._write_line(f"┌{'─' * inner_width}┐")
-            for line in WATTLE_LOGO_LINES:
+            for line in visible_logo_lines:
                 self._write_line(f"│ {line.center(inner_width - 1)}│")
-            self._write_line(f"│ {WELCOME_TITLE.ljust(inner_width - 1)}│")
+            self._write_line(f"│ {visible_title.ljust(inner_width - 1)}│")
             self._write_line(f"│ {' '.ljust(inner_width - 1)}│")
             for label, value in rows:
-                self._write_line(f"│ {label:<10} {value.ljust(inner_width - 12)}│")
+                body_width = inner_width - 1
+                label_text = _truncate_cell_text(f"{label:<10}", body_width)
+                value_width = max(0, body_width - len(label_text) - 1)
+                visible_value = _truncate_cell_text(value, value_width)
+                separator = " " if value_width else ""
+                self._write_line(
+                    f"│ {label_text}{separator}{visible_value.ljust(value_width)}│"
+                )
             self._write_line(f"└{'─' * inner_width}┘")
             return
 
         self._write(f"{WELCOME_BORDER_STYLE}┌{'─' * inner_width}┐{RESET}\n")
-        for line in WATTLE_LOGO_LINES:
+        for line in visible_logo_lines:
             self._write(
                 f"{WELCOME_BORDER_STYLE}│{RESET} "
                 f"{WELCOME_LOGO_STYLE}{line.center(inner_width - 1)}{RESET}"
                 f"{WELCOME_BORDER_STYLE}│{RESET}\n"
             )
-        title = WELCOME_TITLE
-        title_padding = inner_width - 1 - len(title)
+        title_padding = inner_width - 1 - len(visible_title)
         self._write(
             f"{WELCOME_BORDER_STYLE}│{RESET} "
-            f"{WELCOME_TITLE_STYLE}{title}{RESET}"
+            f"{WELCOME_TITLE_STYLE}{visible_title}{RESET}"
             f"{' ' * max(0, title_padding)}"
             f"{WELCOME_BORDER_STYLE}│{RESET}\n"
         )
@@ -4473,7 +4505,7 @@ class WattleApp:
         )
         for label, value in rows:
             body_width = inner_width - 1
-            label_text = f"{label:<10}"
+            label_text = _truncate_cell_text(f"{label:<10}", body_width)
             value_width = max(0, body_width - len(label_text) - 1)
             if len(value) <= value_width:
                 visible_value = value
@@ -4481,9 +4513,10 @@ class WattleApp:
                 visible_value = value[-value_width:] if value_width else ""
             else:
                 visible_value = "..." + value[-(value_width - 3) :]
+            separator = " " if value_width else ""
             self._write(
                 f"{WELCOME_BORDER_STYLE}│{RESET} "
-                f"{WELCOME_LABEL_STYLE}{label_text}{RESET} "
+                f"{WELCOME_LABEL_STYLE}{label_text}{RESET}{separator}"
                 f"{WELCOME_VALUE_STYLE}{visible_value.ljust(value_width)}{RESET}"
                 f"{WELCOME_BORDER_STYLE}│{RESET}\n"
             )

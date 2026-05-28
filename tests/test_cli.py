@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import io
+import subprocess
 import sys
 from typing import Any
 from unittest.mock import patch
@@ -22,6 +23,7 @@ def test_build_parser_defaults_to_tui_settings() -> None:
     parser = cli._build_parser()
     args = parser.parse_args([])
 
+    assert args.version is False
     assert args.prompt is None
     assert args.provider is None
     assert args.model is None
@@ -251,6 +253,43 @@ def test_build_parser_only_supports_yolo_permission_mode() -> None:
         parser.parse_args(["--read-only"])
     with pytest.raises(SystemExit):
         parser.parse_args(["--ask-for-permission"])
+
+
+def test_cli_provider_catalog_matches_agent() -> None:
+    from wattle.agent import _API_KEY_ONLY_PROVIDERS, PROVIDER_TO_VENDOR
+
+    assert cli._PROVIDER_TO_VENDOR == PROVIDER_TO_VENDOR
+    assert cli._API_KEY_ONLY_PROVIDERS == _API_KEY_ONLY_PROVIDERS
+    assert set(cli._PROVIDER_CHOICES) == set(PROVIDER_TO_VENDOR)
+    assert {name: spec.vendor for name, spec in cli._provider_dispatch().items()} == (
+        PROVIDER_TO_VENDOR
+    )
+
+
+def test_importing_cli_does_not_import_provider_sdks() -> None:
+    script = (
+        "import sys\n"
+        "import wattle.cli\n"
+        "assert 'anthropic' not in sys.modules\n"
+        "assert 'openai' not in sys.modules\n"
+    )
+
+    subprocess.run([sys.executable, "-c", script], check=True)
+
+
+@pytest.mark.parametrize("flag", ["--version", "-v"])
+def test_main_version_prints_version_without_loading_settings(
+    flag: str,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(cli, "get_wattle_version", lambda: "9.8.7")
+    monkeypatch.setattr(cli, "load_settings", lambda: pytest.fail("settings loaded"))
+    monkeypatch.setattr(cli, "_run_tui", lambda _args: pytest.fail("tui called"))
+    monkeypatch.setattr(cli, "_run_headless", lambda _args: pytest.fail("headless called"))
+
+    assert cli.main([flag]) == 0
+    assert capsys.readouterr().out == "9.8.7\n"
 
 
 def test_main_without_prompt_runs_tui(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -15,6 +15,7 @@ debug_images/
 system_prompt_investigation.md
 feature_requests.md
 .wattle/jobs/
+.wattle/runtime/
 .wattle/**/*.txt
 design_log/
 tbench/
