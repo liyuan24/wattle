@@ -65,12 +65,7 @@ from wattle.models import (
     model_supports_modality,
     render_model_choices,
 )
-from wattle.permissions import (
-    PermissionAnswer,
-    PermissionGate,
-    PermissionMode,
-    tool_permission_summary,
-)
+from wattle.permissions import PermissionGate, PermissionMode
 from wattle.providers import (
     CompletionRequest,
     CompletionResponse,
@@ -156,7 +151,6 @@ SLASH_COMMAND_HINTS: tuple[tuple[str, str], ...] = (
     ("/help", "show commands and settings"),
     ("/login", "authenticate OpenAI Codex with OAuth"),
     ("/model", "choose what model to use"),
-    ("/permissions", "switch tool permission mode"),
     ("/queue", "while streaming, send after the assistant turn completes"),
     ("/quit", "exit the TUI"),
     ("/resume", "switch to a saved session"),
@@ -1066,6 +1060,42 @@ def _history_message_is_fully_suppressed(
         and block.tool_use_id in suppressed_tool_result_ids
         for block in message.content
     )
+
+
+def _tool_call_summary(block: ToolUseBlock) -> str:
+    if block.name == "bash":
+        command = block.input.get("command", "<missing command>")
+        details = []
+        if block.input.get("background"):
+            details.append("background")
+        if block.input.get("tty"):
+            details.append("tty")
+        if "timeout" in block.input:
+            details.append(f"timeout={block.input['timeout']}")
+        suffix = f" ({', '.join(details)})" if details else ""
+        return f"bash: {command}{suffix}"
+    if block.name == "edit":
+        path = block.input.get("path", "<missing path>")
+        edits = block.input.get("edits")
+        if isinstance(edits, list):
+            return f"edit: {path} ({len(edits)} edit{'s' if len(edits) != 1 else ''})"
+        return f"edit: {path}"
+    if block.name == "write":
+        path = block.input.get("path", "<missing path>")
+        content = block.input.get("content", "")
+        if isinstance(content, str):
+            lines = content.count("\n") + (1 if content else 0)
+            return f"write: {path} ({lines} line{'s' if lines != 1 else ''})"
+        return f"write: {path}"
+    if block.name in {"read", "view_image"}:
+        return f"{block.name}: {block.input.get('path', '<missing path>')}"
+    if block.name == "monitor":
+        command = block.input.get("command", "<missing command>")
+        description = block.input.get("description")
+        if isinstance(description, str) and description:
+            return f"monitor: {description} ({command})"
+        return f"monitor: {command}"
+    return f"{block.name}: {block.input}"
 
 
 def _research_summary_for_success(
@@ -2420,15 +2450,8 @@ class WattleApp:
         self.messages: list[Message] = []
         self.runtime = DEFAULT_RUNTIME
         self.tool_specs = [tool.spec() for tool in self._available_tools().values()]
-        self.permission_mode: PermissionMode = getattr(
-            args,
-            "permission_mode",
-            PermissionMode.YOLO,
-        )
-        self.permission_gate = PermissionGate(
-            self.permission_mode,
-            prompt=self._ask_tool_permission,
-        )
+        self.permission_mode = PermissionMode.YOLO
+        self.permission_gate = PermissionGate()
         self.system: str | None = build_system_prompt(
             tools_by_name=self._available_tools(),
             skills=load_available_skills(Path.cwd()),
@@ -2733,16 +2756,14 @@ class WattleApp:
         )
         self.current_model = str(state.get("current_model", self.current_model))
         self.system = cast(str | None, state.get("system", self.system))
+        self._refresh_model_dependent_context()
         self.max_tokens = int(cast(Any, state.get("max_tokens", self.max_tokens)))
         self.thinking = bool(state.get("thinking", self.thinking))
         self.show_thinking_content = bool(
             state.get("show_thinking_content", self.show_thinking_content)
         )
         self.effort = cast(str | None, state.get("effort", self.effort))
-        self.permission_mode = cast(
-            PermissionMode,
-            state.get("permission_mode", self.permission_mode),
-        )
+        self.permission_mode = PermissionMode.YOLO
         self.enabled_models = tuple(
             cast(tuple[str, ...], state.get("enabled_models", self.enabled_models))
         )
@@ -2755,10 +2776,7 @@ class WattleApp:
                 ),
             )
         )
-        self.permission_gate = PermissionGate(
-            self.permission_mode,
-            prompt=self._ask_tool_permission,
-        )
+        self.permission_gate = PermissionGate()
         self.messages = list(cast(list[Message], state.get("messages", self.messages)))
         self._compaction_state = cast(
             RuntimeCompaction | None,
@@ -3056,28 +3074,6 @@ class WattleApp:
         flush_edit_group()
         flush_research()
         return results
-
-    def _ask_tool_permission(self, block: ToolUseBlock) -> PermissionAnswer:
-        summary = tool_permission_summary(block)
-        prompt = f"Allow {summary}? y allow, n deny, a allow all"
-        self._write_panel("permission", prompt, STATUS_STYLE)
-        while True:
-            answer = self._read_permission_answer()
-            if answer in {"y", "Y"}:
-                return PermissionAnswer.ALLOW
-            if answer in {"a", "A"}:
-                return PermissionAnswer.ALLOW_ALL
-            if answer in {"n", "N", "\x1b", ""}:
-                return PermissionAnswer.DENY
-            self._write_panel("permission", "Press y, n, or a.", STATUS_STYLE)
-
-    def _read_permission_answer(self) -> str:
-        if self._force_plain:
-            return self.input_func("").strip()[:1]
-        try:
-            return os.read(sys.stdin.fileno(), 1).decode(errors="ignore")
-        except (AttributeError, OSError):
-            return ""
 
     def _write_research_result(self, summaries: list[CommandSummary]) -> None:
         unique_summaries: list[CommandSummary] = []
@@ -3453,9 +3449,6 @@ class WattleApp:
         if cmd == "/effort":
             self._handle_effort(rest)
             return False
-        if cmd == "/permissions":
-            self._handle_permissions(rest)
-            return False
         if cmd == "/compact":
             self._handle_compact(rest)
             return False
@@ -3550,7 +3543,7 @@ class WattleApp:
             self.provider = _build_provider(record.settings.provider)
         self.current_provider_name = record.settings.provider
         self.current_model = record.settings.model
-        self.system = record.settings.system
+        self._refresh_model_dependent_context()
         self.max_tokens = record.settings.max_tokens
         self.thinking = record.settings.thinking
         self.effort = cast(str | None, record.settings.effort)
@@ -3843,38 +3836,6 @@ class WattleApp:
         self._persist_user_settings(thinking=self.thinking, effort=self.effort)
         self._persist_session()
 
-    def _handle_permissions(self, rest: str) -> None:
-        value = rest.strip()
-        aliases = {
-            "ask": PermissionMode.ASK,
-            "ask_for_permission": PermissionMode.ASK,
-            "read-only": PermissionMode.READ_ONLY,
-            "read_only": PermissionMode.READ_ONLY,
-            "yolo": PermissionMode.YOLO,
-        }
-        if not value:
-            self._write_panel(
-                "permissions",
-                "Current mode: "
-                f"{self.permission_mode.value}\nChoices: yolo, read_only, ask",
-                STATUS_STYLE,
-            )
-            return
-        mode = aliases.get(value)
-        if mode is None:
-            self._write_panel(
-                "error",
-                "Usage: /permissions yolo|read_only|ask",
-                ERROR_STYLE,
-            )
-            return
-        self.permission_mode = mode
-        self.permission_gate = PermissionGate(mode, prompt=self._ask_tool_permission)
-        self._refresh_model_dependent_context()
-        self._persist_user_settings(permission_mode=mode)
-        self._persist_session()
-        self._write_panel("permissions", f"Permission mode set to {mode.value}.", STATUS_STYLE)
-
     def _handle_compact(self, rest: str) -> None:
         if not self.messages:
             self._write_panel("compact", "No conversation history to compact.", STATUS_STYLE)
@@ -3963,7 +3924,6 @@ class WattleApp:
         self._write_line("  /help              Show this message.")
         self._write_line("  /login [openai-codex] Authenticate OpenAI Codex.")
         self._write_line("  /model [name|#|next] List or switch models.")
-        self._write_line("  /permissions [mode] Switch tool permission mode.")
         self._write_line("  /resume SESSION    Switch to a saved session.")
         self._write_line("  /session, /status  Show persistence and session status.")
         self._write_line("  /statusline          Configure the bottom statusline.")
@@ -4274,7 +4234,7 @@ class WattleApp:
             result = _matching_tool_result(next_message, block.id)
             if result is None:
                 flush_semantic_groups()
-                self._write_panel("tool use", tool_permission_summary(block), TOOL_TITLE_STYLE)
+                self._write_panel("tool use", _tool_call_summary(block), TOOL_TITLE_STYLE)
                 displayed = True
                 continue
             if result.is_error:

@@ -308,7 +308,7 @@ def test_loop_unknown_tool_is_an_error_block() -> None:
     assert result.stop_reason == "end_turn"
 
 
-def test_loop_read_only_blocks_bash_without_changing_system_prompt() -> None:
+def test_loop_yolo_permission_gate_allows_bash_without_changing_system_prompt() -> None:
     bash = BashTool()
     provider = StubProvider(
         [
@@ -316,7 +316,7 @@ def test_loop_read_only_blocks_bash_without_changing_system_prompt() -> None:
                 content=[ToolUseBlock(id="call_1", name="bash", input={"command": "echo hi"})],
                 stop_reason="tool_use",
             ),
-            CompletionResponse(content=[TextBlock(text="blocked")], stop_reason="end_turn"),
+            CompletionResponse(content=[TextBlock(text="done")], stop_reason="end_turn"),
         ]
     )
 
@@ -326,15 +326,15 @@ def test_loop_read_only_blocks_bash_without_changing_system_prompt() -> None:
         system="stable system",
         user_input="run echo hi",
         model="stub-model",
-        permission_gate=PermissionGate(PermissionMode.READ_ONLY),
+        permission_gate=PermissionGate(PermissionMode.YOLO),
     )
 
     assert provider.requests[0].system == "stable system"
     assert provider.requests[1].system == "stable system"
-    err_block = provider.requests[1].messages[2].content[0]
-    assert isinstance(err_block, ToolResultBlock)
-    assert err_block.is_error is True
-    assert "read-only mode" in err_block.content
+    result_block = provider.requests[1].messages[2].content[0]
+    assert isinstance(result_block, ToolResultBlock)
+    assert result_block.is_error is False
+    assert "hi" in result_block.content
 
 
 def test_loop_preserves_thinking_blocks_in_history() -> None:

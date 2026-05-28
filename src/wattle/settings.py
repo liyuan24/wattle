@@ -156,7 +156,7 @@ def _permission_mode(value: object, default: PermissionMode) -> PermissionMode:
     try:
         return parse_permission_mode(value)
     except ValueError:
-        return default
+        return PermissionMode.YOLO
 
 
 def _tui_settings(value: object, root: dict[str, Any]) -> TuiSettings:

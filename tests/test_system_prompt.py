@@ -90,18 +90,6 @@ def test_system_prompt_preserves_context_and_runtime_metadata(tmp_path: Path) ->
     assert "Current date: 2026-05-10" in prompt
 
 
-def test_read_only_mode_adds_read_only_guideline(tmp_path: Path) -> None:
-    prompt = build_system_prompt(
-        tools_by_name=TOOLS_BY_NAME,
-        cwd=tmp_path,
-        context_files=[],
-        permission_mode=PermissionMode.READ_ONLY,
-        current_date=date(2026, 5, 10),
-    )
-
-    assert "Read-only mode is active" in prompt
-
-
 def test_persistence_guideline_is_stable_across_permission_modes(tmp_path: Path) -> None:
     prompts = [
         build_system_prompt(

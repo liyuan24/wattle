@@ -71,4 +71,4 @@ See [Subagents](subagents.md).
 
 ## Permissions
 
-Permission modes can block or prompt for tool calls. See [Permissions](permissions.md).
+Wattle runs tool calls in `yolo` mode without runtime confirmation. See [Permissions](permissions.md).

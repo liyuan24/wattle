@@ -20,7 +20,7 @@ import openai
 
 from wattle import loop
 from wattle.auth import get_api_key_credential, get_credential, get_openai_codex_credential
-from wattle.permissions import PermissionGate, PermissionMode
+from wattle.permissions import PermissionMode
 from wattle.providers import (
     AnthropicProvider,
     CompletionResponse,
@@ -246,9 +246,7 @@ async def arun_agent(
         user_input,
         model,
         max_tokens,
-        permission_gate=(
-            None if permission_mode == PermissionMode.YOLO else PermissionGate(permission_mode)
-        ),
+        permission_gate=None,
         thinking=thinking,
         effort=effort,
     )
@@ -302,9 +300,7 @@ async def arun_agent_with_history(
         user_input,
         model,
         max_tokens,
-        permission_gate=(
-            None if permission_mode == PermissionMode.YOLO else PermissionGate(permission_mode)
-        ),
+        permission_gate=None,
         thinking=thinking,
         effort=effort,
         messages_out=messages,

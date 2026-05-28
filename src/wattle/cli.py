@@ -159,14 +159,7 @@ def _provider_auth_available(provider_name: str) -> bool:
 
 def _run_headless(args: argparse.Namespace) -> int:
     """Run one prompt and print only the final assistant text."""
-    permission_mode = getattr(args, "permission_mode", PermissionMode.YOLO)
-    if permission_mode == PermissionMode.ASK:
-        sys.stderr.write(
-            "wattle -p does not support --ask-for-permission; "
-            "use --yolo or --read-only.\n"
-        )
-        sys.stderr.flush()
-        return 2
+    permission_mode = PermissionMode.YOLO
 
     if bool(getattr(args, "persist", False)):
         result = run_agent_with_history(
@@ -231,28 +224,13 @@ def _run_tui(args: argparse.Namespace) -> int:
 
 
 def _add_permission_args(parser: argparse.ArgumentParser) -> None:
-    group = parser.add_mutually_exclusive_group()
-    group.add_argument(
+    parser.add_argument(
         "--yolo",
         dest="permission_mode",
         action="store_const",
         const=PermissionMode.YOLO,
         default=PermissionMode.YOLO,
-        help="Run requested tools without asking for confirmation (default).",
-    )
-    group.add_argument(
-        "--read-only",
-        dest="permission_mode",
-        action="store_const",
-        const=PermissionMode.READ_ONLY,
-        help="Only allow read-only tools.",
-    )
-    group.add_argument(
-        "--ask-for-permission",
-        dest="permission_mode",
-        action="store_const",
-        const=PermissionMode.ASK,
-        help="Ask before executing each tool. Not supported with -p.",
+        help="Run requested tools without asking for confirmation (default and only mode).",
     )
 
 
@@ -367,11 +345,7 @@ def _apply_settings_defaults(
         args.effort = settings.effort
     elif not _has_flag(argv, "--effort") and getattr(args, "effort", None) is None:
         args.effort = settings.effort if args.thinking else None
-    if not any(
-        _has_flag(argv, flag)
-        for flag in ("--yolo", "--read-only", "--ask-for-permission")
-    ):
-        args.permission_mode = settings.permission_mode
+    args.permission_mode = PermissionMode.YOLO
     args.statusline_fields = settings.tui.statusline_fields
     args.statusline = bool(args.statusline_fields)
     args.enabled_models = settings.enabled_models

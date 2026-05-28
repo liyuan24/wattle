@@ -772,6 +772,49 @@ def test_resumed_session_sends_saved_history_on_next_request() -> None:
     ]
 
 
+def test_resumed_legacy_read_only_session_rebuilds_yolo_system_prompt() -> None:
+    record = _session_record("sess_legacy_permissions", text="old question")
+    record = session.SessionRecord(
+        metadata=record.metadata,
+        settings=session.SessionSettings(
+            provider=record.settings.provider,
+            model=record.settings.model,
+            system="Be direct.\nRead-only mode is active. Do not write.",
+            max_tokens=record.settings.max_tokens,
+        ),
+        messages=record.messages,
+    )
+    args = _make_args(persist_session=True)
+    args.provider = record.settings.provider
+    args.model = record.settings.model
+    args.max_tokens = record.settings.max_tokens
+    args._resume_session_record = record
+    args._resume_session_path = Path("/tmp/sess_legacy_permissions.jsonl")
+    response = CompletionResponse(content=[TextBlock(text="new answer")], stop_reason="end_turn")
+    provider = _ScriptedStreamProvider([[StreamComplete(response=response)]])
+    inputs_iter = iter(["new question", "/exit"])
+
+    def input_func(_prompt: str = "") -> str:
+        try:
+            return next(inputs_iter)
+        except StopIteration as exc:
+            raise EOFError from exc
+
+    app = tui.WattleApp(
+        args,
+        provider,
+        state=tui._state_from_session(record),
+        input_func=input_func,
+        out=io.StringIO(),
+    )
+    assert app.run() == 0
+
+    assert len(provider.requests) == 1
+    assert provider.requests[0].system is not None
+    assert "Read-only mode is active" not in provider.requests[0].system
+    assert "Available tools:" in provider.requests[0].system
+
+
 def test_resumed_session_ending_with_tool_result_continues_turn(tmp_path: Path) -> None:
     record = _session_record("sess_tool_result", text="commit changes")
     record = session.SessionRecord(
@@ -4206,6 +4249,33 @@ def test_update_plan_history_replay_uses_tool_input_and_skips_generic_result() -
     assert "Plan updated" not in rendered
 
 
+def test_unmatched_tool_use_history_replay_uses_compact_display_summary() -> None:
+    out = _TTYBuffer()
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+    app.messages = [
+        Message(role="user", content=[TextBlock(text="write a file")]),
+        Message(
+            role="assistant",
+            content=[
+                ToolUseBlock(
+                    id="call_1",
+                    name="write",
+                    input={"path": "notes.txt", "content": "one\ntwo\nthree"},
+                )
+            ],
+        ),
+    ]
+
+    app._write_history_transcript()
+
+    rendered = _strip_ansi(out.getvalue())
+    assert "write: notes.txt (3 lines)" in rendered
+    assert "one" not in rendered
+    assert "two" not in rendered
+    assert "three" not in rendered
+
+
 @pytest.mark.parametrize(
     ("tool_name", "expected"),
     [
@@ -4259,82 +4329,7 @@ def test_subagent_housekeeping_errors_remain_visible() -> None:
     assert "RuntimeError: failed" in rendered
 
 
-def test_terminal_read_only_blocks_non_read_tool(monkeypatch: pytest.MonkeyPatch) -> None:
-    tool = _RecordingTool()
-    monkeypatch.setitem(TOOLS_BY_NAME, tool.name, tool)
-    tool_use_response = CompletionResponse(
-        content=[ToolUseBlock(id="call_1", name="echo", input={"message": "hi"})],
-        stop_reason="tool_use",
-    )
-    end_response = CompletionResponse(
-        content=[TextBlock(text="blocked")],
-        stop_reason="end_turn",
-    )
-    provider = _ScriptedStreamProvider(
-        [
-            [
-                ToolUseDelta(id="call_1", name="echo", partial_json=None),
-                StreamComplete(response=tool_use_response),
-            ],
-            [TextDelta(text="blocked"), StreamComplete(response=end_response)],
-        ]
-    )
-
-    out, app = _drive(
-        provider,
-        ["use tool", "/exit"],
-        args=_make_args(permission_mode=tui.PermissionMode.READ_ONLY),
-    )
-
-    assert tool.calls == []
-    assert "| echo error" not in out
-    assert "read-only mode" not in out
-    followup = app.messages[2]
-    assert any(
-        isinstance(block, ToolResultBlock)
-        and block.is_error
-        and "read-only mode" in block.content
-        for block in followup.content
-    )
-
-
-def test_terminal_ask_permission_denies_tool(monkeypatch: pytest.MonkeyPatch) -> None:
-    tool = _RecordingTool()
-    monkeypatch.setitem(TOOLS_BY_NAME, tool.name, tool)
-    tool_use_response = CompletionResponse(
-        content=[ToolUseBlock(id="call_1", name="echo", input={"message": "hi"})],
-        stop_reason="tool_use",
-    )
-    end_response = CompletionResponse(content=[TextBlock(text="denied")], stop_reason="end_turn")
-    provider = _ScriptedStreamProvider(
-        [
-            [
-                ToolUseDelta(id="call_1", name="echo", partial_json=None),
-                StreamComplete(response=tool_use_response),
-            ],
-            [TextDelta(text="denied"), StreamComplete(response=end_response)],
-        ]
-    )
-
-    out, app = _drive(
-        provider,
-        ["use tool", "n", "/exit"],
-        args=_make_args(permission_mode=tui.PermissionMode.ASK),
-    )
-
-    assert tool.calls == []
-    assert "[permission] Allow echo" in out
-    assert "Permission denied by user" not in out
-    followup = app.messages[2]
-    assert any(
-        isinstance(block, ToolResultBlock)
-        and block.is_error
-        and "Permission denied by user" in block.content
-        for block in followup.content
-    )
-
-
-def test_terminal_ask_permission_allows_tool(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_terminal_yolo_allows_tool(monkeypatch: pytest.MonkeyPatch) -> None:
     tool = _RecordingTool()
     monkeypatch.setitem(TOOLS_BY_NAME, tool.name, tool)
     tool_use_response = CompletionResponse(
@@ -4352,14 +4347,10 @@ def test_terminal_ask_permission_allows_tool(monkeypatch: pytest.MonkeyPatch) ->
         ]
     )
 
-    out, _app = _drive(
-        provider,
-        ["use tool", "y", "/exit"],
-        args=_make_args(permission_mode=tui.PermissionMode.ASK),
-    )
+    out, _app = _drive(provider, ["use tool", "/exit"])
 
     assert tool.calls == [{"message": "hi"}]
-    assert "[permission] Allow echo" in out
+    assert "[permission]" not in out
     assert "| echo ok" in out
 
 
@@ -6288,7 +6279,7 @@ def test_terminal_statusline_can_be_disabled(
     assert settings.load_settings().tui.statusline == ()
 
 
-def test_terminal_effort_and_permissions_update_settings(
+def test_terminal_effort_updates_settings(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -6296,16 +6287,15 @@ def test_terminal_effort_and_permissions_update_settings(
 
     out, app = _drive(
         _ScriptedStreamProvider([]),
-        ["/effort high", "/permissions read_only", "/exit"],
+        ["/effort high", "/exit"],
     )
 
     saved = settings.load_settings()
     assert app.thinking is True
     assert app.effort == "high"
-    assert app.permission_mode == tui.PermissionMode.READ_ONLY
+    assert app.permission_mode == tui.PermissionMode.YOLO
     assert saved.thinking is True
     assert saved.effort == "high"
-    assert saved.permission_mode == tui.PermissionMode.READ_ONLY
+    assert saved.permission_mode == tui.PermissionMode.YOLO
     assert saved.tui.show_thinking is False
     assert "Effort set to high" in out
-    assert "Permission mode set to read_only" in out

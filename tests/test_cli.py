@@ -50,7 +50,7 @@ def test_apply_settings_defaults_when_cli_flags_are_absent(
             max_tokens=1234,
             thinking=True,
             effort="high",
-            permission_mode=PermissionMode.READ_ONLY,
+            permission_mode=PermissionMode.YOLO,
             statusline=False,
             tui=TuiSettings(statusline=()),
             enabled_models=("gpt-5.4",),
@@ -63,7 +63,7 @@ def test_apply_settings_defaults_when_cli_flags_are_absent(
     assert args.max_tokens == 1234
     assert args.thinking is True
     assert args.effort == "high"
-    assert args.permission_mode == PermissionMode.READ_ONLY
+    assert args.permission_mode == PermissionMode.YOLO
     assert args.statusline is False
     assert args.statusline_fields == ()
     assert args.enabled_models == ("gpt-5.4",)
@@ -193,7 +193,7 @@ def test_build_parser_print_mode_accepts_prompt_and_shared_flags() -> None:
             "--thinking",
             "--effort",
             "high",
-            "--read-only",
+            "--yolo",
             "--persist",
             "-p",
             "follow the prompt",
@@ -207,7 +207,7 @@ def test_build_parser_print_mode_accepts_prompt_and_shared_flags() -> None:
     assert args.max_tokens == 512
     assert args.thinking is True
     assert args.effort == "high"
-    assert args.permission_mode == cli.PermissionMode.READ_ONLY
+    assert args.permission_mode == cli.PermissionMode.YOLO
     assert args.persist is True
 
 
@@ -243,14 +243,14 @@ def test_main_rejects_print_prompt_with_positional_prompt() -> None:
         cli.main(["-p", "headless", "interactive"])
 
 
-def test_build_parser_permission_modes_are_mutually_exclusive() -> None:
+def test_build_parser_only_supports_yolo_permission_mode() -> None:
     parser = cli._build_parser()
 
-    assert parser.parse_args(["--read-only"]).permission_mode == cli.PermissionMode.READ_ONLY
-    assert parser.parse_args(["--ask-for-permission"]).permission_mode == cli.PermissionMode.ASK
     assert parser.parse_args(["--yolo", "-p", "prompt"]).permission_mode == cli.PermissionMode.YOLO
     with pytest.raises(SystemExit):
-        parser.parse_args(["--yolo", "--read-only"])
+        parser.parse_args(["--read-only"])
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--ask-for-permission"])
 
 
 def test_main_without_prompt_runs_tui(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -449,7 +449,7 @@ def test_headless_calls_run_agent_and_prints_final_text(
             provider="anthropic",
             model="claude-sonnet-4-6",
             max_tokens=512,
-            permission_mode=cli.PermissionMode.READ_ONLY,
+            permission_mode=cli.PermissionMode.YOLO,
             print_prompt="follow the prompt",
             prompt=None,
         )
@@ -462,7 +462,7 @@ def test_headless_calls_run_agent_and_prints_final_text(
             ("anthropic", "claude-sonnet-4-6", "follow the prompt"),
             {
                 "max_tokens": 512,
-                "permission_mode": cli.PermissionMode.READ_ONLY,
+                "permission_mode": cli.PermissionMode.YOLO,
                 "thinking": False,
                 "effort": None,
             },
@@ -506,7 +506,7 @@ def test_headless_with_persist_saves_session_and_prints_final_text(
             provider="anthropic",
             model="claude-sonnet-4-6",
             max_tokens=512,
-            permission_mode=cli.PermissionMode.READ_ONLY,
+            permission_mode=cli.PermissionMode.YOLO,
             print_prompt="persist this",
             prompt=None,
             persist=True,
@@ -523,7 +523,7 @@ def test_headless_with_persist_saves_session_and_prints_final_text(
             ("anthropic", "claude-sonnet-4-6", "persist this"),
             {
                 "max_tokens": 512,
-                "permission_mode": cli.PermissionMode.READ_ONLY,
+                "permission_mode": cli.PermissionMode.YOLO,
                 "thinking": True,
                 "effort": "high",
             },
@@ -540,22 +540,3 @@ def test_headless_with_persist_saves_session_and_prints_final_text(
     assert record.settings.thinking is True
     assert record.settings.effort == "high"
     assert [message.role for message in record.messages] == ["user", "assistant"]
-
-
-def test_headless_rejects_ask_for_permission(monkeypatch: pytest.MonkeyPatch) -> None:
-    stderr = io.StringIO()
-    monkeypatch.setattr(sys, "stderr", stderr)
-
-    rc = cli._run_headless(
-        argparse.Namespace(
-            provider="openai_responses",
-            model="gpt-5.5",
-            max_tokens=4096,
-            permission_mode=cli.PermissionMode.ASK,
-            print_prompt="use a tool",
-            prompt=None,
-        )
-    )
-
-    assert rc == 2
-    assert "--ask-for-permission" in stderr.getvalue()

@@ -305,11 +305,6 @@ def _guidelines(
             "bash to display what you did."
         )
 
-    if permission_mode == PermissionMode.READ_ONLY:
-        guidelines.append(
-            "Read-only mode is active. Do not attempt write, edit, or mutating shell operations."
-        )
-
     guidelines.append("Be concise in your responses")
     guidelines.append("Show file paths clearly when working with files")
     return guidelines

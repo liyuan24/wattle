@@ -51,19 +51,15 @@ Effort values: `low`, `medium`, `high`, `xhigh`, `max`.
 
 ## Permission mode
 
+Wattle supports only `yolo` permission mode. Tool calls run without runtime confirmation.
+
 ```json
 {
-  "permission_mode": "read_only"
+  "permission_mode": "yolo"
 }
 ```
 
-Valid values:
-
-- `yolo`
-- `read_only`
-- `ask_for_permission`
-
-See [Permissions](permissions.md) for the exact behavior.
+Legacy `read_only` or `ask_for_permission` settings are ignored and treated as `yolo`.
 
 ## TUI statusline
 

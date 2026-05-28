@@ -16,7 +16,7 @@ Submit an initial prompt while still opening the TUI:
 wattle "review this repository and find the risky parts"
 ```
 
-The TUI streams assistant output, tool status, permission prompts, subagent lifecycle updates, model and login pickers, session status, and a configurable bottom statusline.
+The TUI streams assistant output, tool status, subagent lifecycle updates, model and login pickers, session status, and a configurable bottom statusline.
 
 ## Headless mode
 
@@ -31,8 +31,6 @@ Headless mode prints only the final assistant text to stdout. Use `--persist` to
 ```bash
 wattle -p "write release notes for this diff" --persist
 ```
-
-`--ask-for-permission` is interactive-only. Use `--yolo` or `--read-only` with `-p`.
 
 ## CLI flags
 
@@ -49,9 +47,7 @@ Common options:
 - `--max-tokens` - per-turn output cap.
 - `--thinking` - enable provider reasoning controls where supported.
 - `--effort low|medium|high|xhigh|max` - set reasoning effort and enable thinking.
-- `--yolo` - allow tools without asking.
-- `--read-only` - allow only read-only tools and safe read-only shell commands.
-- `--ask-for-permission` - ask before tool execution in the TUI.
+- `--yolo` - allow tools without asking. This is the default and only supported permission mode.
 - `-r`, `--resume [SESSION]` - resume a saved TUI session, or pick one interactively when no session is supplied.
 
 ## Slash commands
@@ -62,7 +58,6 @@ Use slash commands in the TUI:
 /help
 /model
 /model next
-/permissions read_only
 /effort high
 /compact
 /session
@@ -82,7 +77,6 @@ Available commands:
 - `/model enable MODEL_OR_NUMBER` - include a model in the TUI cycling list.
 - `/model disable MODEL_OR_NUMBER` - remove a model from the TUI cycling list.
 - `/effort [level]` - show or set reasoning effort. Use `off` to disable.
-- `/permissions [mode]` - show or set tool permission mode.
 - `/session` or `/status` - show persistence and session status.
 - `/branch` - copy the current conversation into a new session branch.
 - `/resume SESSION` - switch to a saved session id or JSONL path.
