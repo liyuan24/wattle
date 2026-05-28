@@ -39,6 +39,7 @@ DEFAULT_STREAM_MAX_RETRIES = 3
 
 type RetryableProviderError = IncompleteStreamError | TransientProviderError
 type StreamRetryCallback = Callable[[int, int, BaseException, float], None]
+type ProviderContextTokens = int | Callable[[], int | None] | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +71,7 @@ class RequestPreparer:
             Callable[[RuntimeCompaction, str, int, int], None] | None
         ) = None,
         compaction_keep_recent_tokens: int = 20_000,
+        provider_context_tokens: ProviderContextTokens = None,
         stream_max_retries: int = DEFAULT_STREAM_MAX_RETRIES,
         stream_idle_timeout_seconds: float | None = None,
         on_stream_retry: StreamRetryCallback | None = None,
@@ -89,6 +91,7 @@ class RequestPreparer:
         self.on_compaction_end = on_compaction_end
         self.on_compaction_record = on_compaction_record
         self.compaction_keep_recent_tokens = compaction_keep_recent_tokens
+        self.provider_context_tokens = provider_context_tokens
         self.stream_max_retries = max(0, stream_max_retries)
         self.stream_idle_timeout_seconds = (
             stream_idle_timeout_seconds_from_env()
@@ -96,6 +99,11 @@ class RequestPreparer:
             else max(0.001, stream_idle_timeout_seconds)
         )
         self.on_stream_retry = on_stream_retry
+
+    def _provider_context_tokens(self) -> int | None:
+        if callable(self.provider_context_tokens):
+            return self.provider_context_tokens()
+        return self.provider_context_tokens
 
     async def aprepare(
         self,
@@ -129,6 +137,7 @@ class RequestPreparer:
             force=force_compaction,
             keep_recent_tokens=self.compaction_keep_recent_tokens,
             compaction_instructions=compaction_instructions,
+            provider_context_tokens=self._provider_context_tokens(),
         )
         self.state = state
         compacted = state is not None

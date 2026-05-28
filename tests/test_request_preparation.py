@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from wattle.compaction import estimate_request_context_tokens
+from wattle.compaction import RuntimeCompaction, estimate_request_context_tokens
 from wattle.providers import CompletionResponse, ImageBlock, Message, StubProvider, TextBlock
 from wattle.request_preparation import RequestPreparer, project_messages_for_model_modalities
 
@@ -95,3 +95,48 @@ def test_prepare_context_estimate_uses_projected_text_only_messages(
         tools=[],
     )
     assert prepared.context_tokens < 100
+
+
+def test_prepare_reads_provider_context_tokens_lazily() -> None:
+    values = iter([None, 795])
+    provider = StubProvider(
+        [
+            CompletionResponse(content=[TextBlock(text="updated summary")], stop_reason="end_turn"),
+        ]
+    )
+    messages = [
+        Message(
+            role="user" if index % 2 else "assistant",
+            content=[TextBlock(text="x" * 80)],
+        )
+        for index in range(50)
+    ]
+    messages.append(Message(role="user", content=[TextBlock(text="a")]))
+    state = RuntimeCompaction(
+        summary="initial summary",
+        summarized_until=41,
+        first_kept_index=41,
+    )
+    preparer = RequestPreparer(
+        provider=provider,
+        model="test-model",
+        system=None,
+        tools=[],
+        max_tokens=10,
+        context_window=1_000,
+        state=state,
+        provider_context_tokens=lambda: next(values),
+    )
+
+    prepared_before_pressure = asyncio.run(preparer.aprepare(messages))
+    assert preparer.state == state
+
+    prepared_after_pressure = asyncio.run(preparer.aprepare(messages))
+
+    assert preparer.state is not None
+    assert preparer.state != state
+    assert preparer.state.summary == "updated summary"
+    assert preparer.state.summarized_until == len(messages) - 1
+    assert "initial summary" in prepared_before_pressure.request.messages[0].content[0].text
+    assert "updated summary" in prepared_after_pressure.request.messages[0].content[0].text
+    assert prepared_after_pressure.request.messages[-1] == messages[-1]

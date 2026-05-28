@@ -14,6 +14,7 @@ from wattle.providers import (
     Provider,
     StreamComplete,
     TextBlock,
+    ToolResultBlock,
     ToolUseBlock,
 )
 
@@ -262,7 +263,7 @@ def test_existing_compaction_reuses_summary_when_projection_is_below_threshold()
     assert request_messages[1:] == extended[state.first_kept_index :]
 
 
-def test_existing_compaction_refreshes_when_projection_crosses_threshold() -> None:
+def test_existing_compaction_refreshes_when_projection_crosses_trigger_ratio() -> None:
     provider = _ScriptedProvider(
         [
             CompletionResponse(
@@ -288,7 +289,7 @@ def test_existing_compaction_refreshes_when_projection_crosses_threshold() -> No
     )
     assert state is not None
 
-    extended = [*messages, *[_message(i, "y" * 80) for i in range(50, 80)]]
+    extended = [*messages, *[_message(i, "y" * 80) for i in range(50, 70)]]
     request_messages, next_state = _compact(
         provider=provider,
         model="test-model",
@@ -306,6 +307,138 @@ def test_existing_compaction_refreshes_when_projection_crosses_threshold() -> No
     assert next_state.summarized_until > state.summarized_until
     assert "updated summary" in cast_text(request_messages[0])
     assert len(provider.requests) == 2
+
+
+def test_existing_compaction_refreshes_when_provider_usage_crosses_trigger_ratio() -> None:
+    provider = _ScriptedProvider(
+        [
+            CompletionResponse(
+                content=[TextBlock(text="initial summary")],
+                stop_reason="end_turn",
+            ),
+            CompletionResponse(
+                content=[TextBlock(text="provider pressure summary")],
+                stop_reason="end_turn",
+            ),
+        ]
+    )
+    messages = [_message(i, "x" * 80) for i in range(50)]
+    _request_messages, state = _compact(
+        provider=provider,
+        model="test-model",
+        system=None,
+        messages=messages,
+        tools=[],
+        max_tokens=10,
+        context_window=1_000,
+        state=None,
+    )
+    assert state is not None
+
+    extended = [*messages, _message(50, "a")]
+    request_messages, next_state = _compact(
+        provider=provider,
+        model="test-model",
+        system=None,
+        messages=extended,
+        tools=[],
+        max_tokens=10,
+        context_window=1_000,
+        state=state,
+        provider_context_tokens=795,
+    )
+
+    assert next_state is not None
+    assert next_state != state
+    assert next_state.summary == "provider pressure summary"
+    assert next_state.summarized_until == len(extended) - 1
+    assert "provider pressure summary" in cast_text(request_messages[0])
+    assert request_messages[-1] == extended[-1]
+    assert len(provider.requests) == 2
+
+
+def test_provider_usage_can_start_first_compaction() -> None:
+    provider = _ScriptedProvider(
+        [
+            CompletionResponse(
+                content=[TextBlock(text="provider pressure summary")],
+                stop_reason="end_turn",
+            ),
+        ]
+    )
+    messages = [_message(i, "small") for i in range(3)]
+
+    request_messages, state = _compact(
+        provider=provider,
+        model="test-model",
+        system=None,
+        messages=messages,
+        tools=[],
+        max_tokens=10,
+        context_window=1_000,
+        state=None,
+        provider_context_tokens=795,
+    )
+
+    assert state is not None
+    assert state.summary == "provider pressure summary"
+    assert state.summarized_until == len(messages) - 1
+    assert "provider pressure summary" in cast_text(request_messages[0])
+    assert request_messages[-1] == messages[-1]
+    assert len(provider.requests) == 1
+
+
+def test_provider_pressure_compaction_preserves_live_tool_continuation() -> None:
+    provider = _ScriptedProvider(
+        [
+            CompletionResponse(
+                content=[TextBlock(text="initial summary")],
+                stop_reason="end_turn",
+            ),
+            CompletionResponse(
+                content=[TextBlock(text="provider pressure summary")],
+                stop_reason="end_turn",
+            ),
+        ]
+    )
+    messages = [_message(i, "x" * 80) for i in range(50)]
+    _request_messages, state = _compact(
+        provider=provider,
+        model="test-model",
+        system=None,
+        messages=messages,
+        tools=[],
+        max_tokens=10,
+        context_window=1_000,
+        state=None,
+    )
+    assert state is not None
+    live_tool_use = Message(
+        role="assistant",
+        content=[ToolUseBlock(id="tool_1", name="read", input={"path": "README.md"})],
+    )
+    live_tool_result = Message(
+        role="user",
+        content=[ToolResultBlock(tool_use_id="tool_1", content="tool output")],
+    )
+
+    request_messages, next_state = _compact(
+        provider=provider,
+        model="test-model",
+        system=None,
+        messages=[*messages, live_tool_use, live_tool_result],
+        tools=[],
+        max_tokens=10,
+        context_window=1_000,
+        state=state,
+        provider_context_tokens=795,
+    )
+
+    assert next_state is not None
+    assert next_state != state
+    assert request_messages[-2:] == [live_tool_use, live_tool_result]
+    assert next_state.summarized_until == len(messages)
+    assert "provider pressure summary" in cast_text(request_messages[0])
 
 
 def test_forced_existing_compaction_refreshes_even_when_projection_is_below_threshold() -> None:

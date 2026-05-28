@@ -5639,7 +5639,7 @@ def test_terminal_compaction_uses_projection_but_persists_full_history(
     assert saved.compactions[0].created_after_message_index == 25
 
 
-def test_terminal_compaction_does_not_retrigger_for_small_projected_history(
+def test_terminal_compaction_retriggers_when_projected_history_crosses_trigger_ratio(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(tui, "_context_window_for_model", lambda _model: 9_500)
@@ -5652,6 +5652,10 @@ def test_terminal_compaction_does_not_retrigger_for_small_projected_history(
         content=[TextBlock(text="first answer")],
         stop_reason="end_turn",
     )
+    refresh_summary_response = CompletionResponse(
+        content=[TextBlock(text="refreshed summary")],
+        stop_reason="end_turn",
+    )
     second_response = CompletionResponse(
         content=[TextBlock(text="second answer")],
         stop_reason="end_turn",
@@ -5660,6 +5664,7 @@ def test_terminal_compaction_does_not_retrigger_for_small_projected_history(
         [
             [StreamComplete(response=summary_response)],
             [StreamComplete(response=first_response)],
+            [StreamComplete(response=refresh_summary_response)],
             [StreamComplete(response=second_response)],
         ]
     )
@@ -5683,10 +5688,10 @@ def test_terminal_compaction_does_not_retrigger_for_small_projected_history(
     assert app.run() == 0
 
     rendered = out.getvalue()
-    assert rendered.count("[status] Auto-compacting...") == 1
-    assert len(provider.requests) == 3
-    second_request = provider.requests[2]
-    assert "middle summary" in _message_text(second_request.messages[0])
+    assert rendered.count("[status] Auto-compacting...") == 2
+    assert len(provider.requests) == 4
+    second_request = provider.requests[3]
+    assert "refreshed summary" in _message_text(second_request.messages[0])
     assert any("second request" in _message_text(message) for message in second_request.messages)
 
 

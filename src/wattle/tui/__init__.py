@@ -2890,6 +2890,7 @@ class WattleApp:
             on_compaction_end=on_compaction_end,
             on_compaction_record=self._record_compaction_checkpoint,
             compaction_keep_recent_tokens=self.compaction_keep_recent_tokens,
+            provider_context_tokens=lambda: self._last_context_tokens,
             on_stream_retry=on_stream_retry or self._write_stream_retry_status,
         )
 

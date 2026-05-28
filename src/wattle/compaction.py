@@ -59,15 +59,24 @@ async def amaybe_compact_messages(
     force: bool = False,
     keep_recent_tokens: int = DEFAULT_KEEP_RECENT_TOKENS,
     compaction_instructions: str | None = None,
+    provider_context_tokens: int | None = None,
 ) -> tuple[list[Message], RuntimeCompaction | None]:
     """Return request messages, compacting in memory if needed."""
 
-    should_start = state is None and _should_start_compaction(
-        system=system,
-        messages=messages,
-        tools=tools,
+    provider_pressure = _provider_context_pressure_exceeds_compaction_threshold(
+        provider_context_tokens=provider_context_tokens,
         max_tokens=max_tokens,
         context_window=context_window,
+    )
+    should_start = state is None and (
+        _should_start_compaction(
+            system=system,
+            messages=messages,
+            tools=tools,
+            max_tokens=max_tokens,
+            context_window=context_window,
+        )
+        or provider_pressure
     )
     should_start = should_start or (force and state is None)
     if not force and not should_start and state is None:
@@ -84,12 +93,28 @@ async def amaybe_compact_messages(
             messages=projected_messages,
             tools=tools,
         )
-        if context_window is None or context_window <= 0:
-            projected_overflow = False
-        else:
-            projected_overflow = projected_tokens + max_tokens >= context_window
-        if not projected_overflow:
+        estimated_pressure = _context_pressure_exceeds_compaction_threshold(
+            estimated_tokens=projected_tokens,
+            provider_context_tokens=None,
+            max_tokens=max_tokens,
+            context_window=context_window,
+        )
+        if not estimated_pressure and not provider_pressure:
             return projected_messages, state
+        if provider_pressure:
+            first_end, last_start = _provider_pressure_compaction_bounds(messages)
+        else:
+            first_end, last_start = _compaction_bounds(
+                messages,
+                force=force,
+                context_window=context_window,
+                max_tokens=max_tokens,
+                keep_recent_tokens=keep_recent_tokens,
+            )
+            if state.summarized_until >= last_start:
+                return projected_messages, state
+
+    if state is None or force:
         first_end, last_start = _compaction_bounds(
             messages,
             force=force,
@@ -97,24 +122,17 @@ async def amaybe_compact_messages(
             max_tokens=max_tokens,
             keep_recent_tokens=keep_recent_tokens,
         )
-        if state.summarized_until >= last_start:
-            return projected_messages, state
-
-    first_end, last_start = _compaction_bounds(
-        messages,
-        force=force,
-        context_window=context_window,
-        max_tokens=max_tokens,
-        keep_recent_tokens=keep_recent_tokens,
-    )
     if last_start <= first_end and should_start:
-        first_end, last_start = _compaction_bounds(
-            messages,
-            force=True,
-            context_window=context_window,
-            max_tokens=max_tokens,
-            keep_recent_tokens=keep_recent_tokens,
-        )
+        if provider_pressure and not force:
+            first_end, last_start = _provider_pressure_compaction_bounds(messages)
+        else:
+            first_end, last_start = _compaction_bounds(
+                messages,
+                force=True,
+                context_window=context_window,
+                max_tokens=max_tokens,
+                keep_recent_tokens=keep_recent_tokens,
+            )
     if last_start <= first_end:
         if state is None:
             return list(messages), None
@@ -167,6 +185,23 @@ def compacted_message_count() -> int:
     return 1
 
 
+def _provider_pressure_compaction_bounds(messages: list[Message]) -> tuple[int, int]:
+    if len(messages) <= 1:
+        return len(messages), len(messages)
+    return 0, _live_tail_start(messages)
+
+
+def _live_tail_start(messages: list[Message]) -> int:
+    if len(messages) < 2:
+        return len(messages)
+    previous, latest = messages[-2], messages[-1]
+    has_tool_use = any(isinstance(block, ToolUseBlock) for block in previous.content)
+    has_tool_result = any(isinstance(block, ToolResultBlock) for block in latest.content)
+    if previous.role == "assistant" and latest.role == "user" and has_tool_use and has_tool_result:
+        return len(messages) - 2
+    return len(messages) - 1
+
+
 def _compaction_bounds(
     messages: list[Message],
     *,
@@ -205,10 +240,45 @@ def _should_start_compaction(
     max_tokens: int,
     context_window: int | None,
 ) -> bool:
+    estimate = estimate_request_context_tokens(system=system, messages=messages, tools=tools)
+    return _context_pressure_exceeds_compaction_threshold(
+        estimated_tokens=estimate,
+        provider_context_tokens=None,
+        max_tokens=max_tokens,
+        context_window=context_window,
+    )
+
+
+def _context_pressure_exceeds_compaction_threshold(
+    *,
+    estimated_tokens: int,
+    provider_context_tokens: int | None,
+    max_tokens: int,
+    context_window: int | None,
+) -> bool:
     if context_window is None or context_window <= 0:
         return False
-    estimate = estimate_request_context_tokens(system=system, messages=messages, tools=tools)
-    return estimate + max_tokens >= int(context_window * COMPACTION_TRIGGER_RATIO)
+    threshold = int(context_window * COMPACTION_TRIGGER_RATIO)
+    pressures = [estimated_tokens]
+    if provider_context_tokens is not None and provider_context_tokens > 0:
+        pressures.append(provider_context_tokens)
+    return max(pressures) + max_tokens >= threshold
+
+
+def _provider_context_pressure_exceeds_compaction_threshold(
+    *,
+    provider_context_tokens: int | None,
+    max_tokens: int,
+    context_window: int | None,
+) -> bool:
+    if provider_context_tokens is None or provider_context_tokens <= 0:
+        return False
+    return _context_pressure_exceeds_compaction_threshold(
+        estimated_tokens=0,
+        provider_context_tokens=provider_context_tokens,
+        max_tokens=max_tokens,
+        context_window=context_window,
+    )
 
 
 def _build_compacted_messages(
