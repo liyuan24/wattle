@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from wattle.message_history import (
+    active_task_guidance_text_blocks,
     interrupted_user_text_blocks,
     monitor_event_text_blocks,
     queued_user_text_blocks,
@@ -19,6 +20,15 @@ def test_multiple_queued_user_texts_are_labeled() -> None:
         TextBlock(text="[queued user message 1 of 2]\nfirst"),
         TextBlock(text="[queued user message 2 of 2]\nsecond"),
     ]
+
+
+def test_active_task_guidance_wraps_single_mid_tool_input() -> None:
+    blocks = active_task_guidance_text_blocks(["hello"])
+
+    assert len(blocks) == 1
+    assert "additional guidance for the active task" in blocks[0].text
+    assert "Continue the active task" in blocks[0].text
+    assert "[guidance message 1 of 1]\nhello" in blocks[0].text
 
 
 def test_interrupted_user_texts_are_labeled_with_interrupt_context() -> None:

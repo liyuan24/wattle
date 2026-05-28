@@ -3457,6 +3457,38 @@ def test_live_finish_response_anchors_pending_image_input(tmp_path: Path) -> Non
     )
 
 
+def test_live_finish_response_frames_mid_tool_input_as_active_task_guidance() -> None:
+    out = _TTYBuffer()
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+    live = tui._LiveTerminal(app)
+    live.streaming = True
+    live.pending_user_inputs = ["hello"]
+    started: list[bool] = []
+
+    def fake_start_worker() -> None:
+        started.append(True)
+
+    live._start_worker = fake_start_worker  # type: ignore[method-assign]
+
+    live._finish_response(
+        CompletionResponse(
+            content=[ToolUseBlock(id="call_1", name="missing_tool", input={})],
+            stop_reason="tool_use",
+        )
+    )
+
+    assert started == [True]
+    assert live.pending_user_inputs == []
+    assert [message.role for message in app.messages] == ["assistant", "user"]
+    followup = app.messages[1]
+    assert isinstance(followup.content[0], ToolResultBlock)
+    assert isinstance(followup.content[1], TextBlock)
+    assert "additional guidance for the active task" in followup.content[1].text
+    assert "Continue the active task" in followup.content[1].text
+    assert "[guidance message 1 of 1]\nhello" in followup.content[1].text
+
+
 def test_live_end_turn_queued_input_waits_for_assistant_turn_to_finish() -> None:
     out = _TTYBuffer()
     app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)

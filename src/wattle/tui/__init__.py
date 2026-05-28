@@ -51,6 +51,7 @@ from wattle.command_summary import (
 from wattle.compaction import RuntimeCompaction
 from wattle.loop import dispatch_tool_blocks_async
 from wattle.message_history import (
+    active_task_guidance_text_blocks,
     interrupted_user_text_blocks,
     monitor_event_text_blocks,
     monitor_event_texts,
@@ -5804,7 +5805,7 @@ class _LiveTerminal:
                 render=True,
             )
             pending = [
-                *queued_user_text_blocks(prepared_pending),
+                *active_task_guidance_text_blocks(prepared_pending),
                 *attachment_blocks,
                 *(TextBlock(text=text) for text in pending_monitor_texts),
             ]

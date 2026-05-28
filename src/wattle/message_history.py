@@ -25,6 +25,25 @@ def queued_user_text_blocks(texts: Sequence[str]) -> list[TextBlock]:
     ]
 
 
+def active_task_guidance_text_blocks(texts: Sequence[str]) -> list[TextBlock]:
+    """Convert mid-tool user inputs into guidance for the active task."""
+
+    if not texts:
+        return []
+
+    sections = [
+        (
+            "The user sent the following while you were working. Treat it as "
+            "additional guidance for the active task. Continue the active task "
+            "unless this message clearly changes, blocks, or cancels it."
+        )
+    ]
+    total = len(texts)
+    for index, text in enumerate(texts, start=1):
+        sections.append(f"[guidance message {index} of {total}]\n{text}")
+    return [TextBlock(text="\n\n".join(sections))]
+
+
 def interrupted_user_text_blocks(
     interrupted: Sequence[str],
     interrupting: Sequence[str],

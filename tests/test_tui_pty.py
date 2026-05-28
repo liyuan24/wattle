@@ -1260,6 +1260,111 @@ def test_pty_tab_queues_input_for_end_turn_followup(tmp_path: Path) -> None:
         assert "after the full turn" in screen_text
 
 
+def test_pty_enter_during_tool_is_guidance_for_active_task(tmp_path: Path) -> None:
+    child_code = textwrap.dedent(
+        """
+        import argparse
+        import time
+
+        from wattle.permissions import PermissionMode
+        from wattle.providers import (
+            CompletionResponse,
+            Provider,
+            StreamComplete,
+            TextBlock,
+            TextDelta,
+            ToolUseBlock,
+        )
+        from wattle.tools import TOOLS_BY_NAME
+        from wattle.tools.base import Tool
+        from wattle.tui import WattleApp
+
+
+        class SlowGuidanceTool(Tool):
+            name = "slow_guidance"
+            description = "Wait briefly."
+            input_schema = {"type": "object", "properties": {}}
+
+            def run(self, **_kwargs):
+                time.sleep(1.2)
+                return "tool complete"
+
+
+        class GuidanceProvider(Provider):
+            def __init__(self):
+                self.calls = 0
+
+            async def acomplete(self, request):
+                raise NotImplementedError
+
+            async def astream(self, request):
+                self.calls += 1
+                if self.calls == 1:
+                    yield StreamComplete(
+                        CompletionResponse(
+                            content=[
+                                ToolUseBlock(
+                                    id="call_1",
+                                    name="slow_guidance",
+                                    input={},
+                                )
+                            ],
+                            stop_reason="tool_use",
+                            usage={},
+                        )
+                    )
+                    return
+
+                texts = [
+                    block.text
+                    for block in request.messages[-1].content
+                    if isinstance(block, TextBlock)
+                ]
+                joined = "\\n".join(texts)
+                if (
+                    "additional guidance for the active task" in joined
+                    and "hello" in joined
+                ):
+                    text = "continued active task"
+                else:
+                    text = "stopped on hello"
+                yield TextDelta(text=text)
+                yield StreamComplete(
+                    CompletionResponse(
+                        content=[TextBlock(text=text)],
+                        stop_reason="end_turn",
+                        usage={},
+                    )
+                )
+
+
+        TOOLS_BY_NAME["slow_guidance"] = SlowGuidanceTool()
+        args = argparse.Namespace(
+            provider="openai_responses",
+            model="gpt-5.5",
+            max_tokens=4096,
+            thinking=False,
+            effort=None,
+            prompt="start",
+            persist_session=False,
+            permission_mode=PermissionMode.YOLO,
+        )
+        raise SystemExit(WattleApp(args, GuidanceProvider()).run())
+        """
+    )
+
+    with PtySession.spawn_python(child_code, cwd=tmp_path, cols=100, rows=30) as session:
+        session.read_until("running slow_guidance", timeout=3)
+        session.write("hello\n")
+        session.read_until("Messages to be submitted after next tool call", timeout=3)
+        session.read_until("continued active task", timeout=5)
+
+        screen_text = session.screen.text()
+        assert "continued active task" in screen_text
+        assert "stopped on hello" not in screen_text
+        session.write("/exit\n")
+
+
 def test_pty_shift_tab_cycles_thinking_level(tmp_path: Path) -> None:
     with PtySession.spawn_python(
         _slow_wattle_child_code(first_delay=0.1, later_delay=0.1, prompt=None),
