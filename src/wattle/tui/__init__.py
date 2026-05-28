@@ -22,6 +22,7 @@ import shutil
 import signal
 import sys
 import termios
+import textwrap
 import threading
 import time as _time
 import tty
@@ -35,7 +36,7 @@ from typing import Any, Literal, TextIO, cast
 from urllib.parse import unquote, urlparse
 
 from pygments import lex as pygments_lex
-from pygments.lexers import get_lexer_for_filename
+from pygments.lexers import get_lexer_by_name, get_lexer_for_filename
 from pygments.token import Token
 from pygments.util import ClassNotFound
 
@@ -1021,6 +1022,49 @@ def _diff_syntax_style(token_type: Any, *, kind: str, base_style: str) -> str:
     return base_style
 
 
+@lru_cache(maxsize=256)
+def _lexer_for_language(language: str) -> Any | None:
+    try:
+        return get_lexer_by_name(language)
+    except ClassNotFound:
+        return None
+
+
+def _syntax_style(token_type: Any, *, base_style: str) -> str:
+    if token_type in Token.Comment:
+        return THINKING_STYLE
+    if token_type in Token.Keyword:
+        return SYNTAX_KEYWORD_STYLE
+    if token_type in Token.Literal.String:
+        return SYNTAX_STRING_STYLE
+    if token_type in Token.Literal.Number:
+        return SYNTAX_CONSTANT_STYLE
+    if token_type in Token.Name:
+        return SYNTAX_NAME_STYLE
+    if token_type in Token.Operator or token_type in Token.Punctuation:
+        return SYNTAX_CONSTANT_STYLE
+    return base_style
+
+
+def _syntax_spans_for_language(
+    text: str,
+    language: str,
+    *,
+    base_style: str,
+) -> list[tuple[str, str]]:
+    lexer = _lexer_for_language(language)
+    if lexer is None:
+        return [(base_style, text)]
+
+    spans: list[tuple[str, str]] = []
+    for token_type, value in pygments_lex(text, lexer):
+        value = value.replace("\n", "")
+        if not value:
+            continue
+        spans.append((_syntax_style(token_type, base_style=base_style), value))
+    return spans or [(base_style, text)]
+
+
 def _diff_terminal_row(rendered: str, fill_style: str) -> str:
     return f"\r\x1b[?7l\x1b[0m\x1b[2K{rendered}{fill_style}\x1b[K{RESET}\x1b[?7h"
 
@@ -1830,6 +1874,7 @@ class _BashExecCell:
 class _RenderedTextLine:
     text: str
     style: str
+    ansi_text: str | None = None
 
 
 @dataclass(frozen=True)
@@ -2059,6 +2104,7 @@ _EMPHASIS_RE = re.compile(
     r"(?<!\*)\*([^*\n]+)\*(?!\*)|(?<![\w_])_([^_\n]+)_(?![\w_])"
 )
 _STRIKE_RE = re.compile(r"~~(.+?)~~")
+_CODE_FENCE_RE = re.compile(r"^\s*(```+|~~~+)\s*([^`]*)$")
 
 
 def _strip_inline_markdown(text: str) -> str:
@@ -2079,78 +2125,168 @@ def _strip_inline_markdown(text: str) -> str:
     return re.sub(r"\\([\\`*_{}\[\]()#+\-.!|>])", r"\1", text)
 
 
+def _markdown_content_width(width: int) -> int:
+    return max(1, width - 1)
+
+
+def _wrap_markdown_line(
+    text: str,
+    *,
+    width: int,
+    style: str,
+    first_prefix: str = "",
+    subsequent_prefix: str | None = None,
+) -> list[_RenderedTextLine]:
+    content_width = _markdown_content_width(width)
+    subsequent = first_prefix if subsequent_prefix is None else subsequent_prefix
+    if not text:
+        return [_RenderedTextLine(first_prefix.rstrip(), style)]
+    wrapped = textwrap.wrap(
+        text,
+        width=content_width,
+        initial_indent=first_prefix,
+        subsequent_indent=subsequent,
+        break_long_words=True,
+        break_on_hyphens=False,
+        drop_whitespace=True,
+    )
+    return [_RenderedTextLine(line, style) for line in (wrapped or [first_prefix + text])]
+
+
+def _code_fence_language(info: str) -> str | None:
+    language = re.split(r"[\s,]+", info.strip(), maxsplit=1)[0]
+    return language or None
+
+
+def _render_code_line(line: str, *, language: str | None) -> _RenderedTextLine:
+    text = f"    {line}"
+    if language is None:
+        return _RenderedTextLine(text, TOOL_PREVIEW_STYLE)
+    spans = _syntax_spans_for_language(line, language, base_style=TOOL_PREVIEW_STYLE)
+    if len(spans) == 1 and spans[0] == (TOOL_PREVIEW_STYLE, line):
+        return _RenderedTextLine(text, TOOL_PREVIEW_STYLE)
+    ansi_text = f"{TOOL_PREVIEW_STYLE}    " + "".join(
+        f"{RESET}{style}{value}" for style, value in spans
+    )
+    return _RenderedTextLine(text, TOOL_PREVIEW_STYLE, ansi_text=ansi_text)
+
+
 def _render_markdown_text(text: str, *, width: int) -> list[_RenderedTextLine]:
     rows: list[_RenderedTextLine] = []
-    in_code_fence = False
+    lines = text.splitlines() or [""]
+    index = 0
+    in_code_fence: tuple[str, int, str | None] | None = None
 
-    for raw_line in text.splitlines() or [""]:
-        line = raw_line.rstrip()
+    while index < len(lines):
+        line = lines[index].rstrip()
         stripped = line.strip()
 
-        if stripped.startswith(("```", "~~~")):
-            in_code_fence = not in_code_fence
-            continue
+        fence = _CODE_FENCE_RE.match(line)
+        if fence is not None:
+            marker, info = fence.groups()
+            marker_prefix = marker[0]
+            if in_code_fence is None:
+                in_code_fence = (marker_prefix, len(marker), _code_fence_language(info))
+                index += 1
+                continue
+            elif (
+                marker_prefix == in_code_fence[0]
+                and len(marker) >= in_code_fence[1]
+                and not info.strip()
+            ):
+                in_code_fence = None
+                index += 1
+                continue
 
-        if in_code_fence:
-            rows.append(_RenderedTextLine(f"    {line}", TOOL_PREVIEW_STYLE))
+        if in_code_fence is not None:
+            _marker, _marker_length, language = in_code_fence
+            rows.append(_render_code_line(line, language=language))
+            index += 1
             continue
 
         if not stripped:
             rows.append(_RenderedTextLine("", ASSISTANT_STYLE))
+            index += 1
             continue
 
         heading = _HEADING_RE.match(line)
         if heading:
-            rows.append(
-                _RenderedTextLine(
+            rows.extend(
+                _wrap_markdown_line(
                     _strip_inline_markdown(heading.group(2).strip()),
-                    f"{ASSISTANT_STYLE}{BOLD}",
+                    width=width,
+                    style=f"{ASSISTANT_STYLE}{BOLD}",
                 )
             )
+            index += 1
             continue
 
         if re.fullmatch(r"\s{0,3}([-*_])(?:\s*\1){2,}\s*", line):
-            rows.append(_RenderedTextLine("─" * max(3, width - 1), SEPARATOR_STYLE))
-            continue
-
-        quote_depth = 0
-        quote_text = line.lstrip()
-        while quote_text.startswith(">"):
-            quote_depth += 1
-            quote_text = quote_text[1:].lstrip()
-        if quote_depth:
             rows.append(
                 _RenderedTextLine(
-                    f"{'│ ' * quote_depth}{_strip_inline_markdown(quote_text)}",
-                    THINKING_STYLE,
+                    "─" * max(3, _markdown_content_width(width)),
+                    SEPARATOR_STYLE,
                 )
             )
+            index += 1
+            continue
+
+        quote = re.match(r"^(\s*)((?:>\s*)+)(.*)$", line)
+        if quote:
+            indent = " " * len(quote.group(1).expandtabs(2))
+            depth = quote.group(2).count(">")
+            prefix = f"{indent}{'│ ' * depth}"
+            rows.extend(
+                _wrap_markdown_line(
+                    _strip_inline_markdown(quote.group(3).strip()),
+                    width=width,
+                    style=THINKING_STYLE,
+                    first_prefix=prefix,
+                    subsequent_prefix=prefix,
+                )
+            )
+            index += 1
             continue
 
         bullet = _BULLET_RE.match(line)
         if bullet:
             indent = " " * len(bullet.group(1).expandtabs(2))
-            rows.append(
-                _RenderedTextLine(
-                    f"{indent}• {_strip_inline_markdown(bullet.group(2).strip())}",
-                    ASSISTANT_STYLE,
+            rows.extend(
+                _wrap_markdown_line(
+                    _strip_inline_markdown(bullet.group(2).strip()),
+                    width=width,
+                    style=ASSISTANT_STYLE,
+                    first_prefix=f"{indent}• ",
+                    subsequent_prefix=f"{indent}  ",
                 )
             )
+            index += 1
             continue
 
         numbered = _NUMBERED_RE.match(line)
         if numbered:
             indent = " " * len(numbered.group(1).expandtabs(2))
-            rows.append(
-                _RenderedTextLine(
-                    f"{indent}{numbered.group(2)} "
-                    f"{_strip_inline_markdown(numbered.group(3).strip())}",
-                    ASSISTANT_STYLE,
+            marker = numbered.group(2)
+            rows.extend(
+                _wrap_markdown_line(
+                    _strip_inline_markdown(numbered.group(3).strip()),
+                    width=width,
+                    style=ASSISTANT_STYLE,
+                    first_prefix=f"{indent}{marker} ",
+                    subsequent_prefix=f"{indent}{' ' * (len(marker) + 1)}",
                 )
             )
+            index += 1
             continue
 
-        rows.append(_RenderedTextLine(_strip_inline_markdown(line), ASSISTANT_STYLE))
+        rows.extend(
+            _wrap_markdown_line(
+                _strip_inline_markdown(line),
+                width=width,
+                style=ASSISTANT_STYLE,
+            )
+        )
+        index += 1
 
     return rows
 
@@ -2400,17 +2536,20 @@ def _token_to_path(token: str, *, cwd: Path) -> Path | None:
     if not stripped:
         return None
     parsed = urlparse(stripped)
-    if parsed.scheme == "file":
-        path = Path(unquote(parsed.path)).expanduser()
-    elif parsed.scheme:
+    try:
+        if parsed.scheme == "file":
+            path = Path(unquote(parsed.path)).expanduser()
+        elif parsed.scheme:
+            return None
+        else:
+            path = Path(stripped).expanduser()
+    except RuntimeError:
         return None
-    else:
-        path = Path(stripped).expanduser()
     if not path.is_absolute():
         path = cwd / path
     try:
         return path.resolve()
-    except (OSError, ValueError):
+    except (OSError, RuntimeError, ValueError):
         return None
 
 
@@ -4463,7 +4602,10 @@ class WattleApp:
             self._write("\r")
             self._write("\n" * MESSAGE_BLOCK_VERTICAL_PADDING)
             for row in _render_markdown_text(text, width=width):
-                self._write(f"\r{row.style} {row.text}{RESET}\n")
+                if row.ansi_text is not None:
+                    self._write(f"\r {row.ansi_text}{RESET}\n")
+                else:
+                    self._write(f"\r{row.style} {row.text}{RESET}\n")
             self._write("\n" * MESSAGE_BLOCK_VERTICAL_PADDING)
             return
 
@@ -4479,6 +4621,9 @@ class WattleApp:
         )
         for row in rows:
             body = f" {row.text}"
+            if row.ansi_text is not None:
+                self._write(f"\r {row.ansi_text}{RESET}\n")
+                continue
             self._write(
                 f"{_styled_transcript_line(body, row.style, fill_remainder=should_pad)}\n"
             )

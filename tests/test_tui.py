@@ -1848,7 +1848,10 @@ def test_styled_transcript_wraps_long_lines_without_dropping_text() -> None:
     app._write_panel("status", "0123456789abcdefghijklmnopqrstuvwxyz", tui.STATUS_STYLE)
 
     rendered = out.getvalue()
-    assert "mnopqrstuvw" in rendered
+    assert "abcdefghijk" in rendered
+    assert "lmnopqrstuv" in rendered
+    assert "wxyz" in rendered
+    assert "nopqrstuvwxy" in rendered
     assert "xyz" in rendered
     assert "z\n" in _strip_ansi(rendered)
 
@@ -1926,6 +1929,103 @@ def test_assistant_markdown_preserves_underscores_in_code_spans() -> None:
     visible = _strip_ansi(out.getvalue())
     assert "search_resume_plan_test.md" in visible
     assert "design_log" in visible
+
+
+def test_assistant_markdown_wraps_lists_with_continuation_indent() -> None:
+    rows = tui._render_markdown_text(
+        "- outer item with several words to wrap\n  - inner item that also needs wrapping",
+        width=19,
+    )
+
+    assert [row.text for row in rows] == [
+        "• outer item with",
+        "  several words to",
+        "  wrap",
+        "  • inner item",
+        "    that also",
+        "    needs wrapping",
+    ]
+
+
+def test_assistant_markdown_wraps_quotes_with_quote_indent() -> None:
+    rows = tui._render_markdown_text(
+        "> quoted text that should wrap neatly across terminal lines",
+        width=25,
+    )
+
+    assert [row.text for row in rows] == [
+        "│ quoted text that",
+        "│ should wrap neatly",
+        "│ across terminal lines",
+    ]
+    assert {row.style for row in rows} == {tui.THINKING_STYLE}
+
+
+def test_assistant_markdown_highlights_fenced_code() -> None:
+    out = _TTYBuffer()
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+
+    app._write_block("```python\ndef hello():\n    return 'ok'\n```", tui.ASSISTANT_STYLE)
+
+    rendered = out.getvalue()
+    visible = _strip_ansi(rendered)
+    assert "def hello():" in visible
+    assert "return 'ok'" in visible
+    assert tui.SYNTAX_KEYWORD_STYLE in rendered
+    assert tui.SYNTAX_STRING_STYLE in rendered
+
+
+def test_assistant_markdown_requires_matching_code_fence_length() -> None:
+    rows = tui._render_markdown_text("````python\n```\nprint(1)\n````", width=40)
+
+    assert [row.text for row in rows] == [
+        "    ```",
+        "    print(1)",
+    ]
+
+
+def test_assistant_markdown_keeps_nonclosing_fence_text_in_code_block() -> None:
+    rows = tui._render_markdown_text("````\n````not close\nprint(1)\n````", width=40)
+
+    assert [row.text for row in rows] == [
+        "    ````not close",
+        "    print(1)",
+    ]
+
+
+def test_assistant_markdown_syntax_spans_reset_bold_between_tokens() -> None:
+    row = tui._render_code_line('return "ok"', language="python")
+
+    assert row.ansi_text is not None
+    assert f"{tui.SYNTAX_KEYWORD_STYLE}return{tui.RESET}{tui.TOOL_PREVIEW_STYLE} " in (
+        row.ansi_text
+    )
+
+
+def test_assistant_markdown_wraps_long_unbroken_words() -> None:
+    rows = tui._render_markdown_text(
+        "- pneumonoultramicroscopicsilicovolcanoconiosis",
+        width=20,
+    )
+
+    assert [row.text for row in rows] == [
+        "• pneumonoultramicr",
+        "  oscopicsilicovolc",
+        "  anoconiosis",
+    ]
+
+
+def test_prompt_path_scanner_ignores_unknown_tilde_user() -> None:
+    text = "You can explore codex in ~Traceback"
+
+    assert tui._path_references_from_text(text) == []
+
+    rendered = tui._image_placeholder_prompt_render(
+        tui._PromptInputRender(text=text, cursor=len(text))
+    )
+    assert rendered.text == text
+    assert rendered.cursor == len(text)
 
 
 def test_running_terminal_line_animates_without_changing_text() -> None:
