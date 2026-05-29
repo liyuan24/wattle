@@ -1,8 +1,7 @@
-<p align="center">
-  <img src="docs/assets/wattle_logo.png" alt="Wattle logo" width="180">
-</p>
-
-# Wattle
+<h1>
+  <img src="docs/assets/wattle_logo.png" alt="Wattle logo" width="56" align="center">
+  Wattle
+</h1>
 
 Wattle is a pure-Python coding agent.
 
