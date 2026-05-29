@@ -36,8 +36,8 @@ nav:
   - Permissions: permissions.md
   - Sessions: sessions.md
   - Compaction: compaction.md
-  - Agent Capabilities:
-      - Tools: tools.md
-      - Subagents: subagents.md
-      - Skills: skills.md
+  - Tools: tools.md
+  - Subagents: subagents.md
+  - Skills: skills.md
+  - TUI: tui.md
   - Development: development.md

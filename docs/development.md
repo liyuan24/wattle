@@ -1,26 +1,32 @@
 # Development
 
-Wattle is a Python 3.12 project managed with `uv`.
+Wattle is a Python project managed with `uv`.
 
 ## Setup
+
+Clone the repository and install the editable developer command:
+
+```bash
+git clone https://github.com/liyuan24/wattle.git
+cd wattle
+scripts/install-dev.sh
+```
+
+The developer installer uses `uv tool install --force -e .`, so the shell `wattle` command points at the current checkout.
+
+For local test and lint commands, sync the project environment:
 
 ```bash
 uv sync
 ```
 
-Run the CLI from the checkout:
+You can also run the CLI directly from the checkout:
 
 ```bash
 uv run wattle
 ```
 
-Install or refresh the shell command:
-
-```bash
-scripts/install-dev.sh
-```
-
-The developer installer uses `uv tool install --force -e .`, so the shell `wattle` command points at the current checkout. The installed `wattle` command is still a separate `uv tool` environment, so dependency changes require both `uv sync` and `scripts/install-dev.sh`.
+The installed `wattle` command is a separate `uv tool` environment, so dependency changes require both `uv sync` and `scripts/install-dev.sh`.
 
 ## Tests
 
@@ -69,16 +75,3 @@ scripts/
   install-dev.sh            editable checkout installer
   smoke_e2e.py              smoke test helper
 ```
-
-## TUI contracts
-
-When editing TUI rendering behavior, preserve:
-
-- three-row submitted user and assistant message blocks
-- distinct user/input background
-- full-width prompt and status backgrounds
-- long-message soft wrapping
-- resize behavior
-- separate wrapping and background-fill contracts for prompt, transcript, status, and running-status rows
-
-Prefer assertions against actual PTY screen state for rendering regressions.

@@ -38,7 +38,7 @@
       ]
     },
     {
-      "title": "Agent Capabilities",
+      "title": "Reference",
       "items": [
         {
           "title": "Tools",
@@ -57,6 +57,10 @@
     {
       "title": "Development",
       "items": [
+        {
+          "title": "TUI",
+          "path": "tui.md"
+        },
         {
           "title": "Development",
           "path": "development.md"

@@ -42,20 +42,4 @@ Invoke a skill with a slash command:
 /review inspect the current diff
 ```
 
-Wattle expands the skill body into model-visible context and appends the task text. Built-in slash commands such as `/model`, `/help`, and `/compact` keep their normal behavior.
-
-## Suggestions
-
-The TUI can render slash-command suggestions for discovered skills. Skill names should be short, command-like, and stable.
-
-## What skills are good for
-
-Use skills for workflows that have repeatable judgment or process:
-
-- code review standards
-- release note style
-- debugging playbooks
-- framework-specific migration steps
-- repository-specific deployment checks
-
-Keep skills focused. A good skill teaches Wattle how to do one kind of work well.
+Wattle expands the skill body into model-visible context and appends the task text.

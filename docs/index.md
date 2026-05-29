@@ -50,4 +50,5 @@ wattle -p "summarize this repository"
 
 ## Development
 
-- [Development](development.md) - local setup, tests, TUI harness, and project layout.
+- [TUI](tui.md) - how the native terminal interface is built.
+- [Development](development.md) - local setup, tests, and project layout.
