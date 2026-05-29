@@ -41,10 +41,10 @@ wattle -r ~/.wattle/sessions/018f2c2d.jsonl
 ## Resume inside Wattle
 
 ```text
-/resume SESSION
+/resume <session-id>
 ```
 
-`SESSION` can be a session id or a JSONL path.
+`<session-id>` can be a session id or a JSONL path.
 
 ## Status
 

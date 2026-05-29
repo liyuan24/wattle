@@ -71,7 +71,6 @@ Use `/model` to list authenticated choices:
 /model
 /model 2
 /model gpt-5.4
-/model next
 ```
 
 Wattle automatically switches providers when a catalog model belongs to a different provider.
@@ -97,7 +96,7 @@ wattle --thinking --effort high
 Or inside the TUI:
 
 ```text
-/effort high
+/effort low|medium|high|xhigh|max|off
 /effort off
 ```
 

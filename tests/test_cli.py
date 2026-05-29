@@ -57,7 +57,6 @@ def test_apply_settings_defaults_when_cli_flags_are_absent(
             permission_mode=PermissionMode.YOLO,
             statusline=False,
             tui=TuiSettings(statusline=()),
-            enabled_models=("gpt-5.4",),
             compaction_keep_recent_tokens=5000,
         ),
     )
@@ -70,7 +69,6 @@ def test_apply_settings_defaults_when_cli_flags_are_absent(
     assert args.permission_mode == PermissionMode.YOLO
     assert args.statusline is False
     assert args.statusline_fields == ()
-    assert args.enabled_models == ("gpt-5.4",)
     assert args.compaction_keep_recent_tokens == 5000
 
 

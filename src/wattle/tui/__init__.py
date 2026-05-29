@@ -159,7 +159,6 @@ SLASH_COMMAND_HINTS: tuple[tuple[str, str], ...] = (
     ("/resume", "switch to a saved session"),
     ("/session", "show persistence and saved session path"),
     ("/status", "show session and status details"),
-    ("/statusline", "configure the bottom statusline"),
 )
 
 DEFAULT_LOGIN_CALLBACK_TIMEOUT_SECONDS = 300.0
@@ -1414,8 +1413,6 @@ STATUSLINE_FIELD_DESCRIPTIONS = (
     ("quota_1w", "1 week subscription limit"),
 )
 
-STATUSLINE_FIELDS = tuple(field for field, _description in STATUSLINE_FIELD_DESCRIPTIONS)
-
 _STATUSLINE_FIELD_ALIASES = {
     "context": "context_used",
     "context_usage": "context_used",
@@ -1713,47 +1710,6 @@ def _render_model_picker_rows(
         else:
             rows.append(line)
     return rows
-
-
-def _render_statusline_selector_rows(
-    *,
-    selected_fields: set[str],
-    selected_index: int,
-    width: int,
-    styles_enabled: bool,
-) -> list[str]:
-    inner_width = max(1, width - 2)
-    title = " Configure statusline "
-    top = f"╭─{title}{'─' * max(0, inner_width - len(title) - 1)}╮"[:width].ljust(width)
-    bottom = f"╰{'─' * inner_width}╯"[:width].ljust(width)
-    content_rows = [
-        "Use ↑/↓ to move, x to select/deselect, Enter to save, Esc to cancel",
-        "",
-    ]
-    field_width = max(len(field) for field in STATUSLINE_FIELDS)
-    field_rows: list[str] = []
-    for index, (field, description) in enumerate(STATUSLINE_FIELD_DESCRIPTIONS):
-        marker = ">" if index == selected_index else " "
-        checked = "x" if field in selected_fields else " "
-        field_rows.append(f" {marker} [{checked}] {field:<{field_width}}  {description}")
-
-    def boxed(row: str) -> str:
-        return f"│ {row[: max(0, inner_width - 2)].ljust(max(0, inner_width - 2))} │"[
-            :width
-        ].ljust(width)
-
-    rows = [top, *(boxed(row) for row in content_rows), *(boxed(row) for row in field_rows), bottom]
-    rendered: list[str] = []
-    for index, line in enumerate(rows):
-        field_index = index - 3
-        is_selected = field_index == selected_index
-        if styles_enabled and is_selected:
-            rendered.append(f"{SELECTED_ROW_STYLE}{line}{RESET}")
-        elif styles_enabled:
-            rendered.append(f"{STATUS_STYLE}{line}{RESET}")
-        else:
-            rendered.append(line)
-    return rendered
 
 
 def _render_login_picker_rows(
@@ -2586,9 +2542,6 @@ class WattleApp:
         self.thinking: bool = bool(getattr(args, "thinking", False))
         self.show_thinking_content: bool = bool(self._settings.tui.show_thinking)
         self.effort: str | None = cast(str | None, getattr(args, "effort", None))
-        self.enabled_models: tuple[str, ...] = tuple(
-            cast(tuple[str, ...], getattr(args, "enabled_models", ()))
-        )
         self.compaction_keep_recent_tokens: int = int(
             getattr(args, "compaction_keep_recent_tokens", 20_000)
         )
@@ -2881,7 +2834,6 @@ class WattleApp:
             "show_thinking_content": self.show_thinking_content,
             "effort": self.effort,
             "permission_mode": self.permission_mode,
-            "enabled_models": self.enabled_models,
             "compaction_keep_recent_tokens": self.compaction_keep_recent_tokens,
             "messages": list(self.messages),
             "compaction_state": self._compaction_state,
@@ -2909,9 +2861,6 @@ class WattleApp:
         )
         self.effort = cast(str | None, state.get("effort", self.effort))
         self.permission_mode = PermissionMode.YOLO
-        self.enabled_models = tuple(
-            cast(tuple[str, ...], state.get("enabled_models", self.enabled_models))
-        )
         self.compaction_keep_recent_tokens = int(
             cast(
                 Any,
@@ -3574,20 +3523,6 @@ class WattleApp:
         if cmd in ("/session", "/status"):
             self._write_session_status()
             return False
-        if cmd == "/statusline":
-            if rest == "off":
-                self._set_statusline_fields(())
-                self._write_statusline_update()
-            elif rest == "on":
-                self._set_statusline_fields(DEFAULT_STATUSLINE_FIELDS)
-                self._write_statusline_update()
-            else:
-                self._write_panel(
-                    "statusline",
-                    "Interactive statusline configuration is available in the live TUI.",
-                    STATUS_STYLE,
-                )
-            return False
         if cmd == "/model":
             self._handle_model(rest)
             return False
@@ -3667,7 +3602,7 @@ class WattleApp:
     def _handle_resume(self, rest: str) -> None:
         selector = rest.strip()
         if not selector:
-            self._write_panel("error", "Usage: /resume SESSION", ERROR_STYLE)
+            self._write_panel("error", "Usage: /resume <session-id>", ERROR_STYLE)
             return
         try:
             record, path = _load_resume_arg(selector)
@@ -3823,17 +3758,10 @@ class WattleApp:
         return expand_skill_invocation(text, Path.cwd())
 
     def _handle_model(self, rest: str) -> None:
-        choices = self._selectable_model_choices()
-        verb, _, arg = rest.partition(" ")
-        if verb == "next":
-            self._cycle_model()
-            return
-        if verb == "enabled":
-            text = "\n".join(self.enabled_models) if self.enabled_models else "(all available)"
-            self._write_panel("model", f"Enabled models:\n{text}", STATUS_STYLE)
-            return
-        if verb in {"enable", "disable"}:
-            self._handle_enabled_model_change(verb, arg.strip())
+        choices = available_model_choices()
+        verb, _, _arg = rest.partition(" ")
+        if verb in {"next", "enabled", "enable", "disable"}:
+            self._write_panel("error", f"Unsupported model command: /model {verb}", ERROR_STYLE)
             return
         if not rest:
             self._write(render_model_choices(choices, current_model=self.current_model))
@@ -3878,44 +3806,6 @@ class WattleApp:
             STATUS_STYLE,
         )
         self._persist_session()
-
-    def _selectable_model_choices(self) -> list[ModelChoice]:
-        choices = available_model_choices()
-        if not self.enabled_models:
-            return choices
-        enabled = set(self.enabled_models)
-        return [choice for choice in choices if choice.model in enabled]
-
-    def _cycle_model(self) -> None:
-        choices = self._selectable_model_choices()
-        if not choices:
-            self._write_panel("error", "No enabled models are available.", ERROR_STYLE)
-            return
-        models = [choice.model for choice in choices]
-        try:
-            index = models.index(self.current_model)
-        except ValueError:
-            index = -1
-        self._apply_model_choice(choices[(index + 1) % len(choices)])
-
-    def _handle_enabled_model_change(self, verb: str, selector: str) -> None:
-        if not selector:
-            self._write_panel("error", f"Usage: /model {verb} MODEL_OR_NUMBER", ERROR_STYLE)
-            return
-        all_choices = available_model_choices()
-        choice = find_model_choice(selector, all_choices)
-        model = choice.model if choice is not None else selector
-        enabled = list(self.enabled_models)
-        if verb == "enable":
-            if model not in enabled:
-                enabled.append(model)
-            message = f"Enabled model {model!r}."
-        else:
-            enabled = [item for item in enabled if item != model]
-            message = f"Disabled model {model!r}."
-        self.enabled_models = tuple(enabled)
-        self._persist_user_settings(enabled_models=self.enabled_models)
-        self._write_panel("model", message, STATUS_STYLE)
 
     def _handle_effort(self, rest: str) -> None:
         effort = rest.strip()
@@ -4039,26 +3929,6 @@ class WattleApp:
             )
         self._settings = update_settings(**changes)
 
-    def _set_statusline_fields(self, fields: tuple[str, ...]) -> None:
-        self._statusline_fields = _normalize_statusline_fields(list(fields))
-        self._statusline_enabled = bool(self._statusline_fields)
-        self._persist_user_settings(
-            tui=TuiSettings(
-                statusline=self._statusline_fields,
-                show_thinking=self.show_thinking_content,
-            )
-        )
-
-    def _write_statusline_update(self) -> None:
-        if self._statusline_enabled:
-            self._write_panel(
-                "statusline",
-                "Statusline updated: " + " | ".join(self._statusline_fields),
-                STATUS_STYLE,
-            )
-        else:
-            self._write_panel("statusline", "Statusline disabled.", STATUS_STYLE)
-
     def _print_help(self) -> None:
         self._write_line("Commands:")
         self._write_line("  /branch           Copy conversation into a new session branch.")
@@ -4068,10 +3938,9 @@ class WattleApp:
         self._write_line("  /clear             Reset conversation history.")
         self._write_line("  /help              Show this message.")
         self._write_line("  /login [openai-codex] Authenticate OpenAI Codex.")
-        self._write_line("  /model [name|#|next] List or switch models.")
-        self._write_line("  /resume SESSION    Switch to a saved session.")
+        self._write_line("  /model [name|#]    List or switch models.")
+        self._write_line("  /resume <session-id> Switch to a saved session.")
         self._write_line("  /session, /status  Show persistence and session status.")
-        self._write_line("  /statusline          Configure the bottom statusline.")
         self._write_line("")
         self._write_line("Settings:")
         self._write_line(f"  provider:      {self.current_provider_name}")
@@ -4701,9 +4570,6 @@ class _LiveTerminal:
         self.model_picker_choices: list[ModelChoice] | None = None
         self.model_picker_selected = 0
         self.login_picker_selected = 0
-        self.statusline_selector_active = False
-        self.statusline_selector_selected = 0
-        self.statusline_selector_fields: set[str] = set()
         self.input_hint_rows: list[str] | None = None
         self.input_hint_source = ""
         self.input_hint_selected = 0
@@ -4843,10 +4709,6 @@ class _LiveTerminal:
                 continue
             ch = data[index]
             index += 1
-            if self.statusline_selector_active:
-                index = self._handle_statusline_selector_input(ch, data, index)
-                self._draw_prompt()
-                continue
             if ch in ("\r", "\n"):
                 self._submit_buffer()
             elif ch == "\t":
@@ -4981,52 +4843,6 @@ class _LiveTerminal:
         self.pending_escape_sequence = None
         if pending == "\x1b" and self.streaming:
             self._interrupt_with_buffer_if_possible()
-
-    def _open_statusline_selector(self) -> None:
-        self.statusline_selector_active = True
-        self.statusline_selector_selected = 0
-        self.statusline_selector_fields = set(self.app._statusline_fields)
-        self.buffer = ""
-        self.cursor = 0
-        self.pasted_ranges = []
-
-    def _handle_statusline_selector_input(self, ch: str, data: str, index: int) -> int:
-        if ch in ("\r", "\n"):
-            selected = tuple(
-                field for field in STATUSLINE_FIELDS if field in self.statusline_selector_fields
-            )
-            self.statusline_selector_active = False
-            self._clear_prompt()
-            self.app._set_statusline_fields(selected)
-            self.app._write_statusline_update()
-            return index
-        if ch in {"x", "X"}:
-            field = STATUSLINE_FIELDS[self.statusline_selector_selected]
-            if field in self.statusline_selector_fields:
-                self.statusline_selector_fields.remove(field)
-            else:
-                self.statusline_selector_fields.add(field)
-            return index
-        if ch == "\x1b":
-            if data.startswith("[A", index) or data.startswith("OA", index):
-                self._move_statusline_selector(-1)
-                return index + 2
-            if data.startswith("[B", index) or data.startswith("OB", index):
-                self._move_statusline_selector(1)
-                return index + 2
-            self.statusline_selector_active = False
-            self._clear_prompt()
-            self.app._write_panel("statusline", "Statusline unchanged.", STATUS_STYLE)
-            while index < len(data) and not data[index].isalpha():
-                index += 1
-            return index + 1 if index < len(data) else index
-        return index
-
-    def _move_statusline_selector(self, delta: int) -> None:
-        self.statusline_selector_selected = max(
-            0,
-            min(len(STATUSLINE_FIELDS) - 1, self.statusline_selector_selected + delta),
-        )
 
     def _insert_text(self, text: str) -> None:
         self.buffer = self.buffer[: self.cursor] + text + self.buffer[self.cursor :]
@@ -5264,10 +5080,6 @@ class _LiveTerminal:
             return
         self._record_input_history(text)
         expanded_text = self.app._expand_skill_text(text)
-        if expanded_text is None and text == "/statusline":
-            self._open_statusline_selector()
-            self._draw_prompt()
-            return
         if expanded_text is None and _should_route_slash_command(text):
             if self._handle_live_queue_command(text):
                 return
@@ -6029,21 +5841,6 @@ class _LiveTerminal:
         preview = rendered_input.text
         cursor = min(len(preview), rendered_input.cursor)
         visible_subagents = self._visible_subagent_snapshots()
-        if self.statusline_selector_active:
-            rows.extend(
-                _render_statusline_selector_rows(
-                    selected_fields=self.statusline_selector_fields,
-                    selected_index=self.statusline_selector_selected,
-                    width=line_width,
-                    styles_enabled=self.app._styles_enabled(),
-                )
-            )
-            return _PromptFrame(
-                rows=rows,
-                width=line_width,
-                cursor_line_index=0,
-                cursor_column=0,
-            )
         if self.compacting:
             frame = COMPACTION_FRAMES[int(time.monotonic() * 8) % len(COMPACTION_FRAMES)]
             line = f" {frame} Auto-compacting..."

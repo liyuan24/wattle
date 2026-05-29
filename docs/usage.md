@@ -16,7 +16,7 @@ Submit an initial prompt while still opening the TUI:
 wattle "review this repository and find the risky parts"
 ```
 
-The TUI streams assistant output, tool status, subagent lifecycle updates, model and login pickers, session status, and a configurable bottom statusline.
+The TUI streams assistant output, tool status, subagent lifecycle updates, model and login pickers, session status, and a bottom statusline.
 
 ## Headless mode
 
@@ -57,13 +57,11 @@ Use slash commands in the TUI:
 ```text
 /help
 /model
-/model next
-/effort high
+/effort low|medium|high|xhigh|max|off
 /compact
 /session
 /branch
-/resume SESSION
-/statusline off
+/resume <session-id>
 /clear
 /exit
 ```
@@ -72,31 +70,11 @@ Available commands:
 
 - `/help` - show commands and current settings.
 - `/login [openai-codex]` - authenticate the OpenAI Codex provider.
-- `/model [name|#|next]` - list, select, or cycle models.
-- `/model enabled` - show the enabled model filter.
-- `/model enable MODEL_OR_NUMBER` - include a model in the TUI cycling list.
-- `/model disable MODEL_OR_NUMBER` - remove a model from the TUI cycling list.
+- `/model [name|#]` - list or select models.
 - `/effort [level]` - show or set reasoning effort. Use `off` to disable.
 - `/session` or `/status` - show persistence and session status.
 - `/branch` - copy the current conversation into a new session branch.
-- `/resume SESSION` - switch to a saved session id or JSONL path.
+- `/resume <session-id>` - switch to a saved session id or JSONL path.
 - `/compact [notes]` - compact the active request projection.
-- `/statusline on|off` - toggle the bottom statusline.
 - `/clear` - reset conversation history.
 - `/exit` or `/quit` - exit the TUI.
-
-## Referencing files and images
-
-Ask Wattle for files by path, or let the model use the `read` tool. The read tool accepts normal paths and `@path`-style paths.
-
-For screenshots and UI issues, Wattle includes `view_image`, which attaches a local PNG, JPEG, WebP, or GIF to the next model turn.
-
-## Context files
-
-Wattle loads instruction files at startup:
-
-- `~/.wattle/AGENTS.md`
-- `AGENTS.md` from the project root down to the current directory
-- `AGENTS.override.md` in those same project directories
-
-Project roots are detected with `.git`.

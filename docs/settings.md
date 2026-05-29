@@ -17,7 +17,6 @@ When no settings file exists, Wattle uses:
   "tui": {
     "statusline": ["model", "thinking", "cwd"]
   },
-  "enabled_models": [],
   "compaction_keep_recent_tokens": 20000,
   "git_commit_attribution": true
 }
@@ -81,33 +80,6 @@ Disable the statusline:
     "statusline": []
   }
 }
-```
-
-The TUI also supports:
-
-```text
-/statusline off
-/statusline on
-```
-
-## Enabled model filter
-
-`enabled_models` controls which authenticated catalog models appear in TUI model cycling:
-
-```json
-{
-  "enabled_models": ["gpt-5.5", "gpt-5.4-mini", "kimi-k2.6"]
-}
-```
-
-An empty list means all authenticated model choices are available.
-
-Inside Wattle:
-
-```text
-/model enabled
-/model enable gpt-5.4-mini
-/model disable gpt-5.4-mini
 ```
 
 ## Environment overrides

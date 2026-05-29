@@ -1,8 +1,8 @@
 # Wattle Documentation
 
-Wattle is a pure-Python coding agent for serious terminal work. It gives modern models a small, powerful local runtime: file reading, exact edits, shell execution, image inspection, long-session compaction, persistent sessions, direct tool execution, and managed subagents that can investigate or implement in parallel.
+Wattle is a lightweight, pure-Python coding agent. It keeps the surface small while covering the core loop: read files, edit code, run commands, inspect images, compact long sessions, persist work, and delegate to subagents.
 
-Wattle is built to feel direct. Start it in a repository, give it the task, and it works against the same files and commands you use.
+Wattle only has YOLO mode because that is the only way I use coding agents. It was first built with Codex and is now used to develop itself. Fork it, modify it, and shape it around your own workflow.
 
 ## Quick start
 
@@ -11,6 +11,14 @@ Install the latest published release:
 ```bash
 curl -fsSL https://wattleagent.com/install.sh | bash
 ```
+
+Authenticate providers from the TUI:
+
+```text
+/login
+```
+
+Or configure API-key providers in `~/.wattle/auth.json`.
 
 Then run Wattle in a project directory:
 
@@ -23,14 +31,6 @@ For one-shot output:
 ```bash
 wattle -p "summarize this repository"
 ```
-
-Wattle defaults to the OpenAI Codex provider and `gpt-5.5`. Authenticate from the TUI with:
-
-```text
-/login
-```
-
-Or configure API-key providers in `~/.wattle/auth.json`.
 
 ## Start here
 

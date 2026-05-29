@@ -85,7 +85,7 @@ wattle --provider kimi --model kimi-k2.6
 wattle --provider minimax --model MiniMax-M2.7
 ```
 
-Inside the TUI, use `/model` to list authenticated model choices and `/model next` to cycle through enabled choices.
+Inside the TUI, use `/model` to list authenticated model choices and `/model NAME_OR_NUMBER` to switch models.
 
 ## Give Wattle project instructions
 

@@ -1062,7 +1062,7 @@ def test_command_hints_match_slash_prefix() -> None:
     rendered = tui._render_command_hints("/stat")
 
     assert "/status  show session and status details" in rendered
-    assert "/statusline  configure the bottom statusline" in rendered
+    assert "/statusline" not in rendered
     assert "/model" not in rendered
     assert "/clear" not in rendered
 
@@ -1237,23 +1237,6 @@ def test_render_statusline_shows_provider_quota_percentages() -> None:
     )
 
     assert rendered == "gpt-5.5 | 5h 60% | weekly 6% | ~/repos/wattle"
-
-
-def test_render_statusline_selector_explains_controls_without_numbers() -> None:
-    rows = tui._render_statusline_selector_rows(
-        selected_fields={"model", "thinking", "cwd"},
-        selected_index=1,
-        width=88,
-        styles_enabled=False,
-    )
-    rendered = "\n".join(rows)
-
-    assert "Configure statusline" in rendered
-    assert "Use ↑/↓ to move, x to select/deselect, Enter to save, Esc to cancel" in rendered
-    assert "> [x] thinking" in rendered
-    assert "[ ] context_used" in rendered
-    assert "Selected:" not in rendered
-    assert "1." not in rendered
 
 
 def test_status_text_uses_last_provider_input_tokens_not_heuristic() -> None:
@@ -1458,6 +1441,23 @@ def test_raw_model_command_refreshes_model_dependent_context() -> None:
     assert "view_image" not in {spec["name"] for spec in app.tool_specs}
     assert app.system is not None
     assert "view_image" not in app.system
+
+
+def test_removed_model_subcommands_do_not_change_model() -> None:
+    out = io.StringIO()
+    app = tui.WattleApp(
+        _make_args(model="gpt-5.5"),
+        _ScriptedStreamProvider([]),
+        out=out,
+    )
+
+    app._handle_model("next")
+    app._handle_model("enable deepseek-v4-flash")
+
+    assert app.current_model == "gpt-5.5"
+    rendered = out.getvalue()
+    assert "Unsupported model command: /model next" in rendered
+    assert "Unsupported model command: /model enable" in rendered
 
 
 def test_history_replay_keeps_user_image_anchor_without_summary(tmp_path: Path) -> None:
@@ -2734,7 +2734,7 @@ def test_live_input_hint_enter_executes_selected_command() -> None:
 
     rendered = out.getvalue()
     assert "Commands:" in rendered
-    assert "/model [name|#|next]" in rendered
+    assert "/model [name|#]" in rendered
     assert app.messages == []
 
 
@@ -6403,27 +6403,7 @@ def test_tui_prefetches_codex_quota_for_startup_statusline() -> None:
     assert captured[0].full_url == "https://chatgpt.com/backend-api/wham/usage"
 
 
-def test_live_statusline_selector_toggles_and_persists(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv(settings.SETTINGS_PATH_ENV, str(tmp_path / "settings.json"))
-    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=io.StringIO())
-    live = tui._LiveTerminal(app)
-
-    live._open_statusline_selector()
-    live._move_statusline_selector(2)
-    live._handle_statusline_selector_input("x", "x", 1)
-    live._handle_statusline_selector_input("\r", "\r", 1)
-
-    saved = settings.load_settings()
-    assert app._statusline_fields == ("model", "thinking", "context_used", "cwd")
-    assert saved.tui.statusline == ("model", "thinking", "context_used", "cwd")
-    assert saved.tui.show_thinking is False
-    assert "Statusline updated: model | thinking | context_used | cwd" in app.out.getvalue()
-
-
-def test_terminal_statusline_can_be_disabled(
+def test_terminal_statusline_command_is_not_supported(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -6439,10 +6419,9 @@ def test_terminal_statusline_can_be_disabled(
 
     out, app = _drive(provider, ["/statusline off", "go", "/exit"])
 
-    assert "Statusline disabled." in out
-    assert "[status]" not in out
-    assert app._statusline_enabled is False
-    assert settings.load_settings().tui.statusline == ()
+    assert "Unknown command: /statusline" in out
+    assert app._statusline_enabled is True
+    assert settings.load_settings().tui.statusline == ("model", "thinking", "cwd")
 
 
 def test_terminal_effort_updates_settings(

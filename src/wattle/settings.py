@@ -40,7 +40,6 @@ class WattleSettings:
     permission_mode: PermissionMode = PermissionMode.YOLO
     statusline: bool = True
     tui: TuiSettings = field(default_factory=TuiSettings)
-    enabled_models: tuple[str, ...] = field(default_factory=tuple)
     compaction_keep_recent_tokens: int = 20_000
     git_commit_attribution: bool = True
 
@@ -91,7 +90,6 @@ def settings_to_dict(settings: WattleSettings) -> dict[str, Any]:
             "statusline": list(settings.tui.statusline),
             "show_thinking": settings.tui.show_thinking,
         },
-        "enabled_models": list(settings.enabled_models),
         "compaction_keep_recent_tokens": settings.compaction_keep_recent_tokens,
         "git_commit_attribution": settings.git_commit_attribution,
     }
@@ -112,7 +110,6 @@ def settings_from_dict(data: dict[str, Any]) -> WattleSettings:
         ),
         statusline=bool(tui.statusline),
         tui=tui,
-        enabled_models=_str_tuple(data.get("enabled_models")),
         compaction_keep_recent_tokens=max(
             1,
             _int(
