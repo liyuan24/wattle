@@ -1,15 +1,15 @@
 # Settings
 
-Wattle stores persistent user defaults in `~/.wattle/settings.json`.
+Wattle stores optional persistent user defaults in `~/.wattle/settings.json`.
 
 ## Default settings
 
-When no settings file exists, Wattle uses:
+When no settings file exists, Wattle uses these built-in defaults:
 
 ```json
 {
-  "provider": "openai_codex",
-  "model": "gpt-5.5",
+  "provider": null,
+  "model": null,
   "max_tokens": 4096,
   "thinking": false,
   "effort": null,
@@ -22,9 +22,23 @@ When no settings file exists, Wattle uses:
 }
 ```
 
+`provider: null` and `model: null` mean Wattle auto-selects the first authenticated catalog model at launch. If no provider is authenticated, the TUI asks you to run `/login`; headless mode exits with an authentication message.
+
 CLI flags override settings for that launch.
 
-## Provider and model defaults
+## Fields
+
+- `provider` - default provider name, such as `openai_codex`, `anthropic`, `deepseek`, `kimi`, `minimax`, or `xiaomi-token-plan-sgp`. Use `null` for auto-selection.
+- `model` - default catalog model id. Use `null` for auto-selection.
+- `max_tokens` - maximum output tokens requested per model turn.
+- `thinking` - whether reasoning controls are enabled by default.
+- `effort` - default reasoning effort when thinking is enabled: `low`, `medium`, `high`, `xhigh`, `max`, or `null`.
+- `permission_mode` - only `yolo` is supported.
+- `tui.statusline` - fields shown in the bottom TUI statusline.
+- `compaction_keep_recent_tokens` - recent-context budget preserved during compaction.
+- `git_commit_attribution` - whether Wattle may include git attribution metadata when creating commits.
+
+## Provider and Model
 
 Set your normal provider and model:
 
@@ -57,8 +71,6 @@ Wattle supports only `yolo` permission mode. Tool calls run without runtime conf
   "permission_mode": "yolo"
 }
 ```
-
-Legacy `read_only` or `ask_for_permission` settings are ignored and treated as `yolo`.
 
 ## TUI statusline
 

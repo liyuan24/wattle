@@ -25,6 +25,11 @@ from wattle.permissions import PermissionMode
 from wattle.update import maybe_latest_update, prompt_for_tui_update, run_manual_upgrade
 from wattle.version import get_wattle_version
 
+AUTH_REQUIRED_MESSAGE = (
+    "No authenticated provider is configured. Run `wattle` and use /login, "
+    "or set an API-key environment variable for a supported provider."
+)
+
 if TYPE_CHECKING:
     from wattle.agent import AgentRunResult as AgentRunResultType
     from wattle.agent import _ProviderSpec
@@ -452,24 +457,28 @@ def _apply_settings_defaults(
         ):
             args.model = settings.model
         else:
-            default_choice = globals()["first_available_model_choice"]() or globals()[
-                "first_catalog_model_choice"
-            ]()
-            args.model = default_choice.model
-            if not provider_explicit:
+            default_choice = globals()["first_available_model_choice"]()
+            if default_choice is not None:
+                args.model = default_choice.model
+            if default_choice is not None and not provider_explicit:
                 args.provider = default_choice.provider
     if not provider_explicit:
-        provider = _default_provider_for_model(args.model)
+        provider = _default_provider_for_model(args.model) if args.model is not None else None
         if provider is not None:
             args.provider = provider
         elif settings.provider in _PROVIDER_CHOICES:
             args.provider = settings.provider
+            if not model_explicit and args.model is None:
+                provider_default = globals()["first_catalog_model_choice_for_provider"](
+                    settings.provider
+                )
+                if provider_default is not None:
+                    args.model = provider_default.model
         else:
-            default_choice = globals()["first_available_model_choice"]() or globals()[
-                "first_catalog_model_choice"
-            ]()
-            args.provider = default_choice.provider
-            if not model_explicit and settings.model is None:
+            default_choice = globals()["first_available_model_choice"]()
+            if default_choice is not None:
+                args.provider = default_choice.provider
+            if default_choice is not None and not model_explicit and settings.model is None:
                 args.model = default_choice.model
     if not _has_flag(argv, "--max-tokens"):
         args.max_tokens = settings.max_tokens
@@ -485,6 +494,8 @@ def _apply_settings_defaults(
 
 
 def _validate_catalog_model(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
+    if args.model is None:
+        return
     if globals()["MODEL_CHOICES_BY_MODEL"].get(args.model) is None:
         parser.error(f"unknown model: {args.model}")
 
@@ -540,6 +551,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.persist and args.print_prompt is None:
         parser.error("--persist can only be used with -p/--print")
     _validate_catalog_model(args, parser)
+    if args.print_prompt is not None and (args.provider is None or args.model is None):
+        parser.error(AUTH_REQUIRED_MESSAGE)
     if args.effort is not None:
         args.thinking = True
     if args.print_prompt is not None:

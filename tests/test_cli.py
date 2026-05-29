@@ -181,7 +181,7 @@ def test_apply_settings_defaults_uses_first_catalog_model_for_explicit_provider(
     assert args.model == "mimo-v2.5-pro"
 
 
-def test_apply_settings_defaults_falls_back_to_first_catalog_model_without_auth(
+def test_apply_settings_defaults_leaves_provider_and_model_empty_without_auth(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     parser = cli._build_parser()
@@ -190,8 +190,8 @@ def test_apply_settings_defaults_falls_back_to_first_catalog_model_without_auth(
 
     cli._apply_settings_defaults(args, [], WattleSettings())
 
-    assert args.provider == "openai_codex"
-    assert args.model == "gpt-5.5"
+    assert args.provider is None
+    assert args.model is None
 
 
 def test_build_parser_print_mode_accepts_prompt_and_shared_flags() -> None:
@@ -383,12 +383,32 @@ def test_main_with_print_prompt_runs_headless(monkeypatch: pytest.MonkeyPatch) -
         calls.append(args)
         return 7
 
+    monkeypatch.setattr(
+        cli,
+        "first_available_model_choice",
+        lambda: models.ModelChoice(
+            model="mimo-v2.5-pro",
+            provider="xiaomi-token-plan-sgp",
+            vendor="xiaomi-token-plan-sgp",
+            description="Xiaomi MiMo V2.5 Pro model.",
+        ),
+    )
     monkeypatch.setattr(cli, "_run_tui", lambda _args: pytest.fail("tui called"))
     monkeypatch.setattr(cli, "_run_headless", fake_run_headless)
 
     assert cli.main(["-p", "follow the prompt"]) == 7
     assert len(calls) == 1
     assert calls[0].print_prompt == "follow the prompt"
+
+
+def test_main_with_print_prompt_requires_auth(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli, "first_available_model_choice", lambda: None)
+    monkeypatch.setattr(cli, "load_settings", lambda: WattleSettings())
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["-p", "follow the prompt"])
+
+    assert exc.value.code == 2
 
 
 def test_main_with_positional_prompt_runs_tui(monkeypatch: pytest.MonkeyPatch) -> None:

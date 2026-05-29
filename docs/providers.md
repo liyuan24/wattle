@@ -81,6 +81,7 @@ Provider and model selection:
 - If no CLI flag is set, Wattle reads `provider` and `model` from `~/.wattle/settings.json`.
 - If only a catalog model is set, Wattle infers the matching provider.
 - If no usable setting is present, Wattle picks the first authenticated catalog model.
+- If no authenticated provider is available, the TUI asks you to run `/login`; headless mode exits with an authentication message.
 - API-key environment variables do not choose the provider or model; they only make that provider authenticated.
 
 Credential lookup:

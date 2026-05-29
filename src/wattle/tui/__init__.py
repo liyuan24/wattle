@@ -64,6 +64,7 @@ from wattle.models import (
     available_model_choices,
     effort_levels_for_model,
     find_model_choice,
+    first_catalog_model_choice_for_provider,
     model_supports_modality,
     render_model_choices,
 )
@@ -2536,8 +2537,8 @@ class WattleApp:
         self.cwd = Path.cwd()
         self._settings = load_settings()
 
-        self.current_provider_name: str = args.provider
-        self.current_model: str = args.model
+        self.current_provider_name: str = args.provider or ""
+        self.current_model: str = args.model or ""
         self.max_tokens: int = args.max_tokens
         self.thinking: bool = bool(getattr(args, "thinking", False))
         self.show_thinking_content: bool = bool(self._settings.tui.show_thinking)
@@ -2581,7 +2582,7 @@ class WattleApp:
         self._coerce_effort_for_current_model()
         self._prefetch_startup_quota()
 
-        if bool(getattr(args, "persist_session", False)):
+        if bool(getattr(args, "persist_session", False)) and self._auth_ready():
             resume_record = cast(
                 SessionRecord | None,
                 getattr(args, "_resume_session_record", None),
@@ -2617,6 +2618,7 @@ class WattleApp:
     async def _arun_basic(self) -> int:
         """Async implementation of the portable append-only loop."""
         self._write_welcome_card()
+        self._write_auth_required_notice_if_needed()
         self._write_resume_history_if_pending()
         await self._acontinue_resumed_turn_if_needed()
         positional_prompt = self._positional_prompt_text()
@@ -2650,7 +2652,58 @@ class WattleApp:
         prompt = getattr(self.args, "prompt", None)
         return prompt.strip() if isinstance(prompt, str) else ""
 
+    def _auth_ready(self) -> bool:
+        return bool(self.current_provider_name and self.current_model)
+
+    def _display_provider_name(self) -> str:
+        return self.current_provider_name or "(not authenticated)"
+
+    def _display_model_name(self) -> str:
+        return self.current_model or "(not authenticated)"
+
+    def _write_auth_required_notice_if_needed(self) -> None:
+        if not self._auth_ready():
+            self._write_auth_required_notice()
+
+    def _write_auth_required_notice(self) -> None:
+        self._write_panel(
+            "login",
+            "Authenticate before starting a task. Run /login and follow the provider instructions.",
+            STATUS_STYLE,
+        )
+
+    def _select_default_model_for_provider(self, provider: str) -> None:
+        if self.current_model:
+            choice = find_model_choice(self.current_model, available_model_choices())
+            if choice is not None and choice.provider == provider:
+                return
+        choice = first_catalog_model_choice_for_provider(provider)
+        if choice is not None:
+            self.current_model = choice.model
+        self._coerce_effort_for_current_model()
+        self._refresh_model_dependent_context()
+
+    def _ensure_session_record(self) -> None:
+        if self._session_record is not None or not bool(
+            getattr(self.args, "persist_session", False)
+        ):
+            return
+        if not self._auth_ready():
+            return
+        self._session_record = new_session(
+            provider=self.current_provider_name,
+            model=self.current_model,
+            system=self.system,
+            max_tokens=self.max_tokens,
+            thinking=self.thinking,
+            effort=cast(Any, self.effort),
+        )
+        self._session_path = default_session_path(self._session_record.metadata.id)
+
     def _submit_user_text(self, text: str, *, render: bool) -> bool:
+        if not self._auth_ready():
+            self._write_auth_required_notice()
+            return False
         expanded_text = self._expand_skill_text(text)
         try:
             content = self._user_content_blocks(expanded_text or text)
@@ -3702,8 +3755,10 @@ class WattleApp:
 
         try:
             self.current_provider_name = "openai_codex"
+            self._select_default_model_for_provider(self.current_provider_name)
             self.provider = _build_provider(self.current_provider_name)
             self._configure_subagents(provider=self.provider)
+            self._ensure_session_record()
             self._persist_user_settings(
                 provider=self.current_provider_name,
                 model=self.current_model,
@@ -3737,8 +3792,10 @@ class WattleApp:
 
         try:
             self.current_provider_name = provider
+            self._select_default_model_for_provider(self.current_provider_name)
             self.provider = _build_provider(self.current_provider_name)
             self._configure_subagents(provider=self.provider)
+            self._ensure_session_record()
             self._persist_user_settings(
                 provider=self.current_provider_name,
                 model=self.current_model,
@@ -3944,8 +4001,8 @@ class WattleApp:
         self._write_line("  /session, /status  Show persistence and session status.")
         self._write_line("")
         self._write_line("Settings:")
-        self._write_line(f"  provider:      {self.current_provider_name}")
-        self._write_line(f"  model:         {self.current_model}")
+        self._write_line(f"  provider:      {self._display_provider_name()}")
+        self._write_line(f"  model:         {self._display_model_name()}")
         self._write_line(f"  max_tokens:    {self.max_tokens}")
         self._write_line(f"  thinking:      {'on' if self.thinking else 'off'}")
         if self.effort is not None:
@@ -4085,7 +4142,7 @@ class WattleApp:
 
     def _status_text(self) -> str:
         return _render_statusline(
-            model=self.current_model,
+            model=self._display_model_name(),
             context_tokens=self._last_context_tokens,
             context_window=_context_window_for_model(self.current_model),
             input_tokens=self._total_input_tokens,
@@ -4306,7 +4363,7 @@ class WattleApp:
 
     def _write_welcome_card(self) -> None:
         rows = [
-            ("model:", self.current_model),
+            ("model:", self._display_model_name()),
             ("directory:", _display_cwd()),
         ]
         title = f"{WELCOME_TITLE} v{get_wattle_version()}"
@@ -4587,6 +4644,7 @@ class _LiveTerminal:
 
     def run(self) -> int:
         self.app._write_welcome_card()
+        self.app._write_auth_required_notice_if_needed()
         self.app._write_resume_history_if_pending()
         with self._raw_terminal():
             if _history_ends_with_tool_results(self.app.messages):
@@ -5096,6 +5154,10 @@ class _LiveTerminal:
             return
         if self.streaming:
             self.pending_user_inputs.append(text)
+            self._draw_prompt()
+            return
+        if not self.app._auth_ready():
+            self.app._write_auth_required_notice()
             self._draw_prompt()
             return
 

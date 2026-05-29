@@ -5653,6 +5653,22 @@ def test_terminal_status_command_shows_disabled_persistence() -> None:
     assert "session: (not saved)" in out
 
 
+def test_terminal_requires_login_before_task() -> None:
+    provider = _ScriptedStreamProvider([])
+
+    out, app = _drive(
+        provider,
+        ["start work", "/exit"],
+        args=_make_args(provider=None, model=None),
+    )
+
+    assert "Authenticate before starting a task. Run /login" in out
+    assert app.current_provider_name == ""
+    assert app.current_model == ""
+    assert provider.requests == []
+    assert app.messages == []
+
+
 def test_terminal_login_openai_codex(monkeypatch: pytest.MonkeyPatch) -> None:
     from wattle import cli
 
@@ -6225,7 +6241,7 @@ def test_terminal_model_selection_rejects_numbers(monkeypatch: pytest.MonkeyPatc
     assert provider.requests == []
 
 
-def test_terminal_login_xiaomi_token_plan_preserves_current_model(
+def test_terminal_login_xiaomi_token_plan_uses_provider_default_model(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -6252,10 +6268,10 @@ def test_terminal_login_xiaomi_token_plan_preserves_current_model(
     assert "Xiaomi Token Plan SGP API key saved" in out
     assert provider_names == ["xiaomi-token-plan-sgp"]
     assert app.current_provider_name == "xiaomi-token-plan-sgp"
-    assert app.current_model == "gpt-5.5"
+    assert app.current_model == "mimo-v2.5-pro"
     assert app.provider is reloaded_provider
     assert saved_settings.provider == "xiaomi-token-plan-sgp"
-    assert saved_settings.model == "gpt-5.5"
+    assert saved_settings.model == "mimo-v2.5-pro"
 
 
 def test_tui_thinking_content_visibility_loads_from_settings_section(

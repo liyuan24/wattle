@@ -30,20 +30,22 @@ Add instructions for the summary:
 
 Wattle reports the compacted request token estimate when it finishes.
 
-## What is persisted
+## How compaction works
 
-Session files can include compaction checkpoints with:
+Compaction changes only the request projection sent to the model. The session transcript on disk stays complete: Wattle keeps the original user messages, assistant messages, tool calls, tool results, thinking blocks, image records, and compaction checkpoints.
 
-- summary text
-- first kept message index
-- summarized message range
-- reason
-- before and after token estimates
-- read and modified file paths
-- creation time
+What gets compacted: Wattle chooses an older middle range of messages and summarizes that range. This is usually the part of the conversation that is no longer the immediate working tail but still contains useful history.
 
-The persisted session remains the source of truth. Compaction changes the request sent to the provider, not the complete saved transcript.
+What is not compacted: the newest messages stay verbatim, so the model still sees the live working state exactly as it happened. That includes the latest user request, recent tool calls, tool results, errors, file paths, and decisions.
 
-## When to use it
+How the summary is made: Wattle performs a separate model call for summarization. It asks the provider to preserve the details needed to continue coding work: goals, constraints, completed work, important commands, errors, changed files, open questions, and next steps. If the session was compacted before, Wattle gives the previous summary to the summarizer and asks it to update that summary with the newly compacted messages.
 
-Use `/compact` before switching to a new phase of a large task, after a long debugging trace, or before asking Wattle to continue work that depends on the latest state more than the full raw transcript.
+After compaction, the next normal model call receives:
+
+1. The normal system prompt and tool definitions.
+2. One synthetic user message containing the compaction summary. This message explicitly says the earlier conversation was compacted and that the summary is prior context, not a new user request.
+3. The recent un-compacted tail of the conversation, kept as the original messages.
+
+The model does not receive the full old transcript in that call. It receives the summary plus the recent tail. Wattle can still save and resume the complete session because the durable transcript remains on disk.
+
+Automatic compaction starts when the estimated request size, plus the requested output budget, approaches the model context window. Manual `/compact` forces the same process immediately, optionally with extra instructions for what the summary should preserve.
