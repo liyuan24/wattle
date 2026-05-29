@@ -4,17 +4,16 @@ Wattle is a pure-Python coding agent.
 
 ## Install
 
-From a local checkout:
+For users, install the latest published release:
 
 ```bash
-scripts/install.sh
+curl -fsSL https://wattleagent.com/install.sh | bash
 ```
 
-From a hosted repository:
+For development, install the current checkout in editable mode:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/<owner>/wattle/main/scripts/install.sh \
-  | WATTLE_REPO_URL=https://github.com/<owner>/wattle.git bash
+scripts/install-dev.sh
 ```
 
 The installer uses the project script declared in `pyproject.toml`:
@@ -36,6 +35,12 @@ Run one prompt headlessly:
 
 ```bash
 wattle -p "summarize this repository"
+```
+
+Update manually:
+
+```bash
+wattle --upgrade
 ```
 
 Choose a provider and model:

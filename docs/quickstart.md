@@ -4,18 +4,17 @@ This page gets you from a checkout to a useful first Wattle session.
 
 ## Install
 
-From a local checkout:
+For users, install the latest published release:
+
+```bash
+curl -fsSL https://wattleagent.com/install.sh | bash
+```
+
+For development, install the current checkout in editable mode:
 
 ```bash
 cd /path/to/wattle
-scripts/install.sh
-```
-
-From a hosted repository:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/<owner>/wattle/main/scripts/install.sh \
-  | WATTLE_REPO_URL=https://github.com/<owner>/wattle.git bash
+scripts/install-dev.sh
 ```
 
 The installer exposes the project script declared in `pyproject.toml`:
@@ -78,6 +77,16 @@ Save a headless run into the same session store as the TUI:
 
 ```bash
 wattle -p "inspect the public API surface" --persist
+```
+
+## Update Wattle
+
+The TUI checks for a newer published release at startup. If an update is available, choose **Update** to run the pinned installer and return to your shell, or choose **Skip update** to continue into the TUI.
+
+Trigger the same check manually:
+
+```bash
+wattle --upgrade
 ```
 
 ## Choose a provider or model

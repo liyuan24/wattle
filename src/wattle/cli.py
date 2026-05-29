@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeGuard
 
 from wattle.permissions import PermissionMode
+from wattle.update import maybe_latest_update, prompt_for_tui_update, run_manual_upgrade
 from wattle.version import get_wattle_version
 
 if TYPE_CHECKING:
@@ -323,6 +324,10 @@ def _persist_headless_session(args: argparse.Namespace, result: AgentRunResultTy
 
 def _run_tui(args: argparse.Namespace) -> int:
     """Lazy-import wrapper so headless mode doesn't pay the TUI import cost."""
+    latest = maybe_latest_update(get_wattle_version())
+    if latest is not None and prompt_for_tui_update(get_wattle_version(), latest):
+        return 0
+
     from wattle.tui import run_tui
 
     return run_tui(args)
@@ -354,6 +359,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--version",
         action="store_true",
         help="Show version number and exit.",
+    )
+    parser.add_argument(
+        "--upgrade",
+        action="store_true",
+        help="Update Wattle to the latest published release and exit.",
     )
     parser.add_argument(
         "-p",
@@ -515,6 +525,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.version:
         print(get_wattle_version())
         return 0
+    if args.upgrade:
+        return run_manual_upgrade(get_wattle_version())
     _apply_settings_defaults(args, raw_argv, load_settings())
     if args.print_prompt is not None and args.prompt is not None:
         parser.error("positional prompt cannot be used with -p/--print")

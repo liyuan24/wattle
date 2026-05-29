@@ -6,6 +6,7 @@ import argparse
 import io
 import subprocess
 import sys
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
@@ -24,6 +25,7 @@ def test_build_parser_defaults_to_tui_settings() -> None:
     args = parser.parse_args([])
 
     assert args.version is False
+    assert args.upgrade is False
     assert args.prompt is None
     assert args.provider is None
     assert args.model is None
@@ -290,6 +292,54 @@ def test_main_version_prints_version_without_loading_settings(
 
     assert cli.main([flag]) == 0
     assert capsys.readouterr().out == "9.8.7\n"
+
+
+def test_main_upgrade_runs_without_loading_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(cli, "get_wattle_version", lambda: "1.2.3")
+    monkeypatch.setattr(cli, "load_settings", lambda: pytest.fail("settings loaded"))
+    monkeypatch.setattr(cli, "_run_tui", lambda _args: pytest.fail("tui called"))
+    monkeypatch.setattr(cli, "_run_headless", lambda _args: pytest.fail("headless called"))
+    monkeypatch.setattr(
+        cli,
+        "run_manual_upgrade",
+        lambda version: calls.append(version) or 0,
+    )
+
+    assert cli.main(["--upgrade"]) == 0
+    assert calls == ["1.2.3"]
+
+
+def test_run_tui_prompts_for_available_update_before_importing_tui(monkeypatch) -> None:
+    latest = object()
+    calls: list[tuple[str, object]] = []
+    monkeypatch.setattr(cli, "get_wattle_version", lambda: "1.2.3")
+    monkeypatch.setattr(cli, "maybe_latest_update", lambda version: latest)
+    monkeypatch.setattr(
+        cli,
+        "prompt_for_tui_update",
+        lambda version, latest_version: calls.append((version, latest_version)) or True,
+    )
+
+    assert cli._run_tui(argparse.Namespace()) == 0
+    assert calls == [("1.2.3", latest)]
+
+
+def test_run_tui_skips_update_prompt_when_current_is_latest(monkeypatch) -> None:
+    calls: list[argparse.Namespace] = []
+
+    def fake_run_tui(args: argparse.Namespace) -> int:
+        calls.append(args)
+        return 42
+
+    monkeypatch.setattr(cli, "maybe_latest_update", lambda _version: None)
+    monkeypatch.setitem(sys.modules, "wattle.tui", SimpleNamespace(run_tui=fake_run_tui))
+
+    args = argparse.Namespace()
+    assert cli._run_tui(args) == 42
+    assert calls == [args]
 
 
 def test_main_without_prompt_runs_tui(monkeypatch: pytest.MonkeyPatch) -> None:

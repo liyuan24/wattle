@@ -17,10 +17,10 @@ uv run wattle
 Install or refresh the shell command:
 
 ```bash
-uv tool install --force .
+scripts/install-dev.sh
 ```
 
-The installed `wattle` command is a separate `uv tool` environment, so dependency changes require both `uv sync` and `uv tool install --force .`.
+The developer installer uses `uv tool install --force -e .`, so the shell `wattle` command points at the current checkout. The installed `wattle` command is still a separate `uv tool` environment, so dependency changes require both `uv sync` and `scripts/install-dev.sh`.
 
 ## Tests
 
@@ -65,7 +65,8 @@ tests/
   test_tui_pty.py           PTY-level TUI assertions
   pty_harness.py            terminal harness helpers
 scripts/
-  install.sh                local and hosted installer
+  install.sh                hosted release installer
+  install-dev.sh            editable checkout installer
   smoke_e2e.py              smoke test helper
 ```
 

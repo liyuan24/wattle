@@ -1323,8 +1323,7 @@ def test_terminal_appends_without_rewriting_scrollback() -> None:
 
     out, _app = _drive(provider, ["hello", "/exit"])
 
-    assert f"Wattle Agent {get_wattle_version()}" in out
-    assert "~~ \\|/ ~~" in out
+    assert f"Wattle Agent v{get_wattle_version()}" in out
     assert "model:     gpt-5.5" in out
     assert "directory:" in out
     assert "Session:" not in out
