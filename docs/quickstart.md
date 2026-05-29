@@ -1,27 +1,13 @@
 # Quickstart
 
-This page gets you from a checkout to a useful first Wattle session.
+This page gets you from install to a useful first Wattle session.
 
 ## Install
 
-For users, install the latest published release:
+Install the latest published release:
 
 ```bash
 curl -fsSL https://wattleagent.com/install.sh | bash
-```
-
-For development, install the current checkout in editable mode:
-
-```bash
-cd /path/to/wattle
-scripts/install-dev.sh
-```
-
-The installer exposes the project script declared in `pyproject.toml`:
-
-```toml
-[project.scripts]
-wattle = "wattle.cli:main"
 ```
 
 After install, start Wattle in the repository you want it to work on:

@@ -6,10 +6,10 @@ Wattle is built to feel direct. Start it in a repository, give it the task, and 
 
 ## Quick start
 
-Install from a local checkout:
+Install the latest published release:
 
 ```bash
-scripts/install.sh
+curl -fsSL https://wattleagent.com/install.sh | bash
 ```
 
 Then run Wattle in a project directory:
