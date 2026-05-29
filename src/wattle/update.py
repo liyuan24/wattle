@@ -18,6 +18,7 @@ LATEST_VERSION_URL = "https://wattleagent.com/api/latest-version"
 INSTALL_URL = "https://wattleagent.com/install.sh"
 DISABLE_UPDATE_CHECK_ENV = "WATTLE_DISABLE_UPDATE_CHECK"
 LATEST_VERSION_URL_ENV = "WATTLE_LATEST_VERSION_URL"
+USER_AGENT_PRODUCT = "Wattle"
 
 _VERSION_RE = re.compile(r"^v?(?P<major>\d+)\.(?P<minor>\d+)\.(?P<patch>\d+)$")
 
@@ -51,10 +52,28 @@ def is_newer_version(latest: str, current: str) -> bool:
     return compare_versions(latest, current) > 0
 
 
-def fetch_latest_version(*, timeout: float = 2.0) -> LatestVersion | None:
+def _user_agent(current_version: str | None) -> str:
+    version = normalize_version(current_version or "")
+    if version is None:
+        return USER_AGENT_PRODUCT
+    return f"{USER_AGENT_PRODUCT}/{version}"
+
+
+def fetch_latest_version(
+    *,
+    timeout: float = 2.0,
+    current_version: str | None = None,
+) -> LatestVersion | None:
     url = os.environ.get(LATEST_VERSION_URL_ENV, LATEST_VERSION_URL)
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as response:
+        request = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": _user_agent(current_version),
+                "Accept": "application/json",
+            },
+        )
+        with urllib.request.urlopen(request, timeout=timeout) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except (OSError, urllib.error.URLError, TimeoutError, ValueError):
         return None
@@ -91,7 +110,7 @@ def run_installer(latest: LatestVersion) -> int:
 def maybe_latest_update(current_version: str, *, timeout: float = 2.0) -> LatestVersion | None:
     if os.environ.get(DISABLE_UPDATE_CHECK_ENV):
         return None
-    latest = fetch_latest_version(timeout=timeout)
+    latest = fetch_latest_version(timeout=timeout, current_version=current_version)
     if latest is None or not is_newer_version(latest.version, current_version):
         return None
     return latest
@@ -103,7 +122,7 @@ def run_manual_upgrade(
     out: TextIO = sys.stdout,
     err: TextIO = sys.stderr,
 ) -> int:
-    latest = fetch_latest_version(timeout=10.0)
+    latest = fetch_latest_version(timeout=10.0, current_version=current_version)
     if latest is None:
         err.write("Could not check for Wattle updates.\n")
         err.flush()
