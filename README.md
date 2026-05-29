@@ -3,32 +3,25 @@
   Wattle
 </h1>
 
-Wattle is a pure-Python coding agent.
+Wattle is a lightweight, pure-Python coding agent. It keeps the surface small while covering the core loop: read files, edit code, run commands, inspect images, compact long sessions, persist work, and delegate to subagents.
 
-## Install
+Wattle only has YOLO mode because that is the only way I use coding agents. It was first built with Codex and is now used to develop itself. Fork it, modify it, and shape it around your own workflow.
 
-For users, install the latest published release:
+## Quick Start
+
+Install the latest published release:
 
 ```bash
 curl -fsSL https://wattleagent.com/install.sh | bash
 ```
 
-For development, install the current checkout in editable mode:
+Authenticate providers from the TUI:
 
-```bash
-scripts/install-dev.sh
+```text
+/login
 ```
 
-The installer uses the project script declared in `pyproject.toml`:
-
-```toml
-[project.scripts]
-wattle = "wattle.cli:main"
-```
-
-## Usage
-
-Open the TUI:
+Run Wattle in a project directory:
 
 ```bash
 wattle
@@ -46,22 +39,32 @@ Update manually:
 wattle --upgrade
 ```
 
-Choose a provider and model:
+## Development
+
+Clone the repository and install the current checkout in editable mode:
 
 ```bash
-wattle --provider deepseek --model deepseek-v4-flash
-wattle --provider kimi --model kimi-k2.6
-wattle --provider minimax --model MiniMax-M2.7
+git clone https://github.com/liyuan24/wattle.git
+cd wattle
+scripts/install-dev.sh
 ```
 
-Wattle reads API credentials from `~/.wattle/auth.json`:
+Sync the local project environment for tests and linting:
 
-```json
-{
-  "anthropic": {"api_key": {"api_key": "sk-ant-..."}},
-  "deepseek": {"api_key": {"api_key": "sk-..."}},
-  "kimi": {"api_key": {"api_key": "sk-..."}},
-  "minimax": {"api_key": {"api_key": "sk-..."}},
-  "openai": {"oauth": {"access_token": "...", "refresh_token": "..."}}
-}
+```bash
+uv sync
 ```
+
+Run tests:
+
+```bash
+uv run pytest
+```
+
+## Official Website
+
+Documentation and install instructions live at [wattleagent.com](https://wattleagent.com).
+
+## License
+
+Wattle is released under the [MIT License](LICENSE).
