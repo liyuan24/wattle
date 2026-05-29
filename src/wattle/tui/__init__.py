@@ -313,7 +313,6 @@ COMMAND_STRING_STYLE = "\x1b[38;5;120m"
 SEPARATOR_STYLE = "\x1b[38;5;240m"
 ERROR_TEXT_STYLE = "\x1b[38;5;203;1m"
 WELCOME_BORDER_STYLE = "\x1b[38;5;244m"
-WELCOME_LOGO_STYLE = "\x1b[38;5;107;1m"
 WELCOME_TITLE_STYLE = "\x1b[38;5;255;1m"
 WELCOME_LABEL_STYLE = "\x1b[38;5;245m"
 WELCOME_VALUE_STYLE = "\x1b[38;5;255;1m"
@@ -379,11 +378,6 @@ class _EditRenderGroup:
     path: str
     items: list[_EditRenderItem]
 
-WATTLE_LOGO_LINES: tuple[str, ...] = (
-    "   \\ | /   ",
-    " ~~ \\|/ ~~ ",
-    "     Y     ",
-)
 WELCOME_TITLE = "Wattle Agent"
 
 
@@ -4448,9 +4442,6 @@ class WattleApp:
         title = f"{WELCOME_TITLE} v{get_wattle_version()}"
         max_text_width = max(0, self._terminal_width() - 5)
         visible_title = _truncate_cell_text(title, max_text_width)
-        visible_logo_lines = tuple(
-            _truncate_cell_text(line, max_text_width) for line in WATTLE_LOGO_LINES
-        )
         terminal_width = self._terminal_width()
         if terminal_width <= 5:
             tiny_title = _truncate_cell_text(title, terminal_width)
@@ -4462,7 +4453,6 @@ class WattleApp:
 
         content_width = max(
             len(visible_title),
-            *(len(line) for line in visible_logo_lines),
             *(len(label) + 2 + len(value) for label, value in rows),
         )
         width = min(terminal_width - 2, max(36, content_width + 4))
@@ -4470,8 +4460,6 @@ class WattleApp:
 
         if not self._styles_enabled():
             self._write_line(f"┌{'─' * inner_width}┐")
-            for line in visible_logo_lines:
-                self._write_line(f"│ {line.center(inner_width - 1)}│")
             self._write_line(f"│ {visible_title.ljust(inner_width - 1)}│")
             self._write_line(f"│ {' '.ljust(inner_width - 1)}│")
             for label, value in rows:
@@ -4487,12 +4475,6 @@ class WattleApp:
             return
 
         self._write(f"{WELCOME_BORDER_STYLE}┌{'─' * inner_width}┐{RESET}\n")
-        for line in visible_logo_lines:
-            self._write(
-                f"{WELCOME_BORDER_STYLE}│{RESET} "
-                f"{WELCOME_LOGO_STYLE}{line.center(inner_width - 1)}{RESET}"
-                f"{WELCOME_BORDER_STYLE}│{RESET}\n"
-            )
         title_padding = inner_width - 1 - len(visible_title)
         self._write(
             f"{WELCOME_BORDER_STYLE}│{RESET} "

@@ -2548,7 +2548,7 @@ def test_welcome_card_truncates_title_to_narrow_terminal(
         assert len(lines[0]) == terminal_width
     else:
         assert all(len(line) == terminal_width - 2 for line in lines)
-        assert "Wattle" in lines[4]
+        assert "Wattle" in lines[1]
 
 
 def test_live_prompt_shows_slash_command_hints_for_prefix() -> None:
