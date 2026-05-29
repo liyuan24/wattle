@@ -6219,6 +6219,91 @@ def test_terminal_model_selection_switches_provider(monkeypatch: pytest.MonkeyPa
     assert openai_provider.requests[0].model == "gpt-5.5"
 
 
+def test_settings_change_event_is_persisted_outside_messages(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(settings.SETTINGS_PATH_ENV, str(tmp_path / "settings.json"))
+    monkeypatch.setenv(session.SESSION_DIR_ENV, str(tmp_path / "sessions"))
+    settings.save_settings(
+        settings.WattleSettings(provider="openai_responses", model="gpt-5.4"),
+        tmp_path / "settings.json",
+    )
+    monkeypatch.setattr(
+        tui,
+        "available_model_choices",
+        lambda: [
+            ModelChoice(
+                model="gpt-5.5",
+                provider="openai_responses",
+                vendor="openai",
+                description="Frontier model.",
+            )
+        ],
+    )
+
+    _out, app = _drive(
+        _ScriptedStreamProvider([]),
+        ["/model gpt-5.5", "/exit"],
+        args=_make_args(model="gpt-5.4", persist_session=True),
+    )
+
+    assert app._session_path is not None
+    record = session.load_session(app._session_path)
+    assert record.messages == []
+    assert len(record.events) == 1
+    event = record.events[0]
+    assert event.type == "settings_change"
+    assert event.source == {"kind": "slash_command", "name": "/model"}
+    assert event.data["path"] == str(tmp_path / "settings.json")
+    assert event.data["changes"]["model"] == {"old": "gpt-5.4", "new": "gpt-5.5"}
+
+
+def test_settings_change_event_created_before_writing_settings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(settings.SETTINGS_PATH_ENV, str(tmp_path / "settings.json"))
+    monkeypatch.setenv(session.SESSION_DIR_ENV, str(tmp_path / "sessions"))
+
+    _out, app = _drive(
+        _ScriptedStreamProvider([]),
+        ["/effort high", "/exit"],
+        args=_make_args(persist_session=True),
+    )
+
+    assert app._session_path is not None
+    record = session.load_session(app._session_path)
+    assert len(record.events) == 1
+    event = record.events[0]
+    assert event.source == {"kind": "slash_command", "name": "/effort"}
+    assert event.data["changes"]["thinking"] == {"old": False, "new": True}
+    assert event.data["changes"]["effort"] == {"old": None, "new": "high"}
+
+
+def test_settings_change_event_logs_before_auth_ready(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(settings.SETTINGS_PATH_ENV, str(tmp_path / "settings.json"))
+    monkeypatch.setenv(session.SESSION_DIR_ENV, str(tmp_path / "sessions"))
+
+    _out, app = _drive(
+        _ScriptedStreamProvider([]),
+        ["/effort high", "/exit"],
+        args=_make_args(provider="", model="", persist_session=True),
+    )
+
+    assert app._session_path is not None
+    record = session.load_session(app._session_path)
+    assert record.settings.provider == "(not authenticated)"
+    assert record.settings.model == "(not authenticated)"
+    assert len(record.events) == 1
+    assert record.events[0].source == {"kind": "slash_command", "name": "/effort"}
+    assert record.events[0].data["changes"]["thinking"] == {"old": False, "new": True}
+    assert record.events[0].data["changes"]["effort"] == {"old": None, "new": "high"}
+
+
 def test_terminal_model_selection_rejects_numbers(monkeypatch: pytest.MonkeyPatch) -> None:
     provider = _ScriptedStreamProvider([])
     monkeypatch.setattr(

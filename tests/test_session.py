@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -89,7 +90,47 @@ def _sample_record() -> session.SessionRecord:
                 created_at="2026-05-08T10:05:00Z",
             )
         ],
+        events=[
+            session.SessionEvent(
+                type="settings_change",
+                created_at="2026-05-08T10:03:00Z",
+                source={"kind": "slash_command", "name": "/model"},
+                data={
+                    "path": "/tmp/settings.json",
+                    "changes": {"model": {"old": "gpt-5.4", "new": "gpt-5.5"}},
+                },
+            )
+        ],
     )
+
+
+def test_schema_v1_sessions_still_load_without_events() -> None:
+    record = _sample_record()
+    data = session.session_to_dict(record)
+    data["schema_version"] = 1
+    data.pop("events")
+
+    loaded = session.session_from_dict(data)
+
+    assert loaded.schema_version == 1
+    assert loaded.events == []
+    assert loaded.messages == record.messages
+
+
+def test_save_session_upgrades_schema_v1_record_when_events_are_present(
+    tmp_path: Path,
+) -> None:
+    record = _sample_record()
+    record = replace(record, schema_version=1)
+    path = tmp_path / "session.jsonl"
+
+    session.save_session(record, path)
+
+    loaded = session.load_session(path)
+    assert loaded.schema_version == session.SCHEMA_VERSION
+    assert loaded.events == record.events
+    first_line = json.loads(path.read_text(encoding="utf-8").splitlines()[0])
+    assert first_line["schema_version"] == session.SCHEMA_VERSION
 
 
 def test_session_record_round_trips_through_jsonl_file(tmp_path: Path) -> None:
@@ -106,6 +147,7 @@ def test_session_record_round_trips_through_jsonl_file(tmp_path: Path) -> None:
     assert loaded.settings == record.settings
     assert loaded.messages == record.messages
     assert loaded.compactions == record.compactions
+    assert loaded.events == record.events
 
     lines = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
     assert lines[0]["type"] == "session"
@@ -128,6 +170,18 @@ def test_session_record_round_trips_through_jsonl_file(tmp_path: Path) -> None:
         "encrypted_content": "enc_1",
     }
     assert lines[4]["message"]["input_tokens"] == 100
+    assert lines[-1] == {
+        "type": "event",
+        "event": {
+            "type": "settings_change",
+            "created_at": "2026-05-08T10:03:00Z",
+            "source": {"kind": "slash_command", "name": "/model"},
+            "data": {
+                "path": "/tmp/settings.json",
+                "changes": {"model": {"old": "gpt-5.4", "new": "gpt-5.5"}},
+            },
+        },
+    }
     assert lines[4]["message"]["output_tokens"] == 12
     assert lines[4]["message"]["cached_tokens"] == 80
     assert lines[4]["message"]["content"][0] == {

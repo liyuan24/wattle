@@ -29,7 +29,8 @@ from wattle.providers import (
     ToolUseBlock,
 )
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+SUPPORTED_SCHEMA_VERSIONS = {1, SCHEMA_VERSION}
 SESSION_DIR_ENV = "WATTLE_SESSION_DIR"
 
 _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
@@ -76,6 +77,16 @@ class SessionCompaction:
 
 
 @dataclass(frozen=True, slots=True)
+class SessionEvent:
+    """Local audit metadata that is not part of transcript/model context."""
+
+    type: str
+    created_at: str = field(default_factory=lambda: _utc_now_iso())
+    source: dict[str, Any] = field(default_factory=dict)
+    data: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
 class SessionRecord:
     """A complete persisted Wattle chat session."""
 
@@ -83,6 +94,7 @@ class SessionRecord:
     settings: SessionSettings
     messages: list[Message] = field(default_factory=list)
     compactions: list[SessionCompaction] = field(default_factory=list)
+    events: list[SessionEvent] = field(default_factory=list)
     schema_version: int = SCHEMA_VERSION
 
 
@@ -259,7 +271,12 @@ def save_session(record: SessionRecord, path: str | Path | None = None) -> Path:
     target = Path(path) if path is not None else default_session_path(record.metadata.id)
     target.parent.mkdir(parents=True, exist_ok=True)
 
-    updated = replace(record, metadata=replace(record.metadata, updated_at=_utc_now_iso()))
+    updated_schema_version = SCHEMA_VERSION if record.events else record.schema_version
+    updated = replace(
+        record,
+        schema_version=updated_schema_version,
+        metadata=replace(record.metadata, updated_at=_utc_now_iso()),
+    )
     temp = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
     try:
         with temp.open("w", encoding="utf-8") as handle:
@@ -309,6 +326,9 @@ def session_to_jsonl_lines(record: SessionRecord) -> list[str]:
         for compaction in compactions_by_message_index[index]:
             lines.append(_compaction_jsonl_line(compaction))
 
+    for event in record.events:
+        lines.append(_jsonl_line({"type": "event", "event": event_to_dict(event)}))
+
     return lines
 
 
@@ -321,10 +341,11 @@ def session_from_jsonl_lines(lines: list[str]) -> SessionRecord:
     if not isinstance(header, dict) or header.get("type") != "session":
         raise ValueError("session JSONL must start with a session header")
     version = header.get("schema_version")
-    if version != SCHEMA_VERSION:
+    if version not in SUPPORTED_SCHEMA_VERSIONS:
         raise ValueError(f"unsupported session schema_version: {version!r}")
     messages: list[Message] = []
     compactions: list[SessionCompaction] = []
+    events: list[SessionEvent] = []
     for index, item in enumerate(objects[1:], start=2):
         if not isinstance(item, dict):
             raise ValueError(f"session JSONL line {index} must be an object")
@@ -335,13 +356,19 @@ def session_from_jsonl_lines(lines: list[str]) -> SessionRecord:
         if item_type == "compaction":
             compactions.append(compaction_from_dict(_require_dict(item, "compaction")))
             continue
-        raise ValueError(f"session JSONL line {index} must be a message or compaction object")
+        if item_type == "event":
+            events.append(event_from_dict(_require_dict(item, "event")))
+            continue
+        raise ValueError(
+            f"session JSONL line {index} must be a message, compaction, or event object"
+        )
     return SessionRecord(
         schema_version=version,
         metadata=metadata_from_dict(_require_dict(header, "metadata")),
         settings=settings_from_dict(_require_dict(header, "settings")),
         messages=messages,
         compactions=compactions,
+        events=events,
     )
 
 
@@ -355,17 +382,21 @@ def session_to_dict(record: SessionRecord) -> dict[str, Any]:
         "compactions": [
             compaction_to_dict(compaction) for compaction in record.compactions
         ],
+        "events": [event_to_dict(event) for event in record.events],
     }
 
 
 def session_from_dict(data: dict[str, Any]) -> SessionRecord:
     """Deserialize a :class:`SessionRecord` from JSON-compatible data."""
     version = data.get("schema_version")
-    if version != SCHEMA_VERSION:
+    if version not in SUPPORTED_SCHEMA_VERSIONS:
         raise ValueError(f"unsupported session schema_version: {version!r}")
     compactions_data = data.get("compactions", [])
     if not isinstance(compactions_data, list):
         raise ValueError("'compactions' must be a list")
+    events_data = data.get("events", [])
+    if not isinstance(events_data, list):
+        raise ValueError("'events' must be a list")
     return SessionRecord(
         schema_version=version,
         metadata=metadata_from_dict(_require_dict(data, "metadata")),
@@ -378,6 +409,7 @@ def session_from_dict(data: dict[str, Any]) -> SessionRecord:
             compaction_from_dict(item)
             for item in cast(list[dict[str, Any]], compactions_data)
         ],
+        events=[event_from_dict(item) for item in cast(list[dict[str, Any]], events_data)],
     )
 
 
@@ -458,6 +490,26 @@ def compaction_from_dict(data: dict[str, Any]) -> SessionCompaction:
         read_files=_optional_str_list(data, "read_files"),
         modified_files=_optional_str_list(data, "modified_files"),
         created_at=_optional_str(data, "created_at") or _utc_now_iso(),
+    )
+
+
+def event_to_dict(event: SessionEvent) -> dict[str, Any]:
+    return {
+        "type": event.type,
+        "created_at": event.created_at,
+        "source": event.source,
+        "data": event.data,
+    }
+
+
+def event_from_dict(data: dict[str, Any]) -> SessionEvent:
+    source = data.get("source", {})
+    event_data = data.get("data", {})
+    return SessionEvent(
+        type=_require_str(data, "type"),
+        created_at=_optional_str(data, "created_at") or _utc_now_iso(),
+        source=source if isinstance(source, dict) else {},
+        data=event_data if isinstance(event_data, dict) else {},
     )
 
 

@@ -97,6 +97,7 @@ from wattle.request_preparation import (
 from wattle.session import (
     SessionCompaction,
     SessionEntry,
+    SessionEvent,
     SessionRecord,
     SessionSettings,
     default_session_dir,
@@ -111,7 +112,9 @@ from wattle.session import (
 from wattle.settings import (
     DEFAULT_TUI_STATUSLINE_FIELDS,
     TuiSettings,
+    default_settings_path,
     load_settings,
+    settings_to_dict,
     update_settings,
 )
 from wattle.skills import (
@@ -2582,7 +2585,7 @@ class WattleApp:
         self._coerce_effort_for_current_model()
         self._prefetch_startup_quota()
 
-        if bool(getattr(args, "persist_session", False)) and self._auth_ready():
+        if bool(getattr(args, "persist_session", False)):
             resume_record = cast(
                 SessionRecord | None,
                 getattr(args, "_resume_session_record", None),
@@ -2593,17 +2596,10 @@ class WattleApp:
                 self._session_path = resume_path or default_session_path(resume_record.metadata.id)
                 self._resume_history_pending = bool(resume_record.messages)
                 self._compaction_state = _runtime_compaction_from_session(resume_record)
-            else:
-                self._session_record = new_session(
-                    provider=self.current_provider_name,
-                    model=self.current_model,
-                    system=self.system,
-                    max_tokens=self.max_tokens,
-                    thinking=self.thinking,
-                    effort=cast(Any, self.effort),
-                )
-                self._session_path = default_session_path(self._session_record.metadata.id)
-            self._persist_session()
+            elif self._auth_ready():
+                self._ensure_session_record()
+            if self._session_record is not None:
+                self._persist_session()
 
     def run(self, **_ignored_app_kwargs: Any) -> int:
         """Run until EOF, KeyboardInterrupt, /exit, or /quit."""
@@ -2688,11 +2684,9 @@ class WattleApp:
             getattr(self.args, "persist_session", False)
         ):
             return
-        if not self._auth_ready():
-            return
         self._session_record = new_session(
-            provider=self.current_provider_name,
-            model=self.current_model,
+            provider=self.current_provider_name or "(not authenticated)",
+            model=self.current_model or "(not authenticated)",
             system=self.system,
             max_tokens=self.max_tokens,
             thinking=self.thinking,
@@ -3760,6 +3754,7 @@ class WattleApp:
             self._configure_subagents(provider=self.provider)
             self._ensure_session_record()
             self._persist_user_settings(
+                source={"kind": "slash_command", "name": "/login", "provider": "openai_codex"},
                 provider=self.current_provider_name,
                 model=self.current_model,
             )
@@ -3797,6 +3792,7 @@ class WattleApp:
             self._configure_subagents(provider=self.provider)
             self._ensure_session_record()
             self._persist_user_settings(
+                source={"kind": "slash_command", "name": "/login", "provider": provider},
                 provider=self.current_provider_name,
                 model=self.current_model,
             )
@@ -3852,6 +3848,7 @@ class WattleApp:
         self._coerce_effort_for_current_model()
         self._refresh_model_dependent_context()
         self._persist_user_settings(
+            source={"kind": "slash_command", "name": "/model"},
             provider=self.current_provider_name,
             model=self.current_model,
             thinking=self.thinking,
@@ -3890,7 +3887,11 @@ class WattleApp:
                 ERROR_STYLE,
             )
             return
-        self._persist_user_settings(thinking=self.thinking, effort=self.effort)
+        self._persist_user_settings(
+            source={"kind": "slash_command", "name": "/effort"},
+            thinking=self.thinking,
+            effort=self.effort,
+        )
         self._persist_session()
         self._write_panel(
             "effort",
@@ -3926,7 +3927,11 @@ class WattleApp:
 
         self.thinking = next_effort is not None
         self.effort = next_effort
-        self._persist_user_settings(thinking=self.thinking, effort=self.effort)
+        self._persist_user_settings(
+            source={"kind": "tui_action", "name": "cycle_thinking_level"},
+            thinking=self.thinking,
+            effort=self.effort,
+        )
         self._persist_session()
 
     def _handle_compact(self, rest: str) -> None:
@@ -3979,13 +3984,49 @@ class WattleApp:
             STATUS_STYLE,
         )
 
-    def _persist_user_settings(self, **changes: Any) -> None:
+    def _persist_user_settings(
+        self,
+        *,
+        source: dict[str, Any] | None = None,
+        **changes: Any,
+    ) -> None:
         if "tui" not in changes:
             changes["tui"] = TuiSettings(
                 statusline=self._statusline_fields,
                 show_thinking=self.show_thinking_content,
             )
+        old_settings = self._settings
+        self._ensure_session_record()
         self._settings = update_settings(**changes)
+        self._record_settings_change_event(old_settings, self._settings, changes, source)
+
+    def _record_settings_change_event(
+        self,
+        old_settings: Any,
+        new_settings: Any,
+        requested_changes: dict[str, Any],
+        source: dict[str, Any] | None,
+    ) -> None:
+        if self._session_record is None:
+            return
+        old_data = settings_to_dict(old_settings)
+        new_data = settings_to_dict(new_settings)
+        changes: dict[str, dict[str, Any]] = {}
+        for key in requested_changes:
+            if key not in old_data or old_data[key] == new_data.get(key):
+                continue
+            changes[key] = {"old": old_data[key], "new": new_data.get(key)}
+        if not changes:
+            return
+        event = SessionEvent(
+            type="settings_change",
+            source=source or {"kind": "internal"},
+            data={"path": str(default_settings_path()), "changes": changes},
+        )
+        self._session_record = replace(
+            self._session_record,
+            events=[*self._session_record.events, event],
+        )
 
     def _print_help(self) -> None:
         self._write_line("Commands:")
@@ -4443,8 +4484,8 @@ class WattleApp:
         self._session_record = replace(
             self._session_record,
             settings=SessionSettings(
-                provider=self.current_provider_name,
-                model=self.current_model,
+                provider=self.current_provider_name or "(not authenticated)",
+                model=self.current_model or "(not authenticated)",
                 system=self.system,
                 max_tokens=self.max_tokens,
                 thinking=self.thinking,
@@ -4452,6 +4493,7 @@ class WattleApp:
             ),
             messages=list(self.messages),
             compactions=list(self._session_record.compactions),
+            events=list(self._session_record.events),
         )
         self._session_path = save_session(self._session_record, self._session_path)
 
