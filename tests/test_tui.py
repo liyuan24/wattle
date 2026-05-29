@@ -1427,7 +1427,22 @@ def test_tui_subagents_full_tool_set_includes_custom_tools(
     assert "echo" in config.full_tools_by_name
 
 
-def test_raw_model_command_refreshes_model_dependent_context() -> None:
+def test_raw_model_command_refreshes_model_dependent_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        tui,
+        "available_model_choices",
+        lambda: [
+            ModelChoice(
+                model="deepseek-v4-flash",
+                provider="openai_responses",
+                vendor="deepseek",
+                description="Fast DeepSeek model.",
+                supported_modalities=("text",),
+            )
+        ],
+    )
     app = tui.WattleApp(
         _make_args(model="gpt-5.5"),
         _ScriptedStreamProvider([]),
@@ -1441,6 +1456,20 @@ def test_raw_model_command_refreshes_model_dependent_context() -> None:
     assert "view_image" not in {spec["name"] for spec in app.tool_specs}
     assert app.system is not None
     assert "view_image" not in app.system
+
+
+def test_raw_model_command_rejects_unknown_model() -> None:
+    out = io.StringIO()
+    app = tui.WattleApp(
+        _make_args(model="gpt-5.5"),
+        _ScriptedStreamProvider([]),
+        out=out,
+    )
+
+    app._handle_model("vendor-model-name")
+
+    assert app.current_model == "gpt-5.5"
+    assert "Unknown model: vendor-model-name" in out.getvalue()
 
 
 def test_removed_model_subcommands_do_not_change_model() -> None:
@@ -2734,7 +2763,7 @@ def test_live_input_hint_enter_executes_selected_command() -> None:
 
     rendered = out.getvalue()
     assert "Commands:" in rendered
-    assert "/model [name|#]" in rendered
+    assert "/model [name]" in rendered
     assert app.messages == []
 
 
@@ -2791,7 +2820,7 @@ def test_live_prompt_shows_login_picker_for_login_command() -> None:
     assert "ChatGPT Plus/Pro Codex OAuth" in rendered
     assert tui.SELECTED_ROW_STYLE in rendered
     assert rendered.index(" > /login") < rendered.index("openai-codex")
-    assert "/login  authenticate OpenAI Codex with OAuth" not in rendered
+    assert "/login  authenticate a provider" not in rendered
 
 
 def test_live_prompt_shows_auto_compacting_status() -> None:
@@ -6164,7 +6193,7 @@ def test_terminal_model_selection_switches_provider(monkeypatch: pytest.MonkeyPa
 
     out, _app = _drive(
         anthropic_provider,
-        ["/model 1", "go", "/exit"],
+        ["/model gpt-5.5", "go", "/exit"],
         args=_make_args(provider="anthropic"),
     )
 
@@ -6172,6 +6201,28 @@ def test_terminal_model_selection_switches_provider(monkeypatch: pytest.MonkeyPa
     assert anthropic_provider.requests == []
     assert len(openai_provider.requests) == 1
     assert openai_provider.requests[0].model == "gpt-5.5"
+
+
+def test_terminal_model_selection_rejects_numbers(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = _ScriptedStreamProvider([])
+    monkeypatch.setattr(
+        tui,
+        "available_model_choices",
+        lambda: [
+            ModelChoice(
+                model="gpt-5.5",
+                provider="openai_responses",
+                vendor="openai",
+                description="Frontier model.",
+            )
+        ],
+    )
+
+    out, app = _drive(provider, ["/model 1", "/exit"])
+
+    assert "Model numbers are not supported. Use a model name." in out
+    assert app.current_model == "gpt-5.5"
+    assert provider.requests == []
 
 
 def test_terminal_login_xiaomi_token_plan_preserves_current_model(

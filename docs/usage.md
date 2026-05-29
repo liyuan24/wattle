@@ -69,8 +69,8 @@ Use slash commands in the TUI:
 Available commands:
 
 - `/help` - show commands and current settings.
-- `/login [openai-codex]` - authenticate the OpenAI Codex provider.
-- `/model [name|#]` - list or select models.
+- `/login` - authenticate a provider.
+- `/model [name]` - list or select models.
 - `/effort [level]` - show or set reasoning effort. Use `off` to disable.
 - `/session` or `/status` - show persistence and session status.
 - `/branch` - copy the current conversation into a new session branch.

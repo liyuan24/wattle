@@ -13,6 +13,7 @@ Provider names accepted by `--provider`:
 - `deepseek` - DeepSeek OpenAI-compatible API.
 - `kimi` - Moonshot Kimi OpenAI-compatible API.
 - `minimax` - MiniMax OpenAI-compatible API.
+- `xiaomi-token-plan-sgp` - Xiaomi Token Plan SGP OpenAI-compatible API.
 
 Example:
 
@@ -30,6 +31,7 @@ Wattle reads `~/.wattle/auth.json`.
   "deepseek": {"api_key": {"api_key": "sk-..."}},
   "kimi": {"api_key": {"api_key": "sk-..."}},
   "minimax": {"api_key": {"api_key": "sk-..."}},
+  "xiaomi-token-plan-sgp": {"api_key": {"api_key": "tp-..."}},
   "openai": {
     "oauth": {
       "access_token": "...",
@@ -45,15 +47,48 @@ Wattle reads `~/.wattle/auth.json`.
 
 OpenAI Codex uses the `openai.oauth` credential. `openai_responses` and `openai_completions` use `openai.api_key`.
 
+## Environment variables
+
+API-key providers can also read credentials from environment variables:
+
+| Provider | Vendor entry | Environment variable |
+| --- | --- | --- |
+| `openai_responses` | `openai.api_key` | `OPENAI_API_KEY` |
+| `openai_completions` | `openai.api_key` | `OPENAI_API_KEY` |
+| `anthropic` | `anthropic.api_key` | `ANTHROPIC_API_KEY` |
+| `deepseek` | `deepseek.api_key` | `DEEPSEEK_API_KEY` |
+| `kimi` | `kimi.api_key` | `KIMI_API_KEY` |
+| `minimax` | `minimax.api_key` | `MINIMAX_API_KEY` |
+| `xiaomi-token-plan-sgp` | `xiaomi-token-plan-sgp.api_key` | `XIAOMI_TOKEN_PLAN_SGP_API_KEY` |
+
+`openai_codex` uses OAuth and does not use `OPENAI_API_KEY`.
+
 ## Login
 
-The TUI supports OpenAI Codex OAuth:
+Use `/login` in the TUI and follow the provider instructions:
 
 ```text
 /login
 ```
 
-`/login openai-codex` is equivalent. API-key providers are configured by editing `~/.wattle/auth.json`.
+Wattle supports OAuth and supported API-key provider login from the TUI. It saves credentials to `~/.wattle/auth.json`. API-key providers can also use the environment variables above.
+
+## Priority rules
+
+Provider and model selection:
+
+- CLI flags win first: `--provider` and `--model`.
+- If no CLI flag is set, Wattle reads `provider` and `model` from `~/.wattle/settings.json`.
+- If only a catalog model is set, Wattle infers the matching provider.
+- If no usable setting is present, Wattle picks the first authenticated catalog model.
+- API-key environment variables do not choose the provider or model; they only make that provider authenticated.
+
+Credential lookup:
+
+- `openai_codex` requires `openai.oauth` in `~/.wattle/auth.json`.
+- API-key providers prefer a valid `api_key` entry in `~/.wattle/auth.json`.
+- If the auth file is missing, the vendor entry is missing, or the vendor has no `api_key` method object, Wattle checks the matching environment variable.
+- For generic OpenAI credentials, `openai.oauth` takes priority over `openai.api_key`, but `openai_responses` and `openai_completions` explicitly require `openai.api_key` or `OPENAI_API_KEY`.
 
 ## Model catalog
 
@@ -65,25 +100,9 @@ Wattle ships with model choices for:
 - Kimi: `kimi-k2.6`, `kimi-k2.5`
 - MiniMax: `MiniMax-M2.7`, `MiniMax-M2.7-highspeed`
 
-Use `/model` to list authenticated choices:
-
-```text
-/model
-/model 2
-/model gpt-5.4
-```
+Use `/model` to list and select authenticated model choices.
 
 Wattle automatically switches providers when a catalog model belongs to a different provider.
-
-## Custom model ids
-
-You can set any model id:
-
-```text
-/model vendor-model-name
-```
-
-When the model id is not in Wattle's catalog, Wattle keeps the current provider and forwards the model string as-is.
 
 ## Reasoning controls
 
@@ -99,5 +118,7 @@ Or inside the TUI:
 /effort low|medium|high|xhigh|max|off
 /effort off
 ```
+
+You can also press Shift+Tab in the TUI to cycle through the available reasoning levels.
 
 Supported effort values are `low`, `medium`, `high`, `xhigh`, and `max`. Providers map or clamp these values according to their API capabilities.

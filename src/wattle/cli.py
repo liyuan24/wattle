@@ -397,7 +397,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--model",
         default=None,
         help=(
-            "Model id forwarded to the provider (default: settings.json model, "
+            "Catalog model id to use (default: settings.json model, "
             "otherwise the first model of the first authenticated provider)."
         ),
     )
@@ -446,7 +446,10 @@ def _apply_settings_defaults(
         if provider_default is not None:
             args.model = provider_default.model
     if not model_explicit and args.model is None:
-        if settings.model is not None:
+        if (
+            settings.model is not None
+            and globals()["MODEL_CHOICES_BY_MODEL"].get(settings.model) is not None
+        ):
             args.model = settings.model
         else:
             default_choice = globals()["first_available_model_choice"]() or globals()[
@@ -479,6 +482,11 @@ def _apply_settings_defaults(
     args.statusline_fields = settings.tui.statusline_fields
     args.statusline = bool(args.statusline_fields)
     args.compaction_keep_recent_tokens = settings.compaction_keep_recent_tokens
+
+
+def _validate_catalog_model(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
+    if globals()["MODEL_CHOICES_BY_MODEL"].get(args.model) is None:
+        parser.error(f"unknown model: {args.model}")
 
 
 def _default_provider_for_model(model: str) -> str | None:
@@ -531,6 +539,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("positional prompt cannot be used with -p/--print")
     if args.persist and args.print_prompt is None:
         parser.error("--persist can only be used with -p/--print")
+    _validate_catalog_model(args, parser)
     if args.effort is not None:
         args.thinking = True
     if args.print_prompt is not None:

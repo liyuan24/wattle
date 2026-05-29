@@ -49,8 +49,8 @@ def test_apply_settings_defaults_when_cli_flags_are_absent(
         args,
         [],
         WattleSettings(
-            provider="openai_responses",
-            model="custom-platform-model",
+            provider="openai_codex",
+            model="gpt-5.4",
             max_tokens=1234,
             thinking=True,
             effort="high",
@@ -61,8 +61,8 @@ def test_apply_settings_defaults_when_cli_flags_are_absent(
         ),
     )
 
-    assert args.provider == "openai_responses"
-    assert args.model == "custom-platform-model"
+    assert args.provider == "openai_codex"
+    assert args.model == "gpt-5.4"
     assert args.max_tokens == 1234
     assert args.thinking is True
     assert args.effort == "high"
@@ -89,9 +89,21 @@ def test_apply_settings_defaults_prefers_catalog_provider_for_known_model(
     assert args.model == "gpt-5.5"
 
 
-def test_apply_settings_defaults_uses_saved_provider_for_unknown_saved_model() -> None:
+def test_apply_settings_defaults_ignores_unknown_saved_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     parser = cli._build_parser()
     args = parser.parse_args([])
+    monkeypatch.setattr(
+        cli,
+        "first_available_model_choice",
+        lambda: models.ModelChoice(
+            model="mimo-v2.5-pro",
+            provider="xiaomi-token-plan-sgp",
+            vendor="xiaomi-token-plan-sgp",
+            description="Xiaomi MiMo V2.5 Pro model.",
+        ),
+    )
 
     cli._apply_settings_defaults(
         args,
@@ -99,8 +111,8 @@ def test_apply_settings_defaults_uses_saved_provider_for_unknown_saved_model() -
         WattleSettings(provider="openai_responses", model="custom-platform-model"),
     )
 
-    assert args.provider == "openai_responses"
-    assert args.model == "custom-platform-model"
+    assert args.provider == "xiaomi-token-plan-sgp"
+    assert args.model == "mimo-v2.5-pro"
 
 
 def test_apply_settings_defaults_falls_back_to_first_available_model(
@@ -211,6 +223,15 @@ def test_build_parser_print_mode_accepts_prompt_and_shared_flags() -> None:
     assert args.effort == "high"
     assert args.permission_mode == cli.PermissionMode.YOLO
     assert args.persist is True
+
+
+def test_main_rejects_unknown_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli, "first_available_model_choice", lambda: None)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["--model", "vendor-model-name", "-p", "hello"])
+
+    assert exc.value.code == 2
 
 
 def test_build_parser_resume_accepts_optional_session() -> None:

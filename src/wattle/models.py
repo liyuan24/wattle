@@ -328,13 +328,7 @@ def model_supports_modality(model: str, modality: InputModality) -> bool:
 
 
 def find_model_choice(selector: str, choices: list[ModelChoice]) -> ModelChoice | None:
-    """Resolve a one-based numeric selector or model id against ``choices``."""
-    if selector.isdecimal():
-        index = int(selector) - 1
-        if 0 <= index < len(choices):
-            return choices[index]
-        return None
-
+    """Resolve a model id against ``choices``."""
     return next((choice for choice in choices if choice.model == selector), None)
 
 
@@ -343,7 +337,7 @@ def render_model_choices(
     *,
     current_model: str,
 ) -> str:
-    """Render numbered model choices for slash-command output."""
+    """Render model choices for slash-command output."""
     if not choices:
         return "No models available. Add provider auth to ~/.wattle/auth.json."
 
@@ -352,9 +346,9 @@ def render_model_choices(
         for choice in choices
     )
     lines = ["Select Model", ""]
-    for idx, choice in enumerate(choices, start=1):
+    for choice in choices:
         label = choice.model
         if choice.model == current_model:
             label += " (current)"
-        lines.append(f"{idx:>2}. {label:<{width}}  {choice.description}")
+        lines.append(f"  {label:<{width}}  {choice.description}")
     return "\n".join(lines)

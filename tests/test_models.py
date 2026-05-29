@@ -165,3 +165,34 @@ def test_render_model_choices_empty_mentions_generic_provider_auth() -> None:
     assert models.render_model_choices([], current_model="x") == (
         "No models available. Add provider auth to ~/.wattle/auth.json."
     )
+
+
+def test_find_model_choice_uses_model_name_not_number() -> None:
+    choices = [
+        models.ModelChoice(
+            model="gpt-5.5",
+            provider="openai_codex",
+            vendor="openai",
+            description="Frontier model.",
+        )
+    ]
+
+    assert models.find_model_choice("gpt-5.5", choices) == choices[0]
+    assert models.find_model_choice("1", choices) is None
+
+
+def test_render_model_choices_does_not_number_rows() -> None:
+    rendered = models.render_model_choices(
+        [
+            models.ModelChoice(
+                model="gpt-5.5",
+                provider="openai_codex",
+                vendor="openai",
+                description="Frontier model.",
+            )
+        ],
+        current_model="gpt-5.5",
+    )
+
+    assert "1." not in rendered
+    assert "gpt-5.5 (current)" in rendered

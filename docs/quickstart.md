@@ -19,15 +19,15 @@ wattle
 
 ## Authenticate
 
-Wattle reads credentials from `~/.wattle/auth.json`. The fastest path for the default provider is the built-in OpenAI Codex OAuth flow:
+Wattle reads credentials from `~/.wattle/auth.json` or provider API-key environment variables. Use the TUI login flow and follow the provider instructions:
 
 ```text
 /login
 ```
 
-The TUI opens or prints an authorization URL and saves the resulting credential under the OpenAI entry in `~/.wattle/auth.json`.
+The TUI handles supported OAuth and API-key provider login, then saves the credential to `~/.wattle/auth.json`.
 
-For API-key providers, create the auth file directly:
+You can also set an API-key environment variable, such as `ANTHROPIC_API_KEY`, or edit the auth file directly:
 
 ```json
 {
@@ -35,6 +35,7 @@ For API-key providers, create the auth file directly:
   "deepseek": {"api_key": {"api_key": "sk-..."}},
   "kimi": {"api_key": {"api_key": "sk-..."}},
   "minimax": {"api_key": {"api_key": "sk-..."}},
+  "xiaomi-token-plan-sgp": {"api_key": {"api_key": "tp-..."}},
   "openai": {"oauth": {"access_token": "...", "refresh_token": "..."}}
 }
 ```
@@ -85,7 +86,7 @@ wattle --provider kimi --model kimi-k2.6
 wattle --provider minimax --model MiniMax-M2.7
 ```
 
-Inside the TUI, use `/model` to list authenticated model choices and `/model NAME_OR_NUMBER` to switch models.
+Inside the TUI, use `/model` to list authenticated model choices and `/model MODEL_NAME` to switch models.
 
 ## Give Wattle project instructions
 

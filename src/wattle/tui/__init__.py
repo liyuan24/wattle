@@ -152,7 +152,7 @@ SLASH_COMMAND_HINTS: tuple[tuple[str, str], ...] = (
     ("/effort", "choose reasoning effort"),
     ("/exit", "exit the TUI"),
     ("/help", "show commands and settings"),
-    ("/login", "authenticate OpenAI Codex with OAuth"),
+    ("/login", "authenticate a provider"),
     ("/model", "choose what model to use"),
     ("/queue", "while streaming, send after the assistant turn completes"),
     ("/quit", "exit the TUI"),
@@ -3767,20 +3767,21 @@ class WattleApp:
             self._write(render_model_choices(choices, current_model=self.current_model))
             self._write_line("")
             return
+        if rest.isdecimal():
+            self._write_panel(
+                "error",
+                "Model numbers are not supported. Use a model name.",
+                ERROR_STYLE,
+            )
+            return
 
         choice = find_model_choice(rest, choices)
         if choice is None:
-            self.current_model = rest
-            self._coerce_effort_for_current_model()
-            self._refresh_model_dependent_context()
-            self._write_panel("model", f"Model set to {self.current_model!r}.", STATUS_STYLE)
-            self._persist_user_settings(
-                provider=self.current_provider_name,
-                model=self.current_model,
-                thinking=self.thinking,
-                effort=self.effort,
+            self._write_panel(
+                "error",
+                f"Unknown model: {rest}. Use /model to list authenticated choices.",
+                ERROR_STYLE,
             )
-            self._persist_session()
             return
         self._apply_model_choice(choice)
 
@@ -3937,8 +3938,8 @@ class WattleApp:
         self._write_line("  /exit, /quit       Exit Wattle.")
         self._write_line("  /clear             Reset conversation history.")
         self._write_line("  /help              Show this message.")
-        self._write_line("  /login [openai-codex] Authenticate OpenAI Codex.")
-        self._write_line("  /model [name|#]    List or switch models.")
+        self._write_line("  /login            Authenticate a provider.")
+        self._write_line("  /model [name]      List or switch models.")
         self._write_line("  /resume <session-id> Switch to a saved session.")
         self._write_line("  /session, /status  Show persistence and session status.")
         self._write_line("")
