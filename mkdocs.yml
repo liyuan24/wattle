@@ -9,6 +9,8 @@ site_dir: site
 
 theme:
   name: material
+  logo: assets/wattle_logo.png
+  favicon: assets/wattle_favicon.png
   palette:
     scheme: slate
     primary: green
