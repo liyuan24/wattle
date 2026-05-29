@@ -2515,7 +2515,7 @@ def test_welcome_card_includes_version_after_title() -> None:
     app._write_welcome_card()
 
     rendered = out.getvalue()
-    assert f"Wattle Agent {get_wattle_version()}" in rendered
+    assert f"Wattle Agent v{get_wattle_version()}" in rendered
 
 
 def test_welcome_card_keeps_compact_width() -> None:

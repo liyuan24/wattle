@@ -4445,7 +4445,7 @@ class WattleApp:
             ("model:", self.current_model),
             ("directory:", _display_cwd()),
         ]
-        title = f"{WELCOME_TITLE} {get_wattle_version()}"
+        title = f"{WELCOME_TITLE} v{get_wattle_version()}"
         max_text_width = max(0, self._terminal_width() - 5)
         visible_title = _truncate_cell_text(title, max_text_width)
         visible_logo_lines = tuple(
