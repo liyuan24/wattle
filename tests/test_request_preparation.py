@@ -140,3 +140,35 @@ def test_prepare_reads_provider_context_tokens_lazily() -> None:
     assert "initial summary" in prepared_before_pressure.request.messages[0].content[0].text
     assert "updated summary" in prepared_after_pressure.request.messages[0].content[0].text
     assert prepared_after_pressure.request.messages[-1] == messages[-1]
+
+
+def test_prepare_prefers_provider_context_tokens_from_message_history() -> None:
+    provider = StubProvider(
+        [
+            CompletionResponse(content=[TextBlock(text="history summary")], stop_reason="end_turn"),
+        ]
+    )
+    messages = [
+        Message(
+            role="assistant",
+            content=[TextBlock(text="previous answer")],
+            input_tokens=800,
+        ),
+        Message(role="user", content=[TextBlock(text="next request")]),
+    ]
+    preparer = RequestPreparer(
+        provider=provider,
+        model="test-model",
+        system=None,
+        tools=[],
+        max_tokens=10,
+        context_window=1_000,
+        provider_context_tokens=lambda: None,
+    )
+
+    prepared = asyncio.run(preparer.aprepare(messages))
+
+    assert preparer.state is not None
+    assert preparer.state.summary == "history summary"
+    assert "history summary" in prepared.request.messages[0].content[0].text
+    assert prepared.request.messages[-1] == messages[-1]

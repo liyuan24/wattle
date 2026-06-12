@@ -147,6 +147,28 @@ def test_provider_usage_below_threshold_ignores_large_output_cap() -> None:
     assert provider.reset_count == 0
 
 
+def test_provider_usage_below_threshold_wins_over_large_estimate() -> None:
+    provider = _ScriptedProvider([])
+    messages = [_message(i, "x" * 80) for i in range(50)]
+
+    request_messages, state = _compact(
+        provider=provider,
+        model="test-model",
+        system=None,
+        messages=messages,
+        tools=[],
+        max_tokens=10,
+        context_window=1_000,
+        state=None,
+        provider_context_tokens=799,
+    )
+
+    assert request_messages == messages
+    assert state is None
+    assert provider.requests == []
+    assert provider.reset_count == 0
+
+
 def test_compaction_does_not_mutate_saved_history() -> None:
     provider = _ScriptedProvider(
         [

@@ -5839,7 +5839,7 @@ def test_terminal_compaction_uses_projection_but_persists_full_history(
     assert saved.compactions[0].created_after_message_index == 25
 
 
-def test_terminal_compaction_retriggers_when_projected_history_crosses_trigger_ratio(
+def test_terminal_compaction_retriggers_when_provider_usage_crosses_trigger_ratio(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(tui, "_context_window_for_model", lambda _model: 9_500)
@@ -5851,6 +5851,7 @@ def test_terminal_compaction_retriggers_when_projected_history_crosses_trigger_r
     first_response = CompletionResponse(
         content=[TextBlock(text="first answer")],
         stop_reason="end_turn",
+        usage={"input_tokens": 8_000},
     )
     refresh_summary_response = CompletionResponse(
         content=[TextBlock(text="refreshed summary")],

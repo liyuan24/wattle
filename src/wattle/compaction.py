@@ -63,18 +63,19 @@ async def amaybe_compact_messages(
 ) -> tuple[list[Message], RuntimeCompaction | None]:
     """Return request messages, compacting in memory if needed."""
 
+    estimated_tokens = estimate_request_context_tokens(
+        system=system,
+        messages=messages,
+        tools=tools,
+    )
     provider_pressure = _provider_context_pressure_exceeds_compaction_threshold(
         provider_context_tokens=provider_context_tokens,
         context_window=context_window,
     )
-    should_start = state is None and (
-        _should_start_compaction(
-            system=system,
-            messages=messages,
-            tools=tools,
-            context_window=context_window,
-        )
-        or provider_pressure
+    should_start = state is None and _context_pressure_exceeds_compaction_threshold(
+        estimated_tokens=estimated_tokens,
+        provider_context_tokens=provider_context_tokens,
+        context_window=context_window,
     )
     should_start = should_start or (force and state is None)
     if not force and not should_start and state is None:
@@ -91,12 +92,12 @@ async def amaybe_compact_messages(
             messages=projected_messages,
             tools=tools,
         )
-        estimated_pressure = _context_pressure_exceeds_compaction_threshold(
+        context_pressure = _context_pressure_exceeds_compaction_threshold(
             estimated_tokens=projected_tokens,
-            provider_context_tokens=None,
+            provider_context_tokens=provider_context_tokens,
             context_window=context_window,
         )
-        if not estimated_pressure and not provider_pressure:
+        if not context_pressure and not provider_pressure:
             return projected_messages, state
         if provider_pressure:
             first_end, last_start = _provider_pressure_compaction_bounds(messages)
@@ -224,21 +225,6 @@ def _compaction_bounds(
     return first_end, len(messages)
 
 
-def _should_start_compaction(
-    *,
-    system: str | None,
-    messages: list[Message],
-    tools: list[dict[str, object]],
-    context_window: int | None,
-) -> bool:
-    estimate = estimate_request_context_tokens(system=system, messages=messages, tools=tools)
-    return _context_pressure_exceeds_compaction_threshold(
-        estimated_tokens=estimate,
-        provider_context_tokens=None,
-        context_window=context_window,
-    )
-
-
 def _context_pressure_exceeds_compaction_threshold(
     *,
     estimated_tokens: int,
@@ -248,10 +234,9 @@ def _context_pressure_exceeds_compaction_threshold(
     if context_window is None or context_window <= 0:
         return False
     threshold = int(context_window * COMPACTION_TRIGGER_RATIO)
-    pressures = [estimated_tokens]
     if provider_context_tokens is not None and provider_context_tokens > 0:
-        pressures.append(provider_context_tokens)
-    return max(pressures) >= threshold
+        return provider_context_tokens >= threshold
+    return estimated_tokens >= threshold
 
 
 def _provider_context_pressure_exceeds_compaction_threshold(

@@ -4,7 +4,7 @@ Wattle keeps the complete session transcript on disk while building a compacted 
 
 ## Automatic compaction
 
-Wattle tracks provider context usage and model context windows from the model catalog. When the active request is too large, Wattle summarizes the middle of the conversation and keeps recent context intact.
+Wattle tracks provider-reported input/context usage and model context windows from the model catalog. When provider usage is unavailable, Wattle falls back to a local request-size estimate. When the active request is too large, Wattle summarizes the middle of the conversation and keeps recent context intact.
 
 The default recent-context budget is controlled by:
 
@@ -48,4 +48,4 @@ After compaction, the next normal model call receives:
 
 The model does not receive the full old transcript in that call. It receives the summary plus the recent tail. Wattle can still save and resume the complete session because the durable transcript remains on disk.
 
-Automatic compaction starts when the estimated request size, plus the requested output budget, approaches the model context window. Manual `/compact` forces the same process immediately, optionally with extra instructions for what the summary should preserve.
+Automatic compaction starts when provider-reported input/context usage approaches the model context window. If a provider does not report usage, Wattle uses a local request-size estimate instead. The requested output budget is not part of the trigger. Manual `/compact` forces the same process immediately, optionally with extra instructions for what the summary should preserve.

@@ -104,7 +104,10 @@ class RequestPreparer:
         )
         self.on_stream_retry = on_stream_retry
 
-    def _provider_context_tokens(self) -> int | None:
+    def _provider_context_tokens(self, messages: list[Message]) -> int | None:
+        history_tokens = _latest_provider_context_tokens(messages)
+        if history_tokens is not None:
+            return history_tokens
         if callable(self.provider_context_tokens):
             return self.provider_context_tokens()
         return self.provider_context_tokens
@@ -141,7 +144,7 @@ class RequestPreparer:
             force=force_compaction,
             keep_recent_tokens=self.compaction_keep_recent_tokens,
             compaction_instructions=compaction_instructions,
-            provider_context_tokens=self._provider_context_tokens(),
+            provider_context_tokens=self._provider_context_tokens(projected_input_messages),
         )
         self.state = state
         compacted = state is not None
@@ -197,6 +200,17 @@ def project_messages_for_model_modalities(
     if model_supports_modality(model, "image"):
         return messages
     return [_replace_images_with_text(message, model=model) for message in messages]
+
+
+def _latest_provider_context_tokens(messages: list[Message]) -> int | None:
+    return next(
+        (
+            message.input_tokens
+            for message in reversed(messages)
+            if message.role == "assistant" and message.input_tokens > 0
+        ),
+        None,
+    )
 
 
 def _replace_images_with_text(message: Message, *, model: str) -> Message:
