@@ -347,6 +347,27 @@ class IncompleteStreamError(RuntimeError):
     """Raised when a provider stream closes before its terminal completion event."""
 
 
+class MalformedToolCallError(RuntimeError):
+    """Raised when a provider emits a tool call with invalid JSON arguments."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        tool_name: str,
+        tool_id: str,
+        raw_arguments: str,
+        finish_reason: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.message = message
+        self.tool_name = tool_name
+        self.tool_id = tool_id
+        self.raw_arguments = raw_arguments
+        self.finish_reason = finish_reason
+        self.was_truncated = finish_reason == "length"
+
+
 class ProviderError(RuntimeError):
     """Normalized non-retryable provider failure."""
 

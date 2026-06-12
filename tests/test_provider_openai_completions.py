@@ -22,6 +22,7 @@ from wattle.providers import (
     CompletionRequest,
     ImageBlock,
     Message,
+    MalformedToolCallError,
     OpenAICompletionsProvider,
     ProviderQuotaError,
     StreamComplete,
@@ -537,6 +538,36 @@ def test_response_with_only_tool_calls_no_text() -> None:
     assert isinstance(result.content[0], ToolUseBlock)
 
 
+def test_response_malformed_tool_arguments_raise_structured_error() -> None:
+    tool_call = SimpleNamespace(
+        id="call_bad",
+        function=SimpleNamespace(name="bash", arguments='{"command": "unterminated'),
+    )
+    response = _fake_response(
+        content=None,
+        tool_calls=[tool_call],
+        finish_reason="tool_calls",
+    )
+    provider = OpenAICompletionsProvider(async_client=_make_client(response))
+
+    with pytest.raises(MalformedToolCallError) as exc_info:
+        _complete(
+            provider,
+            CompletionRequest(
+                model="gpt-4o-mini",
+                max_tokens=64,
+                messages=[Message(role="user", content=[TextBlock(text="hi")])],
+            ),
+        )
+
+    error = exc_info.value
+    assert error.tool_name == "bash"
+    assert error.tool_id == "call_bad"
+    assert error.raw_arguments == '{"command": "unterminated'
+    assert error.finish_reason == "tool_calls"
+    assert error.was_truncated is False
+
+
 # ---------------------------------------------------------------------------
 # Finish reason mapping
 # ---------------------------------------------------------------------------
@@ -981,6 +1012,33 @@ def test_stream_parallel_tool_calls_track_per_index_independently() -> None:
     inputs = {b.id: b.input for b in blocks}
     assert inputs["call_a"] == {"cmd": "ls"}
     assert inputs["call_b"] == {"cmd": "pwd"}
+
+
+def test_stream_malformed_tool_arguments_raise_structured_error() -> None:
+    chunks = [
+        _tool_chunk(index=0, id="call_bad", name="bash"),
+        _tool_chunk(index=0, arguments='{"command": "unterminated'),
+        _tool_chunk(index=0, finish_reason="length"),
+        _final_usage_chunk(prompt_tokens=3, completion_tokens=12),
+    ]
+    provider = OpenAICompletionsProvider(async_client=_stream_client(chunks))
+
+    with pytest.raises(MalformedToolCallError) as exc_info:
+        _stream(
+            provider,
+            CompletionRequest(
+                model="gpt-4o-mini",
+                max_tokens=64,
+                messages=[Message(role="user", content=[TextBlock(text="run")])],
+            ),
+        )
+
+    error = exc_info.value
+    assert error.tool_name == "bash"
+    assert error.tool_id == "call_bad"
+    assert error.raw_arguments == '{"command": "unterminated'
+    assert error.finish_reason == "length"
+    assert error.was_truncated is True
 
 
 def test_stream_finish_reason_length_maps_to_max_tokens() -> None:

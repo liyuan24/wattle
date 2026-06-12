@@ -13,6 +13,7 @@ from wattle.providers import (
     CompletionRequest,
     CompletionResponse,
     IncompleteStreamError,
+    MalformedToolCallError,
     Message,
     Provider,
     StreamComplete,
@@ -308,6 +309,103 @@ def test_loop_unknown_tool_is_an_error_block() -> None:
     assert result.stop_reason == "end_turn"
 
 
+def test_loop_repairs_malformed_tool_call_once() -> None:
+    bash = BashTool()
+
+    class RepairProvider(Provider):
+        def __init__(self) -> None:
+            self.requests: list[CompletionRequest] = []
+
+        async def acomplete(self, request: CompletionRequest) -> CompletionResponse:
+            self.requests.append(request)
+            if len(self.requests) == 1:
+                raise MalformedToolCallError(
+                    "bad tool args",
+                    tool_name="bash",
+                    tool_id="call_bad",
+                    raw_arguments='{"command": "unterminated',
+                    finish_reason="length",
+                )
+            if len(self.requests) == 2:
+                return CompletionResponse(
+                    content=[
+                        ToolUseBlock(
+                            id="call_1",
+                            name="bash",
+                            input={"command": "echo repaired"},
+                        )
+                    ],
+                    stop_reason="tool_use",
+                )
+            return CompletionResponse(
+                content=[TextBlock(text="done")],
+                stop_reason="end_turn",
+            )
+
+        async def astream(
+            self, request: CompletionRequest
+        ) -> AsyncIterator[StreamEvent]:  # pragma: no cover
+            raise NotImplementedError
+
+    provider = RepairProvider()
+
+    result = run(
+        provider=provider,
+        tools_by_name={bash.name: bash},
+        system=None,
+        user_input="run a command",
+        model="stub-model",
+    )
+
+    assert result.content == [TextBlock(text="done")]
+    assert len(provider.requests) == 3
+    repair_request = provider.requests[1]
+    assert [message.role for message in repair_request.messages] == ["user", "user"]
+    repair_block = repair_request.messages[-1].content[0]
+    assert isinstance(repair_block, TextBlock)
+    assert "malformed or truncated" in repair_block.text
+    assert "hit the output limit" in repair_block.text
+    assert "Re-issue exactly one tool call" in repair_block.text
+
+
+def test_loop_repeated_malformed_tool_call_fails_cleanly() -> None:
+    class BadProvider(Provider):
+        def __init__(self) -> None:
+            self.requests: list[CompletionRequest] = []
+
+        async def acomplete(self, request: CompletionRequest) -> CompletionResponse:
+            self.requests.append(request)
+            raise MalformedToolCallError(
+                "bad tool args",
+                tool_name="bash",
+                tool_id="call_bad",
+                raw_arguments='{"command": "unterminated',
+                finish_reason="tool_calls",
+            )
+
+        async def astream(
+            self, request: CompletionRequest
+        ) -> AsyncIterator[StreamEvent]:  # pragma: no cover
+            raise NotImplementedError
+
+    provider = BadProvider()
+
+    try:
+        run(
+            provider=provider,
+            tools_by_name={},
+            system=None,
+            user_input="run a command",
+            model="stub-model",
+        )
+    except MalformedToolCallError as exc:
+        assert exc.tool_name == "bash"
+    else:
+        raise AssertionError("expected repeated malformed tool call to fail")
+
+    assert len(provider.requests) == 2
+
+
 def test_loop_yolo_permission_gate_allows_bash_without_changing_system_prompt() -> None:
     bash = BashTool()
     provider = StubProvider(
@@ -540,6 +638,61 @@ def test_run_streaming_retries_incomplete_stream_without_saving_partial(
         "partial",
         "final",
     ]
+
+
+def test_run_streaming_repairs_malformed_tool_call_once() -> None:
+    class RepairStreamProvider(Provider):
+        def __init__(self) -> None:
+            self.requests: list[CompletionRequest] = []
+
+        async def acomplete(
+            self, request: CompletionRequest
+        ) -> CompletionResponse:  # pragma: no cover
+            raise NotImplementedError
+
+        async def astream(self, request: CompletionRequest) -> AsyncIterator[StreamEvent]:
+            self.requests.append(request)
+            if len(self.requests) == 1:
+                yield ToolUseDelta(id="call_bad", name="bash", partial_json=None)
+                yield ToolUseDelta(
+                    id="call_bad",
+                    name=None,
+                    partial_json='{"command": "unterminated',
+                )
+                raise MalformedToolCallError(
+                    "bad tool args",
+                    tool_name="bash",
+                    tool_id="call_bad",
+                    raw_arguments='{"command": "unterminated',
+                    finish_reason="length",
+                )
+            response = CompletionResponse(
+                content=[TextBlock(text="recovered")],
+                stop_reason="end_turn",
+            )
+            yield TextDelta(text="recovered")
+            yield StreamComplete(response=response)
+
+    provider = RepairStreamProvider()
+    captured: list[StreamEvent] = []
+
+    result = run_streaming(
+        provider=provider,
+        tools_by_name={},
+        system=None,
+        user_input="hello",
+        model="stub-model",
+        on_event=captured.append,
+    )
+
+    assert result.content == [TextBlock(text="recovered")]
+    assert len(provider.requests) == 2
+    repair_block = provider.requests[1].messages[-1].content[0]
+    assert isinstance(repair_block, TextBlock)
+    assert "malformed or truncated" in repair_block.text
+    assert "Re-issue exactly one tool call" in repair_block.text
+    assert any(isinstance(event, ToolUseDelta) for event in captured)
+    assert any(isinstance(event, StreamComplete) for event in captured)
 
 
 def test_run_streaming_retries_transient_provider_error(monkeypatch) -> None:

@@ -26,6 +26,7 @@ from .providers.base import (
     CompletionResponse,
     ContentBlock,
     ImageBlock,
+    MalformedToolCallError,
     Message,
     Provider,
     StreamComplete,
@@ -41,6 +42,8 @@ from .request_preparation import (
 )
 from .tool_events import ToolRunEvent
 from .tools.base import Tool
+
+MAX_MALFORMED_TOOL_CALL_REPAIRS = 1
 
 
 def run(
@@ -137,9 +140,18 @@ async def arun(
         context_window=context_window,
     )
 
+    malformed_tool_call_repairs = 0
     for _ in itertools.count():
-        response = await acomplete_with_recovery(preparer, messages)
+        try:
+            response = await acomplete_with_recovery(preparer, messages)
+        except MalformedToolCallError as exc:
+            if malformed_tool_call_repairs >= MAX_MALFORMED_TOOL_CALL_REPAIRS:
+                raise
+            malformed_tool_call_repairs += 1
+            messages.append(_malformed_tool_call_repair_message(exc))
+            continue
         messages.append(_assistant_message(response))
+        malformed_tool_call_repairs = 0
 
         if response.stop_reason != "tool_use":
             monitor_blocks = _drain_monitor_event_blocks(runtime)
@@ -261,18 +273,27 @@ async def arun_streaming(
         context_window=context_window,
     )
 
+    malformed_tool_call_repairs = 0
     for _ in itertools.count():
         response = None
-        async for event in astream_with_recovery(preparer, messages):
-            on_event(event)
-            if isinstance(event, StreamComplete):
-                response = event.response
+        try:
+            async for event in astream_with_recovery(preparer, messages):
+                on_event(event)
+                if isinstance(event, StreamComplete):
+                    response = event.response
+        except MalformedToolCallError as exc:
+            if malformed_tool_call_repairs >= MAX_MALFORMED_TOOL_CALL_REPAIRS:
+                raise
+            malformed_tool_call_repairs += 1
+            messages.append(_malformed_tool_call_repair_message(exc))
+            continue
         if response is None:
             raise RuntimeError(
                 "Provider stream ended without a StreamComplete event."
             )
 
         messages.append(_assistant_message(response))
+        malformed_tool_call_repairs = 0
 
         if response.stop_reason != "tool_use":
             monitor_blocks = _drain_monitor_event_blocks(runtime)
@@ -462,6 +483,38 @@ def _assistant_message(response: CompletionResponse) -> Message:
         output_tokens=response.usage.get("output_tokens", 0),
         cached_tokens=_cached_tokens_from_usage(response.usage),
     )
+
+
+def _malformed_tool_call_repair_message(error: MalformedToolCallError) -> Message:
+    raw_arguments = _clip_text(error.raw_arguments, max_chars=1200)
+    truncated_text = (
+        " The provider reported that the response stopped because it hit the output limit."
+        if error.was_truncated
+        else ""
+    )
+    return Message(
+        role="user",
+        content=[
+            TextBlock(
+                text=(
+                    "Your previous tool call could not be executed because its JSON "
+                    f"arguments for `{error.tool_name}` were malformed or truncated."
+                    f"{truncated_text}\n\n"
+                    "Malformed arguments snippet:\n"
+                    f"{raw_arguments}\n\n"
+                    "Re-issue exactly one tool call now. Keep the JSON arguments "
+                    "minimal and valid. Do not include explanatory text."
+                )
+            )
+        ],
+    )
+
+
+def _clip_text(text: str, *, max_chars: int) -> str:
+    if len(text) <= max_chars:
+        return text
+    omitted = len(text) - max_chars
+    return f"{text[:max_chars]}\n[... {omitted} more characters omitted]"
 
 
 def _cached_tokens_from_usage(usage: Mapping[str, int]) -> int:

@@ -72,6 +72,7 @@ from .base import (
     CompletionResponse,
     ContentBlock,
     ImageBlock,
+    MalformedToolCallError,
     Message,
     Provider,
     StopReason,
@@ -163,7 +164,12 @@ class OpenAICompletionsProvider(Provider):
                 ToolUseBlock(
                     id=tool_call.id,
                     name=tool_call.function.name,
-                    input=json.loads(tool_call.function.arguments),
+                    input=_parse_tool_arguments(
+                        tool_name=tool_call.function.name,
+                        tool_id=tool_call.id,
+                        raw_arguments=tool_call.function.arguments,
+                        finish_reason=choice.finish_reason,
+                    ),
                 )
             )
 
@@ -287,7 +293,12 @@ class OpenAICompletionsProvider(Provider):
                 ToolUseBlock(
                     id=entry["id"],
                     name=entry["name"],
-                    input=json.loads(entry["arguments"]) if entry["arguments"] else {},
+                    input=_parse_tool_arguments(
+                        tool_name=entry["name"],
+                        tool_id=entry["id"],
+                        raw_arguments=entry["arguments"],
+                        finish_reason=finish_reason,
+                    ),
                 )
             )
 
@@ -354,6 +365,39 @@ async def _aiter(iterable: Any) -> AsyncIterator[Any]:
         return
     for item in iterable:
         yield item
+
+
+def _parse_tool_arguments(
+    *,
+    tool_name: str,
+    tool_id: str,
+    raw_arguments: str | None,
+    finish_reason: str | None,
+) -> dict[str, Any]:
+    if not raw_arguments:
+        return {}
+    try:
+        parsed = json.loads(raw_arguments)
+    except json.JSONDecodeError as exc:
+        raise MalformedToolCallError(
+            (
+                f"Provider emitted invalid JSON arguments for tool {tool_name!r}"
+                f" ({exc.msg})."
+            ),
+            tool_name=tool_name,
+            tool_id=tool_id,
+            raw_arguments=raw_arguments,
+            finish_reason=finish_reason,
+        ) from exc
+    if not isinstance(parsed, dict):
+        raise MalformedToolCallError(
+            f"Provider emitted non-object JSON arguments for tool {tool_name!r}.",
+            tool_name=tool_name,
+            tool_id=tool_id,
+            raw_arguments=raw_arguments,
+            finish_reason=finish_reason,
+        )
+    return parsed
 
 
 def _cached_tokens_from_usage(usage: Any) -> int:
