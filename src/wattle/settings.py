@@ -34,7 +34,7 @@ class TuiSettings:
 class WattleSettings:
     provider: str | None = None
     model: str | None = None
-    max_tokens: int = 4096
+    max_tokens: int | None = None
     thinking: bool = False
     effort: Effort | None = None
     permission_mode: PermissionMode = PermissionMode.YOLO
@@ -101,7 +101,7 @@ def settings_from_dict(data: dict[str, Any]) -> WattleSettings:
     return WattleSettings(
         provider=_str(data.get("provider"), defaults.provider),
         model=_str(data.get("model"), defaults.model),
-        max_tokens=_int(data.get("max_tokens"), defaults.max_tokens),
+        max_tokens=_optional_int(data.get("max_tokens")),
         thinking=_bool(data.get("thinking"), defaults.thinking),
         effort=_effort(data.get("effort")),
         permission_mode=_permission_mode(
@@ -135,6 +135,15 @@ def _int(value: object, default: int) -> int:
         return int(cast(Any, value))
     except (TypeError, ValueError):
         return default
+
+
+def _optional_int(value: object) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return int(cast(Any, value))
+    except (TypeError, ValueError):
+        return None
 
 
 def _bool(value: object, default: bool) -> bool:

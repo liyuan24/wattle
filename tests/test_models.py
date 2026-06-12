@@ -196,3 +196,42 @@ def test_render_model_choices_does_not_number_rows() -> None:
 
     assert "1." not in rendered
     assert "gpt-5.5 (current)" in rendered
+
+
+def test_resolve_max_tokens_uses_catalog_limit_when_unset() -> None:
+    assert models.resolve_max_tokens("deepseek-v4-pro") == 384_000
+    assert models.resolve_max_tokens("claude-sonnet-4-6") == 64_000
+    assert models.resolve_max_tokens("gpt-5.5") == 128_000
+
+
+def test_resolve_max_tokens_falls_back_for_undocumented_limits() -> None:
+    assert models.max_output_tokens_for_model("kimi-k2.6") is None
+    assert models.resolve_max_tokens("kimi-k2.6") == models.DEFAULT_MAX_OUTPUT_TOKENS
+    assert models.resolve_max_tokens("gpt-future-model") == models.DEFAULT_MAX_OUTPUT_TOKENS
+
+
+def test_resolve_max_tokens_explicit_value_wins_but_is_clamped() -> None:
+    assert models.resolve_max_tokens("deepseek-v4-pro", 8_192) == 8_192
+    assert models.resolve_max_tokens("claude-sonnet-4-6", 100_000) == 64_000
+    assert models.resolve_max_tokens("kimi-k2.6", 8_192) == 8_192
+
+
+def test_request_preparer_resolves_max_tokens_from_catalog() -> None:
+    from wattle.providers.stub import StubProvider
+
+    preparer = request_preparation.RequestPreparer(
+        provider=StubProvider([]),
+        model="deepseek-v4-pro",
+        system=None,
+        tools=[],
+    )
+    assert preparer.max_tokens == 384_000
+
+    capped = request_preparation.RequestPreparer(
+        provider=StubProvider([]),
+        model="claude-sonnet-4-6",
+        system=None,
+        tools=[],
+        max_tokens=100_000,
+    )
+    assert capped.max_tokens == 64_000

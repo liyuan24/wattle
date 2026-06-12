@@ -100,7 +100,7 @@ class _SubagentConfig:
     full_tools_by_name: Mapping[str, Tool]
     system: str | None
     model: str
-    max_tokens: int
+    max_tokens: int | None
     permission_gate: PermissionGate | None
     context_window: int | None
     thinking: bool
@@ -114,7 +114,7 @@ class _SubagentSession:
     tools_by_name: dict[str, Tool]
     tool_specs: list[ToolSpec]
     provider: Provider
-    max_tokens: int
+    max_tokens: int | None
     permission_gate: PermissionGate | None
     context_window: int | None
     thinking: bool
@@ -149,7 +149,7 @@ class SubagentManager:
         system: str | None,
         model: str,
         full_tools_by_name: Mapping[str, Tool] | None = None,
-        max_tokens: int,
+        max_tokens: int | None,
         permission_gate: PermissionGate | None = None,
         context_window: int | None = None,
         thinking: bool = False,

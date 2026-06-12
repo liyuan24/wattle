@@ -19,7 +19,11 @@ from wattle.compaction import (
     amaybe_compact_messages,
     estimate_request_context_tokens,
 )
-from wattle.models import context_window_for_model, model_supports_modality
+from wattle.models import (
+    context_window_for_model,
+    model_supports_modality,
+    resolve_max_tokens,
+)
 from wattle.provider_errors import is_context_length_error
 from wattle.providers import (
     CompletionRequest,
@@ -60,7 +64,7 @@ class RequestPreparer:
         model: str,
         system: str | None,
         tools: list[dict[str, object]],
-        max_tokens: int,
+        max_tokens: int | None = None,
         thinking: bool = False,
         effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None,
         context_window: int | None = None,
@@ -80,7 +84,7 @@ class RequestPreparer:
         self.model = model
         self.system = system
         self.tools = tools
-        self.max_tokens = max_tokens
+        self.max_tokens = resolve_max_tokens(model, max_tokens)
         self.thinking = thinking
         self.effort = effort
         self.context_window = (

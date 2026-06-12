@@ -29,7 +29,7 @@ def test_build_parser_defaults_to_tui_settings() -> None:
     assert args.prompt is None
     assert args.provider is None
     assert args.model is None
-    assert args.max_tokens == 4096
+    assert args.max_tokens is None
     assert args.thinking is False
     assert args.effort is None
     assert args.print_prompt is None

@@ -409,8 +409,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--max-tokens",
         type=int,
-        default=4096,
-        help="Per-turn output token cap (default: 4096).",
+        default=None,
+        help="Per-turn output token cap (default: the model's max output limit).",
     )
     parser.add_argument(
         "--thinking",

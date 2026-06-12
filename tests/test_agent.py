@@ -227,14 +227,14 @@ def test_openai_completions_provider_wires_openai_vendor_key(
     ap.assert_not_called()
     rp.assert_not_called()
 
-    # Defaults: system=None, max_tokens=4096.
+    # Defaults: system=None, max_tokens=None (resolved downstream per model).
     loop_run_sentinel.assert_called_once_with(
         fake_provider,
         agent.TOOLS_BY_NAME,
         "built system",
         "hello",
         "gpt-x",
-        4096,
+        None,
         permission_gate=None,
         thinking=False,
         effort=None,

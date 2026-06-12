@@ -40,9 +40,18 @@ class ModelChoice:
     vendor: str
     description: str
     context_window: int | None = None
+    # Vendor-documented per-request output ceiling. None means the vendor does
+    # not publish one; resolve_max_tokens falls back to a conservative default.
+    max_output_tokens: int | None = None
     source_url: str = ""
     effort_levels: tuple[EffortLevel, ...] = DEFAULT_EFFORT_LEVELS
     supported_modalities: tuple[InputModality, ...] = DEFAULT_INPUT_MODALITIES
+
+
+# Fallback for models without a documented output ceiling. Large enough that
+# thinking output (which shares the budget on Chat Completions vendors) does
+# not truncate a turn, small enough to stay under every known vendor limit.
+DEFAULT_MAX_OUTPUT_TOKENS = 32_768
 
 
 OPENAI_MODELS_URL = "https://developers.openai.com/api/docs/models/compare"
@@ -94,6 +103,7 @@ MODEL_CATALOG: tuple[ModelChoice, ...] = (
         vendor="openai",
         description="Frontier model for complex coding, research, and real-world work.",
         context_window=272_000,
+        max_output_tokens=128_000,
         source_url=OPENAI_MODELS_URL,
         effort_levels=OPENAI_CODEX_EFFORT_LEVELS,
     ),
@@ -103,6 +113,7 @@ MODEL_CATALOG: tuple[ModelChoice, ...] = (
         vendor="openai",
         description="Strong model for everyday coding.",
         context_window=272_000,
+        max_output_tokens=128_000,
         source_url=OPENAI_MODELS_URL,
         effort_levels=OPENAI_CODEX_EFFORT_LEVELS,
     ),
@@ -148,6 +159,7 @@ MODEL_CATALOG: tuple[ModelChoice, ...] = (
         vendor="anthropic",
         description="Balanced Anthropic model for coding and agentic work.",
         context_window=1_000_000,
+        max_output_tokens=64_000,
         source_url=ANTHROPIC_MODELS_URL,
     ),
     ModelChoice(
@@ -156,6 +168,7 @@ MODEL_CATALOG: tuple[ModelChoice, ...] = (
         vendor="anthropic",
         description="Anthropic model for complex coding and deep reasoning.",
         context_window=1_000_000,
+        max_output_tokens=128_000,
         source_url=ANTHROPIC_MODELS_URL,
     ),
     ModelChoice(
@@ -172,6 +185,7 @@ MODEL_CATALOG: tuple[ModelChoice, ...] = (
         vendor="deepseek",
         description="DeepSeek fast model with 1M context and tool calling.",
         context_window=1_000_000,
+        max_output_tokens=384_000,
         source_url=DEEPSEEK_MODELS_URL,
         supported_modalities=TEXT_ONLY_MODALITIES,
     ),
@@ -181,6 +195,7 @@ MODEL_CATALOG: tuple[ModelChoice, ...] = (
         vendor="deepseek",
         description="DeepSeek stronger model with 1M context and tool calling.",
         context_window=1_000_000,
+        max_output_tokens=384_000,
         source_url=DEEPSEEK_MODELS_URL,
         supported_modalities=TEXT_ONLY_MODALITIES,
     ),
@@ -300,6 +315,28 @@ def context_window_for_model(model: str) -> int | None:
     if choice is not None:
         return choice.context_window
     return None
+
+
+def max_output_tokens_for_model(model: str) -> int | None:
+    """Return the vendor-documented output ceiling for a known model."""
+    choice = MODEL_CHOICES_BY_MODEL.get(model)
+    if choice is not None:
+        return choice.max_output_tokens
+    return None
+
+
+def resolve_max_tokens(model: str, configured: int | None = None) -> int:
+    """Resolve the per-request output cap for ``model``.
+
+    An explicit ``configured`` value wins but is clamped to the model's
+    documented ceiling (vendors reject values above it). With no explicit
+    value, use the model's ceiling so thinking output — which shares this
+    budget on Chat Completions vendors — cannot truncate a turn.
+    """
+    limit = max_output_tokens_for_model(model)
+    if configured is not None:
+        return configured if limit is None else min(configured, limit)
+    return limit if limit is not None else DEFAULT_MAX_OUTPUT_TOKENS
 
 
 def effort_levels_for_model(model: str) -> tuple[EffortLevel, ...]:

@@ -2542,7 +2542,7 @@ class WattleApp:
 
         self.current_provider_name: str = args.provider or ""
         self.current_model: str = args.model or ""
-        self.max_tokens: int = args.max_tokens
+        self.max_tokens: int | None = args.max_tokens
         self.thinking: bool = bool(getattr(args, "thinking", False))
         self.show_thinking_content: bool = bool(self._settings.tui.show_thinking)
         self.effort: str | None = cast(str | None, getattr(args, "effort", None))
@@ -2901,7 +2901,12 @@ class WattleApp:
         self.current_model = str(state.get("current_model", self.current_model))
         self.system = cast(str | None, state.get("system", self.system))
         self._refresh_model_dependent_context()
-        self.max_tokens = int(cast(Any, state.get("max_tokens", self.max_tokens)))
+        restored_max_tokens = state.get("max_tokens", self.max_tokens)
+        self.max_tokens = (
+            int(cast(Any, restored_max_tokens))
+            if restored_max_tokens is not None
+            else None
+        )
         self.thinking = bool(state.get("thinking", self.thinking))
         self.show_thinking_content = bool(
             state.get("show_thinking_content", self.show_thinking_content)
@@ -4044,7 +4049,10 @@ class WattleApp:
         self._write_line("Settings:")
         self._write_line(f"  provider:      {self._display_provider_name()}")
         self._write_line(f"  model:         {self._display_model_name()}")
-        self._write_line(f"  max_tokens:    {self.max_tokens}")
+        max_tokens_label = (
+            "auto (model limit)" if self.max_tokens is None else str(self.max_tokens)
+        )
+        self._write_line(f"  max_tokens:    {max_tokens_label}")
         self._write_line(f"  thinking:      {'on' if self.thinking else 'off'}")
         if self.effort is not None:
             self._write_line(f"  effort:        {self.effort}")

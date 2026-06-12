@@ -55,7 +55,7 @@ class SessionSettings:
     provider: str
     model: str
     system: str | None = None
-    max_tokens: int = 4096
+    max_tokens: int | None = None
     thinking: bool = False
     effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None
 
@@ -113,7 +113,7 @@ def new_session(
     provider: str,
     model: str,
     system: str | None = None,
-    max_tokens: int = 4096,
+    max_tokens: int | None = None,
     thinking: bool = False,
     effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None,
     title: str | None = None,
@@ -451,7 +451,7 @@ def settings_from_dict(data: dict[str, Any]) -> SessionSettings:
         provider=_require_str(data, "provider"),
         model=_require_str(data, "model"),
         system=_optional_str(data, "system"),
-        max_tokens=_require_int(data, "max_tokens"),
+        max_tokens=_nullable_int(data, "max_tokens"),
         thinking=_optional_bool(data, "thinking", default=False),
         effort=_optional_effort(data, "effort"),
     )
@@ -667,6 +667,15 @@ def _require_int(data: dict[str, Any], key: str) -> int:
     value = data.get(key)
     if not isinstance(value, int) or isinstance(value, bool):
         raise ValueError(f"{key!r} must be an integer")
+    return value
+
+
+def _nullable_int(data: dict[str, Any], key: str) -> int | None:
+    value = data.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ValueError(f"{key!r} must be an integer or null")
     return value
 
 

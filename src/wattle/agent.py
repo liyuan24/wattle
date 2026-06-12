@@ -188,7 +188,7 @@ def run_agent(
     model: str,
     user_input: str,
     *,
-    max_tokens: int = 4096,
+    max_tokens: int | None = None,
     permission_mode: PermissionMode = PermissionMode.YOLO,
     thinking: bool = False,
     effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None,
@@ -200,7 +200,8 @@ def run_agent(
         provider_name: any key in :data:`PROVIDER_TO_VENDOR`.
         model: Model id passed through to the provider unchanged.
         user_input: First user turn.
-        max_tokens: Forwarded to the provider per turn.
+        max_tokens: Per-turn output cap; None resolves to the model's
+            documented max output limit (see ``wattle.models``).
         thinking: Enable provider reasoning controls.
         effort: Requested reasoning effort when ``thinking`` is enabled.
 
@@ -228,7 +229,7 @@ async def arun_agent(
     model: str,
     user_input: str,
     *,
-    max_tokens: int = 4096,
+    max_tokens: int | None = None,
     permission_mode: PermissionMode = PermissionMode.YOLO,
     thinking: bool = False,
     effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None,
@@ -257,7 +258,7 @@ def run_agent_with_history(
     model: str,
     user_input: str,
     *,
-    max_tokens: int = 4096,
+    max_tokens: int | None = None,
     permission_mode: PermissionMode = PermissionMode.YOLO,
     thinking: bool = False,
     effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None,
@@ -281,7 +282,7 @@ async def arun_agent_with_history(
     model: str,
     user_input: str,
     *,
-    max_tokens: int = 4096,
+    max_tokens: int | None = None,
     permission_mode: PermissionMode = PermissionMode.YOLO,
     thinking: bool = False,
     effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None,
