@@ -65,7 +65,6 @@ async def amaybe_compact_messages(
 
     provider_pressure = _provider_context_pressure_exceeds_compaction_threshold(
         provider_context_tokens=provider_context_tokens,
-        max_tokens=max_tokens,
         context_window=context_window,
     )
     should_start = state is None and (
@@ -73,7 +72,6 @@ async def amaybe_compact_messages(
             system=system,
             messages=messages,
             tools=tools,
-            max_tokens=max_tokens,
             context_window=context_window,
         )
         or provider_pressure
@@ -96,7 +94,6 @@ async def amaybe_compact_messages(
         estimated_pressure = _context_pressure_exceeds_compaction_threshold(
             estimated_tokens=projected_tokens,
             provider_context_tokens=None,
-            max_tokens=max_tokens,
             context_window=context_window,
         )
         if not estimated_pressure and not provider_pressure:
@@ -108,7 +105,6 @@ async def amaybe_compact_messages(
                 messages,
                 force=force,
                 context_window=context_window,
-                max_tokens=max_tokens,
                 keep_recent_tokens=keep_recent_tokens,
             )
             if state.summarized_until >= last_start:
@@ -119,7 +115,6 @@ async def amaybe_compact_messages(
             messages,
             force=force,
             context_window=context_window,
-            max_tokens=max_tokens,
             keep_recent_tokens=keep_recent_tokens,
         )
     if last_start <= first_end and should_start:
@@ -130,7 +125,6 @@ async def amaybe_compact_messages(
                 messages,
                 force=True,
                 context_window=context_window,
-                max_tokens=max_tokens,
                 keep_recent_tokens=keep_recent_tokens,
             )
     if last_start <= first_end:
@@ -207,7 +201,6 @@ def _compaction_bounds(
     *,
     force: bool,
     context_window: int | None,
-    max_tokens: int,
     keep_recent_tokens: int,
 ) -> tuple[int, int]:
     if not force:
@@ -217,7 +210,6 @@ def _compaction_bounds(
             first_end,
             _effective_keep_recent_tokens(
                 context_window=context_window,
-                max_tokens=max_tokens,
                 keep_recent_tokens=keep_recent_tokens,
             ),
         )
@@ -237,14 +229,12 @@ def _should_start_compaction(
     system: str | None,
     messages: list[Message],
     tools: list[dict[str, object]],
-    max_tokens: int,
     context_window: int | None,
 ) -> bool:
     estimate = estimate_request_context_tokens(system=system, messages=messages, tools=tools)
     return _context_pressure_exceeds_compaction_threshold(
         estimated_tokens=estimate,
         provider_context_tokens=None,
-        max_tokens=max_tokens,
         context_window=context_window,
     )
 
@@ -253,7 +243,6 @@ def _context_pressure_exceeds_compaction_threshold(
     *,
     estimated_tokens: int,
     provider_context_tokens: int | None,
-    max_tokens: int,
     context_window: int | None,
 ) -> bool:
     if context_window is None or context_window <= 0:
@@ -262,13 +251,12 @@ def _context_pressure_exceeds_compaction_threshold(
     pressures = [estimated_tokens]
     if provider_context_tokens is not None and provider_context_tokens > 0:
         pressures.append(provider_context_tokens)
-    return max(pressures) + max_tokens >= threshold
+    return max(pressures) >= threshold
 
 
 def _provider_context_pressure_exceeds_compaction_threshold(
     *,
     provider_context_tokens: int | None,
-    max_tokens: int,
     context_window: int | None,
 ) -> bool:
     if provider_context_tokens is None or provider_context_tokens <= 0:
@@ -276,7 +264,6 @@ def _provider_context_pressure_exceeds_compaction_threshold(
     return _context_pressure_exceeds_compaction_threshold(
         estimated_tokens=0,
         provider_context_tokens=provider_context_tokens,
-        max_tokens=max_tokens,
         context_window=context_window,
     )
 
@@ -416,12 +403,11 @@ def _truncate_tool_result(text: str, max_chars: int = 2000) -> str:
 def _effective_keep_recent_tokens(
     *,
     context_window: int | None,
-    max_tokens: int,
     keep_recent_tokens: int,
 ) -> int:
     if context_window is None or context_window <= 0:
         return max(1, keep_recent_tokens)
-    available = max(1, context_window - max(0, max_tokens))
+    available = max(1, int(context_window * COMPACTION_TRIGGER_RATIO))
     return max(1, min(keep_recent_tokens, available // 4))
 
 

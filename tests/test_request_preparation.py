@@ -98,7 +98,7 @@ def test_prepare_context_estimate_uses_projected_text_only_messages(
 
 
 def test_prepare_reads_provider_context_tokens_lazily() -> None:
-    values = iter([None, 795])
+    values = iter([None, 800])
     provider = StubProvider(
         [
             CompletionResponse(content=[TextBlock(text="updated summary")], stop_reason="end_turn"),

@@ -104,6 +104,49 @@ def test_compaction_waits_until_threshold() -> None:
     assert provider.reset_count == 0
 
 
+def test_large_output_cap_does_not_start_compaction_below_threshold() -> None:
+    provider = _ScriptedProvider([])
+    messages = [_message(i, "small") for i in range(3)]
+
+    request_messages, state = _compact(
+        provider=provider,
+        model="test-model",
+        system=None,
+        messages=messages,
+        tools=[],
+        max_tokens=900,
+        context_window=1_000,
+        state=None,
+    )
+
+    assert request_messages == messages
+    assert state is None
+    assert provider.requests == []
+    assert provider.reset_count == 0
+
+
+def test_provider_usage_below_threshold_ignores_large_output_cap() -> None:
+    provider = _ScriptedProvider([])
+    messages = [_message(i, "small") for i in range(3)]
+
+    request_messages, state = _compact(
+        provider=provider,
+        model="test-model",
+        system=None,
+        messages=messages,
+        tools=[],
+        max_tokens=900,
+        context_window=1_000,
+        state=None,
+        provider_context_tokens=799,
+    )
+
+    assert request_messages == messages
+    assert state is None
+    assert provider.requests == []
+    assert provider.reset_count == 0
+
+
 def test_compaction_does_not_mutate_saved_history() -> None:
     provider = _ScriptedProvider(
         [
@@ -289,7 +332,7 @@ def test_existing_compaction_refreshes_when_projection_crosses_trigger_ratio() -
     )
     assert state is not None
 
-    extended = [*messages, *[_message(i, "y" * 80) for i in range(50, 70)]]
+    extended = [*messages, *[_message(i, "y" * 80) for i in range(50, 80)]]
     request_messages, next_state = _compact(
         provider=provider,
         model="test-model",
@@ -345,7 +388,7 @@ def test_existing_compaction_refreshes_when_provider_usage_crosses_trigger_ratio
         max_tokens=10,
         context_window=1_000,
         state=state,
-        provider_context_tokens=795,
+        provider_context_tokens=800,
     )
 
     assert next_state is not None
@@ -377,7 +420,7 @@ def test_provider_usage_can_start_first_compaction() -> None:
         max_tokens=10,
         context_window=1_000,
         state=None,
-        provider_context_tokens=795,
+        provider_context_tokens=800,
     )
 
     assert state is not None
@@ -431,7 +474,7 @@ def test_provider_pressure_compaction_preserves_live_tool_continuation() -> None
         max_tokens=10,
         context_window=1_000,
         state=state,
-        provider_context_tokens=795,
+        provider_context_tokens=800,
     )
 
     assert next_state is not None
