@@ -43,13 +43,14 @@ def _cleanup_pid(pid: int) -> None:
         pass
 
 
-def _spawn_sleeping_child_command(pid_file: Path) -> str:
+def _spawn_sleeping_child_command(pid_file: Path, *, start_new_session: bool = False) -> str:
     child = "import time; time.sleep(30)"
     code = (
         "import subprocess, sys; "
         "p = subprocess.Popen("
         f"[sys.executable, '-c', {child!r}], "
-        "stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL"
+        "stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, "
+        f"start_new_session={start_new_session!r}"
         "); "
         f"open({str(pid_file)!r}, 'w').write(str(p.pid)); "
         "print(p.pid, flush=True)"
@@ -169,6 +170,21 @@ def test_foreground_piped_kills_descendants_after_command_exits(tmp_path: Path) 
         _cleanup_pid(child_pid)
 
 
+def test_foreground_piped_kills_new_session_descendants_under_cwd(tmp_path: Path) -> None:
+    pid_file = tmp_path / "child.pid"
+
+    output = BashTool(cwd=tmp_path).run(
+        _spawn_sleeping_child_command(pid_file, start_new_session=True)
+    )
+
+    child_pid = int(pid_file.read_text())
+    try:
+        assert re.search(rf"\b{child_pid}\b", output)
+        _wait_for(lambda: not _pid_is_alive(child_pid))
+    finally:
+        _cleanup_pid(child_pid)
+
+
 def test_foreground_tty_allocates_terminal(tmp_path: Path) -> None:
     tool = BashTool(cwd=tmp_path)
     command = _python_command("import os; print(f'tty={os.isatty(1)}')")
@@ -184,6 +200,22 @@ def test_foreground_tty_kills_descendants_after_command_exits(tmp_path: Path) ->
 
     output = BashTool(cwd=tmp_path).run(
         _spawn_sleeping_child_command(pid_file),
+        tty=True,
+    )
+
+    child_pid = int(pid_file.read_text())
+    try:
+        assert re.search(rf"\b{child_pid}\b", output)
+        _wait_for(lambda: not _pid_is_alive(child_pid))
+    finally:
+        _cleanup_pid(child_pid)
+
+
+def test_foreground_tty_kills_new_session_descendants_under_cwd(tmp_path: Path) -> None:
+    pid_file = tmp_path / "child.pid"
+
+    output = BashTool(cwd=tmp_path).run(
+        _spawn_sleeping_child_command(pid_file, start_new_session=True),
         tty=True,
     )
 

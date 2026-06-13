@@ -171,6 +171,7 @@ class BashTool(Tool):
         clamped_timeout = min(float(timeout), self.MAX_TIMEOUT_SECONDS)
         started_at = time.monotonic()
         attribution = self._git_attribution_env(command)
+        existing_pids = _process_snapshot()
         process = subprocess.Popen(
             command,
             shell=True,
@@ -236,6 +237,7 @@ class BashTool(Tool):
             )
 
         _kill_process_group(process.pid)
+        _kill_new_processes_under_cwd(existing_pids, self.cwd)
         parts = list(attribution.warnings)
         stdout_text = _decode_output(stdout)
         stderr_text = _decode_output(stderr)
@@ -270,6 +272,7 @@ class BashTool(Tool):
         started_at = time.monotonic()
         master_fd, slave_fd = pty.openpty()
         attribution = self._git_attribution_env(command)
+        existing_pids = _process_snapshot()
         process = subprocess.Popen(
             command,
             shell=True,
@@ -317,6 +320,7 @@ class BashTool(Tool):
                     break
         finally:
             _kill_process_group(process.pid)
+            _kill_new_processes_under_cwd(existing_pids, self.cwd)
             with suppress(OSError):
                 os.close(master_fd)
 
@@ -479,6 +483,49 @@ def _read_pty(fd: int) -> bytes:
 def _kill_process_group(pgid: int) -> None:
     with suppress(ProcessLookupError, PermissionError):
         os.killpg(pgid, signal.SIGKILL)
+
+
+def _process_snapshot() -> set[int]:
+    proc = Path("/proc")
+    if not proc.exists():
+        return set()
+    return {int(path.name) for path in proc.iterdir() if path.name.isdigit()}
+
+
+def _kill_new_processes_under_cwd(existing_pids: set[int], cwd: Path) -> None:
+    try:
+        root = cwd.resolve()
+    except OSError:
+        return
+    if root == Path("/"):
+        return
+
+    proc = Path("/proc")
+    if not proc.exists():
+        return
+    current_pid = os.getpid()
+    for path in proc.iterdir():
+        if not path.name.isdigit():
+            continue
+        pid = int(path.name)
+        if pid in existing_pids or pid == current_pid:
+            continue
+        try:
+            process_cwd = (path / "cwd").resolve()
+        except (FileNotFoundError, PermissionError, OSError):
+            continue
+        if not _is_relative_to(process_cwd, root):
+            continue
+        with suppress(ProcessLookupError, PermissionError):
+            os.kill(pid, signal.SIGKILL)
+
+
+def _is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
 
 
 def _timeout_output(value: str | bytes | None) -> str:
