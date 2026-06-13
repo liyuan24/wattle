@@ -10,6 +10,7 @@ provider is a one-line change to ``_PROVIDER_DISPATCH``.
 from __future__ import annotations
 
 import asyncio
+import os
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -48,6 +49,26 @@ PROVIDER_TO_VENDOR: dict[str, str] = {
     "openai_responses": "openai",
 }
 
+DEFAULT_PROVIDER_REQUEST_TIMEOUT_SECONDS = 300.0
+PROVIDER_REQUEST_TIMEOUT_ENV = "WATTLE_PROVIDER_REQUEST_TIMEOUT_SECONDS"
+
+
+def _provider_request_timeout_seconds() -> float:
+    raw_value = os.environ.get(PROVIDER_REQUEST_TIMEOUT_ENV)
+    if raw_value is None:
+        return DEFAULT_PROVIDER_REQUEST_TIMEOUT_SECONDS
+    try:
+        value = float(raw_value)
+    except ValueError:
+        return DEFAULT_PROVIDER_REQUEST_TIMEOUT_SECONDS
+    if value <= 0:
+        return DEFAULT_PROVIDER_REQUEST_TIMEOUT_SECONDS
+    return value
+
+
+def _sdk_timeout_kwargs() -> dict[str, float]:
+    return {"timeout": _provider_request_timeout_seconds()}
+
 
 # Generic over the SDK client type. Each `_ProviderSpec` instance is
 # internally consistent: the `provider_factory` accepts exactly the kind of
@@ -81,7 +102,10 @@ type _DispatchSpec = (
 _PROVIDER_DISPATCH: dict[str, _DispatchSpec] = {
     "anthropic": _ProviderSpec[anthropic.AsyncAnthropic](
         vendor="anthropic",
-        client_factory=lambda key: anthropic.AsyncAnthropic(api_key=key),
+        client_factory=lambda key: anthropic.AsyncAnthropic(
+            api_key=key,
+            **_sdk_timeout_kwargs(),
+        ),
         provider_factory=lambda client: AnthropicProvider(async_client=client),
     ),
     "deepseek": _ProviderSpec[openai.AsyncOpenAI](
@@ -89,6 +113,7 @@ _PROVIDER_DISPATCH: dict[str, _DispatchSpec] = {
         client_factory=lambda key: openai.AsyncOpenAI(
             api_key=key,
             base_url="https://api.deepseek.com",
+            **_sdk_timeout_kwargs(),
         ),
         provider_factory=lambda client: OpenAICompletionsProvider(async_client=client),
     ),
@@ -97,6 +122,7 @@ _PROVIDER_DISPATCH: dict[str, _DispatchSpec] = {
         client_factory=lambda key: openai.AsyncOpenAI(
             api_key=key,
             base_url="https://api.moonshot.ai/v1",
+            **_sdk_timeout_kwargs(),
         ),
         provider_factory=lambda client: OpenAICompletionsProvider(async_client=client),
     ),
@@ -105,6 +131,7 @@ _PROVIDER_DISPATCH: dict[str, _DispatchSpec] = {
         client_factory=lambda key: openai.AsyncOpenAI(
             api_key=key,
             base_url="https://api.minimax.io/v1",
+            **_sdk_timeout_kwargs(),
         ),
         provider_factory=lambda client: OpenAICompletionsProvider(async_client=client),
     ),
@@ -113,6 +140,7 @@ _PROVIDER_DISPATCH: dict[str, _DispatchSpec] = {
         client_factory=lambda key: openai.AsyncOpenAI(
             api_key=key,
             base_url="https://token-plan-sgp.xiaomimimo.com/v1",
+            **_sdk_timeout_kwargs(),
         ),
         provider_factory=lambda client: OpenAICompletionsProvider(async_client=client),
     ),
@@ -123,12 +151,18 @@ _PROVIDER_DISPATCH: dict[str, _DispatchSpec] = {
     ),
     "openai_completions": _ProviderSpec[openai.AsyncOpenAI](
         vendor="openai",
-        client_factory=lambda key: openai.AsyncOpenAI(api_key=key),
+        client_factory=lambda key: openai.AsyncOpenAI(
+            api_key=key,
+            **_sdk_timeout_kwargs(),
+        ),
         provider_factory=lambda client: OpenAICompletionsProvider(async_client=client),
     ),
     "openai_responses": _ProviderSpec[openai.AsyncOpenAI](
         vendor="openai",
-        client_factory=lambda key: openai.AsyncOpenAI(api_key=key),
+        client_factory=lambda key: openai.AsyncOpenAI(
+            api_key=key,
+            **_sdk_timeout_kwargs(),
+        ),
         provider_factory=lambda client: OpenAIResponsesProvider(async_client=client),
     ),
 }

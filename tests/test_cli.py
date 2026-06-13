@@ -463,6 +463,7 @@ def test_build_provider_wires_openai_compatible_base_url(
     openai_client.assert_called_once_with(
         api_key=f"fake-{vendor}-key",
         base_url=base_url,
+        timeout=300.0,
     )
     provider_factory.assert_called_once_with(async_client=fake_client)
     assert provider is fake_provider
@@ -518,7 +519,7 @@ def test_build_provider_wires_openai_responses_api_key() -> None:
 
     gc.assert_called_once_with("openai")
     generic_gc.assert_not_called()
-    oa.assert_called_once_with(api_key="fake-openai-key")
+    oa.assert_called_once_with(api_key="fake-openai-key", timeout=300.0)
     provider_factory.assert_called_once_with(async_client=fake_client)
     assert provider is fake_provider
 
@@ -550,6 +551,7 @@ def test_build_provider_wires_xiaomi_token_plan_api_key() -> None:
     openai_client.assert_called_once_with(
         api_key="fake-xiaomi-key",
         base_url="https://token-plan-sgp.xiaomimimo.com/v1",
+        timeout=300.0,
     )
     provider_factory.assert_called_once_with(async_client=fake_client)
     assert provider is fake_provider

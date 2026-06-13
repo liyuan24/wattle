@@ -104,12 +104,15 @@ _API_KEY_ONLY_PROVIDERS = frozenset(
 
 
 def _provider_dispatch() -> dict[str, _ProviderSpec[Any]]:
-    from wattle.agent import _ProviderSpec
+    from wattle.agent import _ProviderSpec, _sdk_timeout_kwargs
 
     return {
         "anthropic": _ProviderSpec[Any](
             vendor="anthropic",
-            client_factory=lambda key: anthropic.AsyncAnthropic(api_key=key),
+            client_factory=lambda key: anthropic.AsyncAnthropic(
+                api_key=key,
+                **_sdk_timeout_kwargs(),
+            ),
             provider_factory=lambda client: globals()["AnthropicProvider"](async_client=client),
         ),
         "deepseek": _ProviderSpec[Any](
@@ -117,6 +120,7 @@ def _provider_dispatch() -> dict[str, _ProviderSpec[Any]]:
             client_factory=lambda key: openai.AsyncOpenAI(
                 api_key=key,
                 base_url="https://api.deepseek.com",
+                **_sdk_timeout_kwargs(),
             ),
             provider_factory=lambda client: globals()["OpenAICompletionsProvider"](
                 async_client=client
@@ -127,6 +131,7 @@ def _provider_dispatch() -> dict[str, _ProviderSpec[Any]]:
             client_factory=lambda key: openai.AsyncOpenAI(
                 api_key=key,
                 base_url="https://api.moonshot.ai/v1",
+                **_sdk_timeout_kwargs(),
             ),
             provider_factory=lambda client: globals()["OpenAICompletionsProvider"](
                 async_client=client
@@ -137,6 +142,7 @@ def _provider_dispatch() -> dict[str, _ProviderSpec[Any]]:
             client_factory=lambda key: openai.AsyncOpenAI(
                 api_key=key,
                 base_url="https://api.minimax.io/v1",
+                **_sdk_timeout_kwargs(),
             ),
             provider_factory=lambda client: globals()["OpenAICompletionsProvider"](
                 async_client=client
@@ -147,6 +153,7 @@ def _provider_dispatch() -> dict[str, _ProviderSpec[Any]]:
             client_factory=lambda key: openai.AsyncOpenAI(
                 api_key=key,
                 base_url="https://token-plan-sgp.xiaomimimo.com/v1",
+                **_sdk_timeout_kwargs(),
             ),
             provider_factory=lambda client: globals()["OpenAICompletionsProvider"](
                 async_client=client
@@ -161,14 +168,20 @@ def _provider_dispatch() -> dict[str, _ProviderSpec[Any]]:
         ),
         "openai_completions": _ProviderSpec[Any](
             vendor="openai",
-            client_factory=lambda key: openai.AsyncOpenAI(api_key=key),
+            client_factory=lambda key: openai.AsyncOpenAI(
+                api_key=key,
+                **_sdk_timeout_kwargs(),
+            ),
             provider_factory=lambda client: globals()["OpenAICompletionsProvider"](
                 async_client=client
             ),
         ),
         "openai_responses": _ProviderSpec[Any](
             vendor="openai",
-            client_factory=lambda key: openai.AsyncOpenAI(api_key=key),
+            client_factory=lambda key: openai.AsyncOpenAI(
+                api_key=key,
+                **_sdk_timeout_kwargs(),
+            ),
             provider_factory=lambda client: globals()["OpenAIResponsesProvider"](
                 async_client=client
             ),

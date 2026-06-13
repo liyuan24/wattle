@@ -109,7 +109,10 @@ def test_anthropic_provider_wires_anthropic_vendor_key(
         )
 
     gc.assert_called_once_with("anthropic")
-    anth.assert_called_once_with(api_key="fake-anthropic-key")
+    anth.assert_called_once_with(
+        api_key="fake-anthropic-key",
+        timeout=agent.DEFAULT_PROVIDER_REQUEST_TIMEOUT_SECONDS,
+    )
     oa.assert_not_called()
     ap.assert_called_once_with(async_client=fake_client)
     xp.assert_not_called()
@@ -220,7 +223,10 @@ def test_openai_completions_provider_wires_openai_vendor_key(
 
     gc.assert_called_once_with("openai")
     generic_gc.assert_not_called()
-    oa.assert_called_once_with(api_key="fake-openai-bearer")
+    oa.assert_called_once_with(
+        api_key="fake-openai-bearer",
+        timeout=agent.DEFAULT_PROVIDER_REQUEST_TIMEOUT_SECONDS,
+    )
     anth.assert_not_called()
     xp.assert_not_called()
     cp.assert_called_once_with(async_client=fake_client)
@@ -282,7 +288,11 @@ def test_openai_compatible_providers_wire_custom_vendor_and_base_url(
         result = run_agent(provider_name, model=model, user_input="hello")
 
     gc.assert_called_once_with(vendor)
-    oa.assert_called_once_with(api_key=f"fake-{vendor}-key", base_url=base_url)
+    oa.assert_called_once_with(
+        api_key=f"fake-{vendor}-key",
+        base_url=base_url,
+        timeout=agent.DEFAULT_PROVIDER_REQUEST_TIMEOUT_SECONDS,
+    )
     cp.assert_called_once_with(async_client=fake_client)
     anth.assert_not_called()
     ap.assert_not_called()
@@ -319,7 +329,10 @@ def test_openai_responses_provider_wires_openai_vendor_key(
 
     gc.assert_called_once_with("openai")
     generic_gc.assert_not_called()
-    oa.assert_called_once_with(api_key="fake-openai-bearer")
+    oa.assert_called_once_with(
+        api_key="fake-openai-bearer",
+        timeout=agent.DEFAULT_PROVIDER_REQUEST_TIMEOUT_SECONDS,
+    )
     anth.assert_not_called()
     xp.assert_not_called()
     rp.assert_called_once_with(async_client=fake_client)
@@ -409,6 +422,7 @@ def test_xiaomi_token_plan_provider_wires_api_key_and_base_url(
     oa.assert_called_once_with(
         api_key="fake-xiaomi-key",
         base_url="https://token-plan-sgp.xiaomimimo.com/v1",
+        timeout=agent.DEFAULT_PROVIDER_REQUEST_TIMEOUT_SECONDS,
     )
     cp.assert_called_once_with(async_client=fake_client)
     anth.assert_not_called()
