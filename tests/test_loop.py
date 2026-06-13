@@ -831,6 +831,46 @@ def test_run_streaming_retries_idle_provider_stream(monkeypatch) -> None:
     ]
 
 
+def test_run_retries_idle_provider_completion(monkeypatch) -> None:
+    class IdleThenSuccessProvider(Provider):
+        def __init__(self) -> None:
+            self.requests: list[CompletionRequest] = []
+
+        async def acomplete(self, request: CompletionRequest) -> CompletionResponse:
+            self.requests.append(request)
+            if len(self.requests) == 1:
+                await asyncio.sleep(60)
+            return CompletionResponse(
+                content=[TextBlock(text="final")],
+                stop_reason="end_turn",
+            )
+
+        async def astream(
+            self, request: CompletionRequest
+        ) -> AsyncIterator[StreamEvent]:  # pragma: no cover
+            raise NotImplementedError
+
+    monkeypatch.setattr(request_preparation, "_stream_retry_delay", lambda _attempt: 0.0)
+    monkeypatch.setattr(
+        request_preparation,
+        "stream_idle_timeout_seconds_from_env",
+        lambda: 0.01,
+    )
+    provider = IdleThenSuccessProvider()
+
+    result = run(
+        provider=provider,
+        tools_by_name={},
+        system=None,
+        user_input="hello",
+        model="stub-model",
+    )
+
+    assert result.content == [TextBlock(text="final")]
+    assert len(provider.requests) == 2
+    assert provider.requests[0].messages == provider.requests[1].messages
+
+
 def cast_request_text(request: CompletionRequest) -> str:
     parts: list[str] = []
     for message in request.messages:

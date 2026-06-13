@@ -274,7 +274,20 @@ async def _acomplete_prepared_with_retries(
 ) -> CompletionResponse:
     for failures in range(preparer.stream_max_retries + 1):
         try:
-            return await preparer.provider.acomplete(request)
+            return await asyncio.wait_for(
+                preparer.provider.acomplete(request),
+                timeout=preparer.stream_idle_timeout_seconds,
+            )
+        except TimeoutError as exc:
+            timeout_error = TransientProviderError(
+                f"Provider completion was idle for "
+                f"{preparer.stream_idle_timeout_seconds:g}s.",
+            )
+            if failures >= preparer.stream_max_retries:
+                raise timeout_error from exc
+            delay = _retry_delay_for_error(failures + 1, timeout_error)
+            _notify_stream_retry(preparer, failures + 1, timeout_error, delay)
+            await asyncio.sleep(delay)
         except (IncompleteStreamError, TransientProviderError) as exc:
             if failures >= preparer.stream_max_retries:
                 raise
