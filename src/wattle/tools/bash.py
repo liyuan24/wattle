@@ -235,6 +235,7 @@ class BashTool(Tool):
                 **_externalize_limits(max_output_chars),
             )
 
+        _kill_process_group(process.pid)
         parts = list(attribution.warnings)
         stdout_text = _decode_output(stdout)
         stderr_text = _decode_output(stderr)
@@ -315,6 +316,7 @@ class BashTool(Tool):
                             emit(_decode_output(data))
                     break
         finally:
+            _kill_process_group(process.pid)
             with suppress(OSError):
                 os.close(master_fd)
 
@@ -472,6 +474,11 @@ def _read_pty(fd: int) -> bytes:
         if exc.errno == errno.EIO:
             return b""
         raise
+
+
+def _kill_process_group(pgid: int) -> None:
+    with suppress(ProcessLookupError, PermissionError):
+        os.killpg(pgid, signal.SIGKILL)
 
 
 def _timeout_output(value: str | bytes | None) -> str:

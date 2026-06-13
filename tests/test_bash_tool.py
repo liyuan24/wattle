@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import re
 import shlex
+import signal
 import subprocess
 import sys
 import time
@@ -23,6 +26,35 @@ def _wait_for(predicate, timeout: float = 2.0) -> None:
             return
         time.sleep(0.01)
     assert predicate()
+
+
+def _pid_is_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def _cleanup_pid(pid: int) -> None:
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
+def _spawn_sleeping_child_command(pid_file: Path) -> str:
+    child = "import time; time.sleep(30)"
+    code = (
+        "import subprocess, sys; "
+        "p = subprocess.Popen("
+        f"[sys.executable, '-c', {child!r}], "
+        "stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL"
+        "); "
+        f"open({str(pid_file)!r}, 'w').write(str(p.pid)); "
+        "print(p.pid, flush=True)"
+    )
+    return _python_command(code)
 
 
 def test_foreground_output_elapsed_and_exit_code(tmp_path: Path) -> None:
@@ -124,6 +156,19 @@ def test_foreground_timeout_returns_when_descendant_keeps_pipe_open(tmp_path: Pa
     assert "descendant process kept stdout/stderr open" in output
 
 
+def test_foreground_piped_kills_descendants_after_command_exits(tmp_path: Path) -> None:
+    pid_file = tmp_path / "child.pid"
+
+    output = BashTool(cwd=tmp_path).run(_spawn_sleeping_child_command(pid_file))
+
+    child_pid = int(pid_file.read_text())
+    try:
+        assert re.search(rf"\b{child_pid}\b", output)
+        _wait_for(lambda: not _pid_is_alive(child_pid))
+    finally:
+        _cleanup_pid(child_pid)
+
+
 def test_foreground_tty_allocates_terminal(tmp_path: Path) -> None:
     tool = BashTool(cwd=tmp_path)
     command = _python_command("import os; print(f'tty={os.isatty(1)}')")
@@ -132,6 +177,22 @@ def test_foreground_tty_allocates_terminal(tmp_path: Path) -> None:
 
     assert "tty=True" in output
     assert "[elapsed " in output
+
+
+def test_foreground_tty_kills_descendants_after_command_exits(tmp_path: Path) -> None:
+    pid_file = tmp_path / "child.pid"
+
+    output = BashTool(cwd=tmp_path).run(
+        _spawn_sleeping_child_command(pid_file),
+        tty=True,
+    )
+
+    child_pid = int(pid_file.read_text())
+    try:
+        assert re.search(rf"\b{child_pid}\b", output)
+        _wait_for(lambda: not _pid_is_alive(child_pid))
+    finally:
+        _cleanup_pid(child_pid)
 
 
 def test_foreground_piped_emits_output_events(tmp_path: Path) -> None:
