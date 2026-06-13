@@ -492,6 +492,13 @@ def _malformed_tool_call_repair_message(error: MalformedToolCallError) -> Messag
         if error.was_truncated
         else ""
     )
+    write_guidance = (
+        "\n\nIf the failed `write` call was trying to create a large, multiline, "
+        "or quote-heavy file, use a single `bash` tool call with a short script "
+        "to create the file instead of retrying a huge JSON string."
+        if error.tool_name == "write"
+        else ""
+    )
     return Message(
         role="user",
         content=[
@@ -504,6 +511,7 @@ def _malformed_tool_call_repair_message(error: MalformedToolCallError) -> Messag
                     f"{raw_arguments}\n\n"
                     "Re-issue exactly one tool call now. Keep the JSON arguments "
                     "minimal and valid. Do not include explanatory text."
+                    f"{write_guidance}"
                 )
             )
         ],

@@ -368,6 +368,50 @@ def test_loop_repairs_malformed_tool_call_once() -> None:
     assert "Re-issue exactly one tool call" in repair_block.text
 
 
+def test_loop_malformed_write_repair_mentions_bash_escape_hatch() -> None:
+    class RepairProvider(Provider):
+        def __init__(self) -> None:
+            self.requests: list[CompletionRequest] = []
+
+        async def acomplete(self, request: CompletionRequest) -> CompletionResponse:
+            self.requests.append(request)
+            if len(self.requests) == 1:
+                raise MalformedToolCallError(
+                    "bad tool args",
+                    tool_name="write",
+                    tool_id="call_bad",
+                    raw_arguments='{"path": "/tmp/out.json", "content": "[{\\"word\\": "',
+                    finish_reason="tool_calls",
+                )
+            return CompletionResponse(
+                content=[TextBlock(text="recovered")],
+                stop_reason="end_turn",
+            )
+
+        async def astream(
+            self, request: CompletionRequest
+        ) -> AsyncIterator[StreamEvent]:  # pragma: no cover
+            raise NotImplementedError
+
+    provider = RepairProvider()
+
+    result = run(
+        provider=provider,
+        tools_by_name={},
+        system=None,
+        user_input="recover sqlite rows",
+        model="stub-model",
+    )
+
+    assert result.content == [TextBlock(text="recovered")]
+    assert len(provider.requests) == 2
+    repair_block = provider.requests[1].messages[-1].content[0]
+    assert isinstance(repair_block, TextBlock)
+    assert "use a single `bash` tool call" in repair_block.text
+    assert "huge JSON string" in repair_block.text
+    assert "hit the output limit" not in repair_block.text
+
+
 def test_loop_repeated_malformed_tool_call_fails_cleanly() -> None:
     class BadProvider(Provider):
         def __init__(self) -> None:
