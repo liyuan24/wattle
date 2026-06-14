@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import threading
 from collections.abc import Callable, Mapping, MutableSequence
 from typing import Any, Literal, cast
 
@@ -335,6 +336,7 @@ async def dispatch_tool_blocks_async(
     tools_by_name: Mapping[str, Tool],
     permission_gate: PermissionGate | None = None,
     tool_event_callback: Callable[[ToolRunEvent], None] | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> list[ContentBlock]:
     """Async tool dispatch, allowing tools to return extra content blocks."""
 
@@ -350,6 +352,7 @@ async def dispatch_tool_blocks_async(
             output = await tool.arun_with_events(
                 emit=tool_event_callback,
                 tool_use_id=block.id,
+                cancel_event=cancel_event,
                 **block.input,
             )
         else:

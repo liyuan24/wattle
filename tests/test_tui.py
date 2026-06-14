@@ -21,6 +21,7 @@ import pytest
 from wattle import auth, cli, request_preparation, session, settings, tui
 from wattle.command_summary import CommandSummary, CommandSummaryKind
 from wattle.models import ModelChoice
+from wattle.runtime import TaskStatus, WattleRuntime
 from wattle.providers import (
     CompletionRequest,
     CompletionResponse,
@@ -2226,6 +2227,64 @@ def test_live_active_tool_status_has_gap_before_input_box() -> None:
     assert live.prompt_cursor_offset_from_bottom == 2
 
 
+def test_live_prompt_reminds_stop_for_running_background_tasks(tmp_path: Path) -> None:
+    out = _TTYBuffer()
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+    app.runtime = WattleRuntime(root=tmp_path)
+    log_path = app.runtime.tasks.jobs_dir / "background.log"
+    log_path.write_text("")
+    app.runtime.tasks.register_shell_task(
+        command="sleep 30",
+        pid=12345,
+        pgid=12345,
+        log_path=log_path,
+    )
+    live = tui._LiveTerminal(app)
+
+    live._draw_prompt()
+
+    visible = _strip_ansi(out.getvalue())
+    assert "Background · 1 running task; type /stop to stop all" in visible
+    assert "/stop stops background tasks" in visible
+
+
+def test_live_stop_command_stops_background_tasks(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    out = _TTYBuffer()
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+    app.runtime = WattleRuntime(root=tmp_path)
+    log_path = app.runtime.tasks.jobs_dir / "background.log"
+    log_path.write_text("")
+    task = app.runtime.tasks.register_shell_task(
+        command="sleep 30",
+        pid=12345,
+        pgid=12345,
+        log_path=log_path,
+    )
+    killed_pgids: list[int] = []
+
+    def fake_killpg(pgid: int, sig: int) -> None:
+        if sig == 0:
+            raise ProcessLookupError
+        killed_pgids.append(pgid)
+
+    monkeypatch.setattr("wattle.runtime.os.killpg", fake_killpg)
+    live = tui._LiveTerminal(app)
+    live.buffer = "/stop"
+    live.cursor = len(live.buffer)
+
+    live._submit_buffer()
+
+    assert killed_pgids == [12345]
+    assert app.runtime.tasks.snapshot(task.task_id)["status"] == TaskStatus.KILLED.value  # type: ignore[index]
+    assert "Stopped 1 background task(s)." in _strip_ansi(out.getvalue())
+    assert app.messages == []
+
+
 def test_live_running_status_redraw_does_not_repaint_input_box() -> None:
     out = _TTYBuffer()
     app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
@@ -3610,6 +3669,8 @@ def test_live_interrupt_current_turn_clears_transient_inflight_tool_results() ->
     live = tui._LiveTerminal(app)
     live.streaming = True
     live.active_turn_id = 4
+    cancel_event = threading.Event()
+    live.active_turn_cancel_event = cancel_event
     live.inflight_tool_results = [
         ToolResultBlock(tool_use_id="call_1", content="completed before interrupt")
     ]
@@ -3621,6 +3682,8 @@ def test_live_interrupt_current_turn_clears_transient_inflight_tool_results() ->
     assert live.streaming is False
     assert live.inflight_tool_results == []
     assert live.active_turn_id == 5
+    assert cancel_event.is_set()
+    assert live.active_turn_cancel_event is None
 
 
 def test_live_dispatch_uses_inflight_tools_after_model_switch(

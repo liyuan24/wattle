@@ -22,6 +22,13 @@ from .base import Tool
 from .utils.output import externalize_large_output
 
 
+class _ProcessCancelled(Exception):
+    def __init__(self, stdout: bytes = b"", stderr: bytes = b"") -> None:
+        super().__init__("process cancelled")
+        self.stdout = stdout
+        self.stderr = stderr
+
+
 class BashTool(Tool):
     MAX_TIMEOUT_SECONDS = 600.0
     PIPE_DRAIN_TIMEOUT_SECONDS = 1.0
@@ -104,6 +111,7 @@ class BashTool(Tool):
         *,
         emit: Callable[[ToolRunEvent], None],
         tool_use_id: str,
+        cancel_event: threading.Event | None = None,
         command: str,
         timeout: float = 120.0,
         background: bool = False,
@@ -121,6 +129,7 @@ class BashTool(Tool):
             tty=tty,
             max_output_chars=max_output_chars,
             max_event_chars=max_event_chars,
+            cancel_event=cancel_event,
         )
 
     def _run_with_events(
@@ -134,6 +143,7 @@ class BashTool(Tool):
         tty: bool,
         max_output_chars: int | None,
         max_event_chars: int | None,
+        cancel_event: threading.Event | None,
     ) -> str:
         if background:
             return self._run_background(command, tty=tty)
@@ -148,6 +158,7 @@ class BashTool(Tool):
                     emit=lambda text: emit(
                         ToolRunEvent(tool_use_id, self.name, "output", text, "combined")
                     ),
+                    cancel_event=cancel_event,
                 )
             return self._run_foreground_piped(
                 command,
@@ -156,6 +167,7 @@ class BashTool(Tool):
                 emit=lambda text, stream: emit(
                     ToolRunEvent(tool_use_id, self.name, "output", text, stream)
                 ),
+                cancel_event=cancel_event,
             )
         finally:
             emit(ToolRunEvent(tool_use_id, self.name, "completed"))
@@ -167,6 +179,7 @@ class BashTool(Tool):
         *,
         max_output_chars: int | None = None,
         emit: Callable[[str, str], None] | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> str:
         clamped_timeout = min(float(timeout), self.MAX_TIMEOUT_SECONDS)
         started_at = time.monotonic()
@@ -182,14 +195,40 @@ class BashTool(Tool):
             start_new_session=True,
         )
         try:
-            if emit is None:
+            if emit is None and cancel_event is None:
                 stdout, stderr = process.communicate(timeout=clamped_timeout)
             else:
                 stdout, stderr = _communicate_with_output_events(
                     process,
                     timeout=clamped_timeout,
                     emit=emit,
+                    cancel_event=cancel_event,
                 )
+        except _ProcessCancelled as cancelled:
+            _terminate_process_group(process.pid)
+            for pipe in (process.stdout, process.stderr):
+                if pipe is not None:
+                    with suppress(OSError):
+                        pipe.close()
+            with suppress(subprocess.TimeoutExpired):
+                process.wait(timeout=0.2)
+            stdout = cancelled.stdout
+            stderr = cancelled.stderr
+            elapsed = time.monotonic() - started_at
+            parts = [f"[stopped by user after {elapsed:.2f}s]"]
+            stdout_text = _decode_output(stdout)
+            stderr_text = _decode_output(stderr)
+            if stdout_text:
+                parts.append(stdout_text.rstrip("\n"))
+            if stderr_text:
+                parts.append(f"[stderr]\n{stderr_text.rstrip(chr(10))}")
+            _kill_new_processes_under_cwd(existing_pids, self.cwd)
+            return externalize_large_output(
+                _prepend_warnings("\n".join(parts), attribution.warnings),
+                root=self.cwd,
+                tool_name=self.name,
+                **_externalize_limits(max_output_chars),
+            )
         except subprocess.TimeoutExpired as timeout_error:
             with suppress(ProcessLookupError, PermissionError):
                 os.killpg(process.pid, signal.SIGKILL)
@@ -267,6 +306,7 @@ class BashTool(Tool):
         *,
         max_output_chars: int | None = None,
         emit: Callable[[str], None] | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> str:
         clamped_timeout = min(float(timeout), self.MAX_TIMEOUT_SECONDS)
         started_at = time.monotonic()
@@ -288,9 +328,14 @@ class BashTool(Tool):
 
         chunks: list[bytes] = []
         timed_out = False
+        cancelled = False
         try:
             deadline = started_at + clamped_timeout
             while True:
+                if cancel_event is not None and cancel_event.is_set():
+                    cancelled = True
+                    _terminate_process_group(process.pid)
+                    break
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     timed_out = True
@@ -326,7 +371,10 @@ class BashTool(Tool):
 
         output_text = b"".join(chunks).decode(errors="replace").rstrip("\n")
         parts: list[str] = list(attribution.warnings)
-        if timed_out:
+        if cancelled:
+            elapsed = time.monotonic() - started_at
+            parts.append(f"[stopped by user after {elapsed:.2f}s]")
+        elif timed_out:
             elapsed = time.monotonic() - started_at
             parts.append(f"[timeout after {clamped_timeout:g}s; elapsed {elapsed:.2f}s]")
         if output_text:
@@ -435,7 +483,8 @@ def _communicate_with_output_events(
     process: subprocess.Popen[bytes],
     *,
     timeout: float,
-    emit: Callable[[str, str], None],
+    emit: Callable[[str, str], None] | None,
+    cancel_event: threading.Event | None = None,
 ) -> tuple[bytes, bytes]:
     stdout_chunks: list[bytes] = []
     stderr_chunks: list[bytes] = []
@@ -448,6 +497,11 @@ def _communicate_with_output_events(
         streams[process.stderr.fileno()] = ("stderr", stderr_chunks)
     deadline = time.monotonic() + timeout
     while streams:
+        if cancel_event is not None and cancel_event.is_set():
+            raise _ProcessCancelled(
+                b"".join(stdout_chunks),
+                b"".join(stderr_chunks),
+            )
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise subprocess.TimeoutExpired(process.args, timeout)
@@ -464,7 +518,8 @@ def _communicate_with_output_events(
                 continue
             if data:
                 chunks.append(data)
-                emit(_decode_output(data), stream)
+                if emit is not None:
+                    emit(_decode_output(data), stream)
             else:
                 streams.pop(fd, None)
     process.wait(timeout=0)
@@ -478,6 +533,21 @@ def _read_pty(fd: int) -> bytes:
         if exc.errno == errno.EIO:
             return b""
         raise
+
+
+def _terminate_process_group(pgid: int, *, grace_seconds: float = 0.5) -> None:
+    with suppress(ProcessLookupError, PermissionError):
+        os.killpg(pgid, signal.SIGTERM)
+    deadline = time.monotonic() + grace_seconds
+    while time.monotonic() < deadline:
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return
+        except PermissionError:
+            break
+        time.sleep(0.02)
+    _kill_process_group(pgid)
 
 
 def _kill_process_group(pgid: int) -> None:

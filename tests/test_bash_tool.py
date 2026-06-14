@@ -8,6 +8,7 @@ import shlex
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -272,6 +273,55 @@ def test_foreground_tty_emits_combined_output_events(tmp_path: Path) -> None:
         event.kind == "output" and event.stream == "combined" and "tty-event" in event.text
         for event in events
     )
+
+
+def test_foreground_piped_can_be_cancelled(tmp_path: Path) -> None:
+    tool = BashTool(cwd=tmp_path)
+    cancel_event = threading.Event()
+    command = _python_command("import time; print('started', flush=True); time.sleep(30)")
+
+    async def run() -> str:
+        task = asyncio.create_task(
+            tool.arun_with_events(
+                emit=lambda _event: None,
+                tool_use_id="call_1",
+                command=command,
+                cancel_event=cancel_event,
+            )
+        )
+        await asyncio.sleep(0.2)
+        cancel_event.set()
+        return await asyncio.wait_for(task, timeout=3.0)
+
+    output = asyncio.run(run())
+
+    assert "[stopped by user after" in output
+    assert "started" in output
+
+
+def test_foreground_tty_can_be_cancelled(tmp_path: Path) -> None:
+    tool = BashTool(cwd=tmp_path)
+    cancel_event = threading.Event()
+    command = _python_command("import time; print('tty-started', flush=True); time.sleep(30)")
+
+    async def run() -> str:
+        task = asyncio.create_task(
+            tool.arun_with_events(
+                emit=lambda _event: None,
+                tool_use_id="call_1",
+                command=command,
+                tty=True,
+                cancel_event=cancel_event,
+            )
+        )
+        await asyncio.sleep(0.2)
+        cancel_event.set()
+        return await asyncio.wait_for(task, timeout=3.0)
+
+    output = asyncio.run(run())
+
+    assert "[stopped by user after" in output
+    assert "tty-started" in output
 
 
 def test_background_task_metadata_log_and_status_update(tmp_path: Path) -> None:

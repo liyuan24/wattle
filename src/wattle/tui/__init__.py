@@ -164,6 +164,7 @@ SLASH_COMMAND_HINTS: tuple[tuple[str, str], ...] = (
     ("/resume", "switch to a saved session"),
     ("/session", "show persistence and saved session path"),
     ("/status", "show session and status details"),
+    ("/stop", "stop all running background tasks"),
 )
 
 DEFAULT_LOGIN_CALLBACK_TIMEOUT_SECONDS = 300.0
@@ -3615,6 +3616,9 @@ class WattleApp:
         if cmd in ("/session", "/status"):
             self._write_session_status()
             return False
+        if cmd == "/stop":
+            self._handle_stop_background_tasks()
+            return False
         if cmd == "/model":
             self._handle_model(rest)
             return False
@@ -3639,6 +3643,16 @@ class WattleApp:
             await self._ahandle_compact(rest)
             return False
         return self._handle_slash(text)
+
+    def _handle_stop_background_tasks(self) -> None:
+        stopped, lost = self.runtime.tasks.stop_all_running()
+        if stopped or lost:
+            detail = f"Stopped {stopped} background task(s)."
+            if lost:
+                detail += f" {lost} task(s) were already gone or inaccessible."
+            self._write_panel("status", detail, STATUS_STYLE)
+            return
+        self._write_panel("status", "No running background tasks.", STATUS_STYLE)
 
     def _handle_branch(self) -> None:
         if self._session_record is None:
@@ -4715,6 +4729,7 @@ class _LiveTerminal:
         self.active_tool_status: str | None = None
         self.active_exec_cells: dict[str, _BashExecCell] = {}
         self._tool_event_queue: queue.Queue[ToolRunEvent] = queue.Queue()
+        self.active_turn_cancel_event: threading.Event | None = None
         self.active_turn_id = 0
         self.model_picker_choices: list[ModelChoice] | None = None
         self.model_picker_selected = 0
@@ -5231,6 +5246,8 @@ class _LiveTerminal:
         self._record_input_history(text)
         expanded_text = self.app._expand_skill_text(text)
         if expanded_text is None and _should_route_slash_command(text):
+            if self._handle_live_stop_command(text):
+                return
             if self._handle_live_queue_command(text):
                 return
             should_exit = self.app._handle_slash(text)
@@ -5392,6 +5409,7 @@ class _LiveTerminal:
         if not self.streaming:
             self._draw_prompt()
             return
+        self._cancel_active_turn_work()
         self.active_turn_id += 1
         self._clear_stream_buffers()
         self._clear_prompt()
@@ -5404,6 +5422,7 @@ class _LiveTerminal:
         self.inflight_tool_results = []
         self.inflight_tools_by_name = {}
         self.active_tool_status = None
+        self.active_turn_cancel_event = None
         self.working_started_at = None
         self.turn_started_at = None
         self.app._write_panel(
@@ -5413,6 +5432,10 @@ class _LiveTerminal:
         )
         self._reset_provider_for_interrupt()
         self._draw_prompt()
+
+    def _cancel_active_turn_work(self) -> None:
+        if self.active_turn_cancel_event is not None:
+            self.active_turn_cancel_event.set()
 
     def _start_queued_turn(self) -> None:
         self._append_pending_user_message(render=True)
@@ -5451,6 +5474,7 @@ class _LiveTerminal:
             or not (self.pending_user_inputs or self.turn_followup_user_inputs)
         ):
             return
+        self._cancel_active_turn_work()
         self.active_turn_id += 1
         self._clear_stream_buffers()
         self._clear_prompt()
@@ -5531,6 +5555,14 @@ class _LiveTerminal:
                     self.app._write_unsupported_image_notice()
         return prepared_pending, attachment_blocks
 
+    def _handle_live_stop_command(self, text: str) -> bool:
+        cmd, _, _rest = text.partition(" ")
+        if cmd != "/stop":
+            return False
+        self.app._handle_stop_background_tasks()
+        self._draw_prompt()
+        return True
+
     def _handle_live_queue_command(self, text: str) -> bool:
         cmd, _, rest = text.partition(" ")
         if cmd != "/queue":
@@ -5577,6 +5609,7 @@ class _LiveTerminal:
             self.turn_started_at = time.monotonic()
         self.working_started_at = time.monotonic()
         self.active_turn_id += 1
+        self.active_turn_cancel_event = threading.Event()
         self.in_text = False
         self.in_thinking = False
         self.seen_tools = set()
@@ -5659,6 +5692,7 @@ class _LiveTerminal:
                 self.inflight_tool_results = []
                 self.inflight_tools_by_name = {}
                 self.worker = None
+                self.active_turn_cancel_event = None
                 self.active_tool_status = None
                 self.working_started_at = None
                 self.turn_started_at = None
@@ -5743,6 +5777,7 @@ class _LiveTerminal:
                 self.app._append_followup_user(list(tool_results))
             self.inflight_tool_results = []
             self.inflight_tools_by_name = {}
+            self.active_turn_cancel_event = None
             self._remember_worked_duration()
             return
         pending_monitor_texts = self.pending_monitor_inputs
@@ -5798,6 +5833,7 @@ class _LiveTerminal:
             self.inflight_tools_by_name = {}
             self.active_tool_status = None
             self.streaming = False
+            self.active_turn_cancel_event = None
             self.working_started_at = None
             self.app._write_status_snapshot()
             self._remember_worked_duration()
@@ -5884,9 +5920,10 @@ class _LiveTerminal:
             ]
 
         result_box: list[list[ContentBlock]] = []
+        cancel_event = self.active_turn_cancel_event
 
         def run_tool() -> None:
-            result_box.append(self._run_tool_without_permission(block, tool))
+            result_box.append(self._run_tool_without_permission(block, tool, cancel_event))
 
         self.active_tool_status = _tool_running_title(block)
         self._last_running_frame_at = 0.0
@@ -5951,9 +5988,18 @@ class _LiveTerminal:
         self,
         block: ToolUseBlock,
         tool: Tool,
+        cancel_event: threading.Event | None,
     ) -> list[ContentBlock]:
         callback = self._tool_event_queue.put if block.name == "bash" else None
-        return asyncio.run(dispatch_tool_blocks_async(block, {tool.name: tool}, None, callback))
+        return asyncio.run(
+            dispatch_tool_blocks_async(
+                block,
+                {tool.name: tool},
+                None,
+                callback,
+                cancel_event,
+            )
+        )
 
     def _drain_tool_events(self) -> bool:
         changed = False
@@ -6014,6 +6060,7 @@ class _LiveTerminal:
         preview = rendered_input.text
         cursor = min(len(preview), rendered_input.cursor)
         visible_subagents = self._visible_subagent_snapshots()
+        running_background_tasks = self._running_background_task_count()
         if self.compacting:
             frame = COMPACTION_FRAMES[int(time.monotonic() * 8) % len(COMPACTION_FRAMES)]
             line = f" {frame} Auto-compacting..."
@@ -6050,6 +6097,15 @@ class _LiveTerminal:
             omitted = len(visible_subagents) - 3
             if omitted > 0:
                 rows.append(_styled_terminal_line(f"  ... +{omitted} more", STATUS_STYLE, width))
+        if running_background_tasks:
+            noun = "task" if running_background_tasks == 1 else "tasks"
+            rows.append(
+                _styled_terminal_line(
+                    f" Background · {running_background_tasks} running {noun}; type /stop to stop all",
+                    STATUS_STYLE,
+                    width,
+                )
+            )
         if self.interrupted_user_inputs:
             title = " Interrupted messages to be sent with your next message"
             rows.append(_styled_terminal_line(title, STATUS_STYLE, width))
@@ -6144,6 +6200,8 @@ class _LiveTerminal:
                     if self.streaming and preview.strip()
                     else status
                 )
+                if running_background_tasks and not preview.strip():
+                    status_text = f"{status_text} · /stop stops background tasks"
                 line = f" {status_text}"[:line_width].ljust(line_width)
                 statusline = f"{STATUSLINE_STYLE}{_style_statusline_text(line)}{RESET}"
                 rows.append(_filled_terminal_line(statusline, STATUSLINE_STYLE, width))
@@ -6159,6 +6217,13 @@ class _LiveTerminal:
         if subagents is None:
             return []
         return _visible_subagent_snapshots(subagents.snapshots())
+
+    def _running_background_task_count(self) -> int:
+        return sum(
+            1
+            for task in self.app.runtime.tasks.snapshots()
+            if task.get("status") == "running"
+        )
 
     def _write_prompt_frame(
         self,

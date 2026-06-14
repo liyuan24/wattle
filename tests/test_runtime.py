@@ -80,6 +80,24 @@ def test_runtime_event_queue_notifies_subscribers(tmp_path: Path) -> None:
     assert [event["event_type"] for event in received] == ["pattern_match"]
 
 
+def test_registry_stop_all_running_terminates_background_process(tmp_path: Path) -> None:
+    runtime = WattleRuntime(root=tmp_path)
+    tool = BashTool(runtime=runtime, cwd=tmp_path)
+    output = tool.run(_python_command("import time; time.sleep(30)"), background=True)
+    task_id = dict(line.split(": ", 1) for line in output.splitlines())["task_id"]
+
+    stopped, lost = runtime.tasks.stop_all_running()
+
+    assert (stopped, lost) == (1, 0)
+
+    def is_terminal() -> bool:
+        snapshot = runtime.tasks.snapshot(task_id)
+        return snapshot is not None and snapshot["status"] in {"killed", "lost"}
+
+    _wait_for(is_terminal)
+    assert runtime.tasks.snapshot(task_id)["exit_code"] is None  # type: ignore[index]
+
+
 def test_registry_cleanup_terminates_running_background_process(tmp_path: Path) -> None:
     runtime = WattleRuntime(root=tmp_path)
     tool = BashTool(runtime=runtime, cwd=tmp_path)

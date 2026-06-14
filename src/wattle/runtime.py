@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import queue
@@ -172,20 +173,31 @@ class TaskRegistry:
             self._write_status_locked(task)
             return task
 
-    def cleanup(self) -> None:
+    def stop_all_running(self) -> tuple[int, int]:
         with self._lock:
             tasks = [
                 task for task in self._tasks.values() if task.status == TaskStatus.RUNNING
             ]
+        stopped = 0
+        lost = 0
         for task in tasks:
             try:
                 os.killpg(task.pgid, signal.SIGTERM)
-                status = TaskStatus.KILLED
             except ProcessLookupError:
-                status = TaskStatus.LOST
+                self.mark_terminal(task.task_id, status=TaskStatus.LOST, exit_code=None)
+                lost += 1
+                continue
             except PermissionError:
-                status = TaskStatus.LOST
-            self.mark_terminal(task.task_id, status=status, exit_code=None)
+                self.mark_terminal(task.task_id, status=TaskStatus.LOST, exit_code=None)
+                lost += 1
+                continue
+            self.mark_terminal(task.task_id, status=TaskStatus.KILLED, exit_code=None)
+            stopped += 1
+            _finish_stopping_process_group(task.pgid)
+        return stopped, lost
+
+    def cleanup(self) -> None:
+        self.stop_all_running()
 
     def _write_status_locked(self, task: AsyncTask) -> None:
         task.status_path.write_text(
@@ -199,6 +211,20 @@ class TaskRegistry:
         data["log_path"] = str(task.log_path)
         data["status_path"] = str(task.status_path)
         return data
+
+
+def _finish_stopping_process_group(pgid: int, *, grace_seconds: float = 0.5) -> None:
+    deadline = time.monotonic() + grace_seconds
+    while time.monotonic() < deadline:
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return
+        except PermissionError:
+            return
+        time.sleep(0.02)
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(pgid, signal.SIGKILL)
 
 
 class MonitorRegistry:
