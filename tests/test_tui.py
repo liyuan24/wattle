@@ -2082,6 +2082,41 @@ def test_flower_working_status_renders_shape_with_gradient() -> None:
     assert _strip_ansi(rendered) == " ✿ wattling...                "
 
 
+def test_active_tool_terminal_line_animates_only_marker() -> None:
+    first = tui._active_tool_terminal_line("running bash - pytest", 32, frame=0)
+    second = tui._active_tool_terminal_line("running bash - pytest", 32, frame=2)
+
+    assert first != second
+    assert _strip_ansi(first) == " • running bash - pytest        "
+    assert _strip_ansi(second) == " • running bash - pytest        "
+    first_marker = first.index("•")
+    second_marker = second.index("•")
+    assert first[:first_marker] != second[:second_marker]
+    assert first[first_marker + 1 :] == second[second_marker + 1 :]
+
+
+def test_append_terminal_output_replaces_carriage_return_line() -> None:
+    output, at_line_start = tui._append_terminal_output("", "Progress: 21.9% ETA: 48s\r")
+    assert output == "Progress: 21.9% ETA: 48s"
+    assert at_line_start
+
+    output, at_line_start = tui._append_terminal_output(
+        output,
+        "Progress: 22.0% ETA: 47s\r",
+        cursor_at_line_start=at_line_start,
+    )
+    assert output == "Progress: 22.0% ETA: 47s"
+    assert at_line_start
+
+    output, at_line_start = tui._append_terminal_output(
+        output,
+        "\ndone\n",
+        cursor_at_line_start=at_line_start,
+    )
+    assert output == "Progress: 22.0% ETA: 47s\ndone\n"
+    assert not at_line_start
+
+
 @pytest.mark.parametrize(
     ("seconds", "expected"),
     [
@@ -4683,6 +4718,34 @@ def test_terminal_bash_exec_cell_prompt_rows_show_running_output() -> None:
     assert "  └ line2" in plain
     assert "    line6" in plain
     assert "line1" not in plain
+
+
+def test_terminal_bash_live_progress_replaces_carriage_return_line() -> None:
+    cell = tui._BashExecCell(
+        tool_use_id="call_1",
+        command="python train.py",
+    )
+    for chunk in [
+        "Progress: 21.9% Trials: 2 ETA: 48s\r",
+        "Progress: 22.0% Trials: 2 ETA: 47s\r",
+        "Progress: 22.1% Trials: 2 ETA: 46s\r",
+    ]:
+        output, cursor_at_line_start = tui._append_terminal_output(
+            cell.output,
+            chunk,
+            cursor_at_line_start=cell.cursor_at_line_start,
+        )
+        cell.output = output
+        cell.cursor_at_line_start = cursor_at_line_start
+
+    rendered = "\n".join(
+        tui._bash_exec_cell_prompt_rows(cell, width=80, styles_enabled=False)
+    )
+    plain = _strip_ansi(rendered)
+
+    assert "Progress: 22.1% Trials: 2 ETA: 46s" in plain
+    assert "Progress: 21.9%" not in plain
+    assert "Progress: 22.0%" not in plain
 
 
 def test_terminal_bash_tool_externalized_output_hides_metadata() -> None:

@@ -132,6 +132,7 @@ from wattle.tui_flowers import Flower, flower_for_elapsed
 from wattle.turns import append_turn_step, build_turn_step
 from wattle.version import get_wattle_version
 
+_active_tool_terminal_line = terminal_rendering.active_tool_terminal_line
 _default_terminal_line = terminal_rendering.default_terminal_line
 _filled_terminal_line = terminal_rendering.filled_terminal_line
 _running_terminal_line = terminal_rendering.running_terminal_line
@@ -458,6 +459,32 @@ def _tail_chars(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[-limit:]
 
 
+def _append_terminal_output(
+    existing: str,
+    chunk: str,
+    *,
+    cursor_at_line_start: bool = False,
+) -> tuple[str, bool]:
+    """Append process output while honoring carriage-return line replacement."""
+
+    output = existing
+    at_line_start = cursor_at_line_start
+    for char in chunk:
+        if char == "\r":
+            at_line_start = True
+            continue
+        if char == "\n":
+            output += char
+            at_line_start = False
+            continue
+        if at_line_start:
+            line_start = output.rfind("\n") + 1
+            output = output[:line_start]
+            at_line_start = False
+        output += char
+    return output, at_line_start
+
+
 def _plain_terminal_rows(text: str, *, width: int) -> list[str]:
     rows: list[str] = []
     for line in text.splitlines() or [""]:
@@ -513,6 +540,7 @@ def _bash_exec_cell_prompt_rows(
     *,
     width: int,
     styles_enabled: bool,
+    frame: int = 0,
 ) -> list[str]:
     rows = _bash_exec_cell_plain_rows(cell, width=width)
     if not styles_enabled:
@@ -524,8 +552,19 @@ def _bash_exec_cell_prompt_rows(
             prefix = f"{TOOL_MARKER} {status} "
             command = row[len(prefix) :]
             rendered_command = _render_shell_command(command) or command
+            marker_styles = (
+                TOOL_MARKER_STYLE,
+                "\x1b[38;5;118;1m",
+                "\x1b[38;5;159;1m",
+                "\x1b[38;5;118;1m",
+            )
+            marker_style = (
+                marker_styles[frame % len(marker_styles)]
+                if cell.running
+                else TOOL_MARKER_STYLE
+            )
             line = (
-                f"{TOOL_MARKER_STYLE}{TOOL_MARKER}{RESET} "
+                f"{marker_style}{TOOL_MARKER}{RESET} "
                 f"{TOOL_TITLE_STYLE}{status}{RESET} "
                 f"{rendered_command}"
             )
@@ -1834,6 +1873,7 @@ class _BashExecCell:
     output: str = ""
     running: bool = True
     is_error: bool = False
+    cursor_at_line_start: bool = False
 
 
 @dataclass(frozen=True)
@@ -4650,6 +4690,7 @@ class _LiveTerminal:
         self.compacting = False
         self._last_compaction_frame_at = 0.0
         self._last_running_frame_at = 0.0
+        self._last_tool_output_prompt_redraw_at = 0.0
         self.working_started_at: float | None = None
         self.last_worked_duration_text: str | None = None
         self.prompt_lines = 0
@@ -5849,6 +5890,7 @@ class _LiveTerminal:
 
         self.active_tool_status = _tool_running_title(block)
         self._last_running_frame_at = 0.0
+        self._last_tool_output_prompt_redraw_at = 0.0
         if block.name == "wait_agent":
             self.app._write_wait_agent_begin(block)
         self._draw_prompt()
@@ -5859,6 +5901,8 @@ class _LiveTerminal:
         )
         worker.start()
         try:
+            prompt_dirty = False
+            tool_output_redraw_interval = 0.12
             while worker.is_alive():
                 if self.fd >= 0:
                     self._read_available_input()
@@ -5870,10 +5914,20 @@ class _LiveTerminal:
                             is_error=True,
                         )
                     ]
-                self._last_running_frame_at = time.monotonic()
+                now = time.monotonic()
                 if self._drain_tool_events():
+                    prompt_dirty = True
+                should_redraw_prompt = (
+                    prompt_dirty
+                    or bool(self.active_exec_cells)
+                ) and now - self._last_tool_output_prompt_redraw_at >= tool_output_redraw_interval
+                if should_redraw_prompt:
+                    self._last_tool_output_prompt_redraw_at = now
+                    self._last_running_frame_at = now
                     self._draw_prompt()
+                    prompt_dirty = False
                 else:
+                    self._last_running_frame_at = now
                     self._redraw_running_status_line()
                 worker.join(timeout=0.04)
         finally:
@@ -5919,7 +5973,13 @@ class _LiveTerminal:
             elif event.kind == "output":
                 cell = self.active_exec_cells.get(event.tool_use_id)
                 if cell is not None:
-                    cell.output = _tail_chars(cell.output + event.text, 12000)
+                    output, cursor_at_line_start = _append_terminal_output(
+                        cell.output,
+                        event.text,
+                        cursor_at_line_start=cell.cursor_at_line_start,
+                    )
+                    cell.output = _tail_chars(output, 12000)
+                    cell.cursor_at_line_start = cursor_at_line_start
             elif event.kind == "completed":
                 cell = self.active_exec_cells.get(event.tool_use_id)
                 if cell is not None:
@@ -5960,12 +6020,14 @@ class _LiveTerminal:
             rows.append(_styled_terminal_line(line, COMPACTION_STYLE, width))
         elif self.streaming and self.active_exec_cells:
             rows.append(_default_terminal_line("", width))
+            frame = int(time.monotonic() * 12)
             for cell in self.active_exec_cells.values():
                 rows.extend(
                     _bash_exec_cell_prompt_rows(
                         cell,
                         width=width,
                         styles_enabled=self.app._styles_enabled(),
+                        frame=frame,
                     )
                 )
             rows.append(_default_terminal_line("", width))
@@ -6137,8 +6199,8 @@ class _LiveTerminal:
         if self.app._styles_enabled():
             frame = int(time.monotonic() * 48)
             if self.active_tool_status is not None:
-                return _running_terminal_line(
-                    f" {self.active_tool_status}",
+                return _active_tool_terminal_line(
+                    self.active_tool_status,
                     width,
                     frame=frame,
                 )
@@ -6165,6 +6227,7 @@ class _LiveTerminal:
         return (
             self.streaming
             and not self.compacting
+            and not self.active_exec_cells
             and not self._suppress_running_status_line(self._visible_subagent_snapshots())
         )
 

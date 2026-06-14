@@ -76,6 +76,35 @@ def running_terminal_line(
     return "".join(parts)
 
 
+def active_tool_terminal_line(text: str, width: int, *, frame: int) -> str:
+    """Render a running tool status with motion localized to one marker.
+
+    The command/status text stays visually stable across frames; only the small
+    activity marker changes color. This keeps long-running commands visibly
+    alive without making the entire command line shimmer.
+    """
+
+    visible_width = terminal_line_width(width)
+    content = text.strip()
+    line = f" • {content}"[:visible_width].ljust(visible_width)
+    marker_index = line.find("•")
+    marker_styles = (
+        "\x1b[38;5;82;1m",
+        "\x1b[38;5;118;1m",
+        "\x1b[38;5;159;1m",
+        "\x1b[38;5;118;1m",
+    )
+    marker_style = marker_styles[frame % len(marker_styles)]
+    parts = ["\r\x1b[?7l\x1b[38;5;255m\x1b[2K"]
+    for index, char in enumerate(line):
+        if index == marker_index:
+            parts.append(f"{marker_style}{char}\x1b[38;5;255m")
+        else:
+            parts.append(char)
+    parts.append(f"{RESET}\x1b[?7h")
+    return "".join(parts)
+
+
 def black_terminal_line(text: str, width: int) -> str:
     visible_width = terminal_line_width(width)
     line = text[:visible_width].ljust(visible_width)
