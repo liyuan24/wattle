@@ -4,6 +4,7 @@ import asyncio
 from pathlib import Path
 
 from wattle.compaction import RuntimeCompaction, estimate_request_context_tokens
+from wattle.deadline import RunDeadline, append_runtime_deadline_notice, run_deadline_from_env
 from wattle.providers import CompletionResponse, ImageBlock, Message, StubProvider, TextBlock
 from wattle.request_preparation import RequestPreparer, project_messages_for_model_modalities
 
@@ -172,3 +173,44 @@ def test_prepare_prefers_provider_context_tokens_from_message_history() -> None:
     assert preparer.state.summary == "history summary"
     assert "history summary" in prepared.request.messages[0].content[0].text
     assert prepared.request.messages[-1] == messages[-1]
+
+
+def test_prepare_adds_fresh_runtime_deadline_notice_to_request_system() -> None:
+    now = [1000.0]
+    deadline = RunDeadline(epoch_ms=1_900_000, clock=lambda: now[0])
+    preparer = RequestPreparer(
+        provider=StubProvider([]),
+        model="test-model",
+        system="Base system.",
+        tools=[],
+        max_tokens=1024,
+        run_deadline=deadline,
+    )
+    messages = [Message(role="user", content=[TextBlock(text="do it")])]
+
+    first = asyncio.run(preparer.aprepare(messages))
+    now[0] = 1850.0
+    second = asyncio.run(preparer.aprepare(messages))
+
+    assert first.request.system is not None
+    assert first.request.system.startswith("Base system.")
+    assert "Wall-clock budget remaining for this run: about 15 minutes." in (
+        first.request.system
+    )
+    assert second.request.system is not None
+    assert "Wall-clock budget remaining for this run: about 50 seconds." in (
+        second.request.system
+    )
+    assert "only start commands that fit in the remaining time" in second.request.system
+
+
+def test_runtime_deadline_notice_can_be_loaded_from_env() -> None:
+    deadline = run_deadline_from_env(
+        {"WATTLE_RUN_DEADLINE_EPOCH_MS": "160000"},
+        clock=lambda: 100.0,
+    )
+
+    system = append_runtime_deadline_notice(None, deadline)
+
+    assert system is not None
+    assert "Wall-clock budget remaining for this run: about 60 seconds." in system

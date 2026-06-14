@@ -19,6 +19,7 @@ from wattle.compaction import (
     amaybe_compact_messages,
     estimate_request_context_tokens,
 )
+from wattle.deadline import RunDeadline, append_runtime_deadline_notice, run_deadline_from_env
 from wattle.models import (
     context_window_for_model,
     model_supports_modality,
@@ -79,6 +80,7 @@ class RequestPreparer:
         stream_max_retries: int = DEFAULT_STREAM_MAX_RETRIES,
         stream_idle_timeout_seconds: float | None = None,
         on_stream_retry: StreamRetryCallback | None = None,
+        run_deadline: RunDeadline | None = None,
     ) -> None:
         self.provider = provider
         self.model = model
@@ -103,6 +105,7 @@ class RequestPreparer:
             else max(0.001, stream_idle_timeout_seconds)
         )
         self.on_stream_retry = on_stream_retry
+        self.run_deadline = run_deadline if run_deadline is not None else run_deadline_from_env()
 
     def _provider_context_tokens(self, messages: list[Message]) -> int | None:
         history_tokens = _latest_provider_context_tokens(messages)
@@ -125,15 +128,16 @@ class RequestPreparer:
             messages,
             model=self.model,
         )
+        request_system = append_runtime_deadline_notice(self.system, self.run_deadline)
         raw_context_tokens = estimate_request_context_tokens(
-            system=self.system,
+            system=request_system,
             messages=projected_input_messages,
             tools=self.tools,
         )
         request_messages, state = await amaybe_compact_messages(
             provider=self.provider,
             model=self.model,
-            system=self.system,
+            system=request_system,
             messages=projected_input_messages,
             tools=self.tools,
             max_tokens=self.max_tokens,
@@ -155,7 +159,7 @@ class RequestPreparer:
             model=self.model,
         )
         context_tokens = estimate_request_context_tokens(
-            system=self.system,
+            system=request_system,
             messages=projected_messages,
             tools=self.tools,
         )
@@ -171,7 +175,7 @@ class RequestPreparer:
                 model=self.model,
                 messages=projected_messages,
                 max_tokens=self.max_tokens,
-                system=self.system,
+                system=request_system,
                 tools=self.tools,
                 thinking=self.thinking,
                 effort=self.effort,
@@ -181,7 +185,7 @@ class RequestPreparer:
                 model=self.model,
                 messages=projected_messages,
                 max_tokens=self.max_tokens,
-                system=self.system,
+                system=request_system,
                 tools=self.tools,
                 thinking=self.thinking,
                 effort=self.effort,
