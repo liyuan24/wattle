@@ -95,6 +95,68 @@ def test_projection_surfaces_repeated_failures_artifacts_and_metric_sources(
     assert "ls -la" not in rendered
 
 
+def test_path_discovery_ignores_heredoc_code_tokens(tmp_path: Path) -> None:
+    store = RuntimeContextStore(root=tmp_path)
+
+    store.record_tool_metadata(
+        tool_use_id="toolu_code",
+        tool_name="bash",
+        metadata={
+            "command": (
+                "python - <<'PY'\n"
+                "import importlib.util\n"
+                "p='data/train-00000-of-00001.parquet'\n"
+                "pf=pq.ParquetFile(path)\n"
+                "tbl=pf.read_row_group(rg, columns=[label,text])\n"
+                "print('ok')\n"
+                "PY"
+            ),
+            "cwd": str(tmp_path),
+            "status": "success",
+            "exit_code": 0,
+            "elapsed_seconds": 1.0,
+            "timeout_seconds": 120.0,
+            "stdout_tail": "ok\n",
+            "stderr_tail": "",
+        },
+    )
+
+    projection = store.project()
+
+    assert projection is not None
+    artifact_text = "\n".join(fact.text for fact in projection.artifacts)
+    assert "importlib.util" not in artifact_text
+    assert "train-00000-of-00001.parquet" not in artifact_text
+    assert "read_row_group" not in artifact_text
+    assert "ParquetFile" not in artifact_text
+
+
+def test_path_discovery_keeps_common_bare_artifact_names(tmp_path: Path) -> None:
+    model = tmp_path / "model.bin"
+    model.write_bytes(b"model")
+    store = RuntimeContextStore(root=tmp_path)
+
+    store.record_tool_metadata(
+        tool_use_id="toolu_model",
+        tool_name="bash",
+        metadata={
+            "command": "cp /tmp/source model.bin",
+            "cwd": str(tmp_path),
+            "status": "success",
+            "exit_code": 0,
+            "elapsed_seconds": 1.0,
+            "timeout_seconds": 120.0,
+            "stdout_tail": "",
+            "stderr_tail": "",
+        },
+    )
+
+    projection = store.project()
+
+    assert projection is not None
+    assert str(model) in render_runtime_context_projection(projection)
+
+
 def test_projection_includes_active_task_snapshot(tmp_path: Path) -> None:
     store = RuntimeContextStore(
         root=tmp_path,

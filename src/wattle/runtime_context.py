@@ -37,6 +37,27 @@ VALIDATION_COMMANDS = frozenset(
         "uv run pytest",
     }
 )
+BARE_ARTIFACT_SUFFIXES = frozenset(
+    {
+        ".bin",
+        ".csv",
+        ".db",
+        ".json",
+        ".jsonl",
+        ".log",
+        ".model",
+        ".onnx",
+        ".out",
+        ".parquet",
+        ".pkl",
+        ".pt",
+        ".pth",
+        ".sqlite",
+        ".tar",
+        ".txt",
+        ".zip",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -606,16 +627,22 @@ def _path_like_command_args(command: str) -> list[str]:
     for part in parts[1:]:
         if part.startswith("-") or "://" in part:
             continue
-        if re.search(r"\s", part):
+        if re.search(r"\s", part) or not _is_safe_path_token(part):
             continue
-        name = Path(part).name
-        if "/" not in part and "." not in name:
+        path = Path(part)
+        if path.is_absolute() or part.startswith(("./", "../", "~/")):
+            result.append(part)
             continue
-        suffix = Path(part).suffix
-        if suffix and not re.search(r"[A-Za-z]", suffix):
+        if "/" in part:
+            result.append(part)
             continue
-        result.append(part)
+        if path.suffix.lower() in BARE_ARTIFACT_SUFFIXES:
+            result.append(part)
     return result
+
+
+def _is_safe_path_token(value: str) -> bool:
+    return re.fullmatch(r"~?[A-Za-z0-9_./@%+:-]+", value) is not None
 
 
 def _resolve_path(raw: str, cwd: Path) -> Path:
