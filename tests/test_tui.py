@@ -1991,6 +1991,50 @@ def test_assistant_markdown_wraps_quotes_with_quote_indent() -> None:
     assert {row.style for row in rows} == {tui.THINKING_STYLE}
 
 
+def test_assistant_markdown_table_wraps_cells_without_losing_columns() -> None:
+    rows = tui._render_markdown_text(
+        "| User query | Time window | Matching semantics |\n"
+        "|---|---:|---|\n"
+        "| find my meetings at 5pm | point: 5pm | overlap/contains: "
+        "meeting_start <= 5pm <= meeting_end |\n"
+        "| what's my next meeting today | now to today end | start_after + top=1 "
+        "+ sort asc |",
+        width=60,
+    )
+
+    assert [row.text for row in rows] == [
+        "User query            │ Time      │ Matching semantics",
+        "                      │ window    │",
+        "──────────────────────┼───────────┼────────────────────────",
+        "find my meetings at   │ point:    │ overlap/contains:",
+        "5pm                   │ 5pm       │ meeting_start <= 5pm <=",
+        "                      │           │ meeting_end",
+        "what's my next        │ now to    │ start_after + top=1 +",
+        "meeting today         │ today end │ sort asc",
+    ]
+    assert all(
+        "│" in row.text or "┼" in row.text
+        for row in rows
+    )
+
+
+def test_assistant_markdown_table_remains_a_table_at_narrow_width() -> None:
+    rows = tui._render_markdown_text(
+        "| Query | Window | Match |\n"
+        "|---|---|---|\n"
+        "| next meeting today | now to today end | start_after top one |",
+        width=32,
+    )
+
+    assert [row.text for row in rows] == [
+        "Query    │ Window   │ Match",
+        "─────────┼──────────┼──────────",
+        "next     │ now to   │ start_aft",
+        "meeting  │ today    │ er top",
+        "today    │ end      │ one",
+    ]
+
+
 def test_assistant_markdown_highlights_fenced_code() -> None:
     out = _TTYBuffer()
     app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)

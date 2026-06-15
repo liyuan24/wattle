@@ -2125,6 +2125,7 @@ _EMPHASIS_RE = re.compile(
 )
 _STRIKE_RE = re.compile(r"~~(.+?)~~")
 _CODE_FENCE_RE = re.compile(r"^\s*(```+|~~~+)\s*([^`]*)$")
+_TABLE_SEPARATOR_CELL_RE = re.compile(r":?-{3,}:?")
 
 
 def _strip_inline_markdown(text: str) -> str:
@@ -2171,6 +2172,147 @@ def _wrap_markdown_line(
         drop_whitespace=True,
     )
     return [_RenderedTextLine(line, style) for line in (wrapped or [first_prefix + text])]
+
+
+def _split_markdown_table_row(line: str) -> list[str]:
+    stripped = line.strip()
+    if stripped.startswith("|"):
+        stripped = stripped[1:]
+    if stripped.endswith("|"):
+        stripped = stripped[:-1]
+    cells: list[str] = []
+    cell: list[str] = []
+    escaped = False
+    for char in stripped:
+        if escaped:
+            cell.append(char)
+            escaped = False
+            continue
+        if char == "\\":
+            escaped = True
+            continue
+        if char == "|":
+            cells.append("".join(cell).strip())
+            cell = []
+            continue
+        cell.append(char)
+    if escaped:
+        cell.append("\\")
+    cells.append("".join(cell).strip())
+    return cells
+
+
+def _is_markdown_table_separator(line: str, *, columns: int) -> bool:
+    cells = _split_markdown_table_row(line)
+    return len(cells) == columns and all(
+        _TABLE_SEPARATOR_CELL_RE.fullmatch(cell.strip()) for cell in cells
+    )
+
+
+def _collect_markdown_table(
+    lines: list[str],
+    index: int,
+) -> tuple[list[list[str]], int] | None:
+    if index + 1 >= len(lines) or "|" not in lines[index]:
+        return None
+    header = _split_markdown_table_row(lines[index])
+    if len(header) < 2 or not _is_markdown_table_separator(
+        lines[index + 1],
+        columns=len(header),
+    ):
+        return None
+
+    rows = [header]
+    next_index = index + 2
+    while next_index < len(lines) and "|" in lines[next_index] and lines[next_index].strip():
+        cells = _split_markdown_table_row(lines[next_index])
+        if len(cells) != len(header):
+            break
+        rows.append(cells)
+        next_index += 1
+    return rows, next_index
+
+
+def _render_markdown_table(
+    table: list[list[str]],
+    *,
+    width: int,
+) -> list[_RenderedTextLine]:
+    headers = [_strip_inline_markdown(cell) for cell in table[0]]
+    data_rows = [
+        [_strip_inline_markdown(cell) for cell in row]
+        for row in table[1:]
+    ]
+    content_width = _markdown_content_width(width)
+    column_count = len(headers)
+    gap = " │ "
+    available = max(1, content_width - len(gap) * (column_count - 1))
+
+    desired = [
+        min(
+            max(len(headers[column]), *(len(row[column]) for row in data_rows), 8),
+            max(12, content_width // 2),
+        )
+        for column in range(column_count)
+    ]
+    floor = 6 if available >= column_count * 6 else 1
+    widths = [min(floor, desired[index]) for index in range(column_count)]
+    while sum(widths) < available and widths != desired:
+        candidates = [
+            (desired[index] - widths[index], index)
+            for index in range(column_count)
+            if widths[index] < desired[index]
+        ]
+        if not candidates:
+            break
+        _remaining, index = max(candidates)
+        widths[index] += 1
+
+    return _render_markdown_table_columns(headers, data_rows, widths, gap)
+
+
+def _render_markdown_table_columns(
+    headers: list[str],
+    data_rows: list[list[str]],
+    widths: list[int],
+    gap: str,
+) -> list[_RenderedTextLine]:
+    rows: list[_RenderedTextLine] = []
+
+    def wrap_cell(text: str, width: int) -> list[str]:
+        return textwrap.wrap(
+            text,
+            width=width,
+            break_long_words=True,
+            break_on_hyphens=False,
+            drop_whitespace=True,
+        ) or [""]
+
+    def append_row(cells: list[str], style: str) -> None:
+        wrapped_cells = [
+            wrap_cell(cell, widths[index])
+            for index, cell in enumerate(cells)
+        ]
+        height = max(len(cell_rows) for cell_rows in wrapped_cells)
+        for row_index in range(height):
+            parts = [
+                (cell_rows[row_index] if row_index < len(cell_rows) else "").ljust(
+                    widths[index]
+                )
+                for index, cell_rows in enumerate(wrapped_cells)
+            ]
+            rows.append(_RenderedTextLine(gap.join(parts).rstrip(), style))
+
+    append_row(headers, f"{ASSISTANT_STYLE}{BOLD}")
+    rows.append(
+        _RenderedTextLine(
+            "─┼─".join("─" * width for width in widths).rstrip(),
+            SEPARATOR_STYLE,
+        )
+    )
+    for data_row in data_rows:
+        append_row(data_row, ASSISTANT_STYLE)
+    return rows
 
 
 def _code_fence_language(info: str) -> str | None:
@@ -2227,6 +2369,13 @@ def _render_markdown_text(text: str, *, width: int) -> list[_RenderedTextLine]:
         if not stripped:
             rows.append(_RenderedTextLine("", ASSISTANT_STYLE))
             index += 1
+            continue
+
+        table = _collect_markdown_table(lines, index)
+        if table is not None:
+            table_rows, next_index = table
+            rows.extend(_render_markdown_table(table_rows, width=width))
+            index = next_index
             continue
 
         heading = _HEADING_RE.match(line)
