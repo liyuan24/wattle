@@ -2320,6 +2320,10 @@ def _code_fence_language(info: str) -> str | None:
     return language or None
 
 
+def _code_fence_is_raw_markdown(language: str | None) -> bool:
+    return language is not None and language.lower() in {"markdown", "md"}
+
+
 def _render_code_line(line: str, *, language: str | None) -> _RenderedTextLine:
     text = f"    {line}"
     if language is None:
@@ -2362,7 +2366,10 @@ def _render_markdown_text(text: str, *, width: int) -> list[_RenderedTextLine]:
 
         if in_code_fence is not None:
             _marker, _marker_length, language = in_code_fence
-            rows.append(_render_code_line(line, language=language))
+            if _code_fence_is_raw_markdown(language):
+                rows.append(_RenderedTextLine(line, ASSISTANT_STYLE))
+            else:
+                rows.append(_render_code_line(line, language=language))
             index += 1
             continue
 

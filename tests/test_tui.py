@@ -2050,6 +2050,36 @@ def test_assistant_markdown_highlights_fenced_code() -> None:
     assert tui.SYNTAX_STRING_STYLE in rendered
 
 
+def test_assistant_markdown_fence_renders_as_raw_markdown_text() -> None:
+    rows = tui._render_markdown_text(
+        "```markdown\n# Plan\n\n- Keep `raw_markdown` copyable\n```",
+        width=40,
+    )
+
+    assert [row.text for row in rows] == [
+        "# Plan",
+        "",
+        "- Keep `raw_markdown` copyable",
+    ]
+    assert {row.style for row in rows} == {tui.ASSISTANT_STYLE}
+    assert all(row.ansi_text is None for row in rows)
+
+
+def test_assistant_md_fence_renders_as_raw_markdown_text() -> None:
+    rows = tui._render_markdown_text(
+        "```md\n## Heading\n\n| A | B |\n|---|---|\n| 1 | 2 |\n```",
+        width=40,
+    )
+
+    assert [row.text for row in rows] == [
+        "## Heading",
+        "",
+        "| A | B |",
+        "|---|---|",
+        "| 1 | 2 |",
+    ]
+
+
 def test_assistant_markdown_requires_matching_code_fence_length() -> None:
     rows = tui._render_markdown_text("````python\n```\nprint(1)\n````", width=40)
 
