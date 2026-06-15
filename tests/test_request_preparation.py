@@ -7,6 +7,7 @@ from wattle.compaction import RuntimeCompaction, estimate_request_context_tokens
 from wattle.deadline import RunDeadline, append_runtime_deadline_notice, run_deadline_from_env
 from wattle.providers import CompletionResponse, ImageBlock, Message, StubProvider, TextBlock
 from wattle.request_preparation import RequestPreparer, project_messages_for_model_modalities
+from wattle.runtime_context import RuntimeContextProjection, RuntimeFact
 
 
 def test_project_messages_replaces_images_for_text_only_model(tmp_path: Path) -> None:
@@ -214,3 +215,53 @@ def test_runtime_deadline_notice_can_be_loaded_from_env() -> None:
 
     assert system is not None
     assert "Wall-clock budget remaining for this run: about 60 seconds." in system
+
+
+def test_prepare_injects_runtime_context_projection_without_messages() -> None:
+    events: list[dict[str, object]] = []
+    projection = RuntimeContextProjection(
+        warnings=[
+            RuntimeFact(
+                section="warnings",
+                key="command_family:pytest:failed",
+                score=95,
+                text="2 similar `pytest` commands failed.",
+            )
+        ],
+        signals=[
+            RuntimeFact(
+                section="signals",
+                key="metric:score:validation.txt",
+                score=70,
+                text="metric: `score=0.62` from `python eval.py validation.txt`",
+            )
+        ],
+    )
+    preparer = RequestPreparer(
+        provider=StubProvider([]),
+        model="test-model",
+        system="Base system.",
+        tools=[{"name": "bash", "description": "run", "input_schema": {}}],
+        max_tokens=1024,
+        runtime_context_provider=lambda: projection,
+        on_runtime_event=events.append,
+        provider_name="stub",
+    )
+    messages = [Message(role="user", content=[TextBlock(text="continue")])]
+
+    prepared = asyncio.run(preparer.aprepare(messages))
+
+    assert prepared.request.messages == messages
+    assert prepared.request.system is not None
+    assert "Base system." in prepared.request.system
+    assert "Runtime context:" in prepared.request.system
+    assert "2 similar `pytest` commands failed." in prepared.request.system
+    assert [event["type"] for event in events] == [
+        "runtime_context_projection",
+        "provider_request_prepared",
+    ]
+    assert events[0]["data"]["fact_keys"] == [
+        "command_family:pytest:failed",
+        "metric:score:validation.txt",
+    ]
+    assert events[1]["data"]["runtime_projection_sha256"] == events[0]["data"]["sha256"]

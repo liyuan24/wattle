@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import os
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
@@ -31,6 +31,7 @@ from wattle.providers import (
     OpenAIResponsesProvider,
     Provider,
 )
+from wattle.session import SessionEvent
 from wattle.skills import load_available_skills
 from wattle.system_prompt import build_system_prompt
 from wattle.tools import TOOLS_BY_NAME
@@ -186,6 +187,16 @@ class AgentRunResult:
     response: CompletionResponse
     messages: list[Message]
     system: str | None
+    events: list[SessionEvent] = field(default_factory=list)
+
+
+@dataclass(frozen=True, slots=True)
+class AgentRunSnapshot:
+    """Intermediate headless run state suitable for live persistence."""
+
+    system: str | None
+    messages: list[Message] = field(default_factory=list)
+    events: list[SessionEvent] = field(default_factory=list)
 
 
 def _build_provider_and_system(
@@ -296,6 +307,7 @@ def run_agent_with_history(
     permission_mode: PermissionMode = PermissionMode.YOLO,
     thinking: bool = False,
     effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None,
+    on_snapshot: Callable[[AgentRunSnapshot], None] | None = None,
 ) -> AgentRunResult:
     """Run the headless agent and return the full transcript for persistence."""
     return asyncio.run(
@@ -307,6 +319,7 @@ def run_agent_with_history(
             permission_mode=permission_mode,
             thinking=thinking,
             effort=effort,
+            on_snapshot=on_snapshot,
         )
     )
 
@@ -320,6 +333,7 @@ async def arun_agent_with_history(
     permission_mode: PermissionMode = PermissionMode.YOLO,
     thinking: bool = False,
     effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None,
+    on_snapshot: Callable[[AgentRunSnapshot], None] | None = None,
 ) -> AgentRunResult:
     """Async headless agent runner returning the full transcript."""
     provider, built_system, tools_by_name = _build_provider_and_system(
@@ -328,6 +342,29 @@ async def arun_agent_with_history(
         model=model,
     )
     messages: list[Message] = []
+    raw_events: list[dict[str, object]] = []
+    events: list[SessionEvent] = []
+
+    def publish_snapshot() -> None:
+        if on_snapshot is not None:
+            on_snapshot(
+                AgentRunSnapshot(
+                    system=built_system,
+                    messages=list(messages),
+                    events=list(events),
+                )
+            )
+
+    def on_messages(snapshot: list[Message]) -> None:
+        messages[:] = snapshot
+        publish_snapshot()
+
+    def on_runtime_event(event: dict[str, object]) -> None:
+        session_event = _session_event_from_runtime(event)
+        events.append(session_event)
+        publish_snapshot()
+
+    publish_snapshot()
     response = await loop.arun(
         provider,
         tools_by_name,
@@ -339,5 +376,27 @@ async def arun_agent_with_history(
         thinking=thinking,
         effort=effort,
         messages_out=messages,
+        runtime_events_out=raw_events,
+        messages_callback=on_messages,
+        runtime_event_callback=on_runtime_event,
     )
-    return AgentRunResult(response=response, messages=messages, system=built_system)
+    publish_snapshot()
+    return AgentRunResult(
+        response=response,
+        messages=messages,
+        system=built_system,
+        events=events,
+    )
+
+
+def _session_event_from_runtime(raw_event: dict[str, object]) -> SessionEvent:
+    source = raw_event.get("source")
+    data = raw_event.get("data")
+    created_at = raw_event.get("created_at")
+    fallback_created_at = SessionEvent("runtime_event").created_at
+    return SessionEvent(
+        type=str(raw_event.get("type") or "runtime_event"),
+        created_at=created_at if isinstance(created_at, str) else fallback_created_at,
+        source=source if isinstance(source, dict) else {},
+        data=data if isinstance(data, dict) else {},
+    )

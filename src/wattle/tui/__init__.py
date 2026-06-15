@@ -2078,6 +2078,19 @@ def _turn_error_text(error: BaseException) -> str:
     return type(error).__name__
 
 
+def _session_event_from_runtime(raw_event: dict[str, Any]) -> SessionEvent:
+    source = raw_event.get("source")
+    data = raw_event.get("data")
+    created_at = raw_event.get("created_at")
+    fallback_created_at = SessionEvent("runtime_event").created_at
+    return SessionEvent(
+        type=str(raw_event.get("type") or "runtime_event"),
+        created_at=created_at if isinstance(created_at, str) else fallback_created_at,
+        source=source if isinstance(source, dict) else {},
+        data=data if isinstance(data, dict) else {},
+    )
+
+
 def _input_history_from_messages(messages: list[Message]) -> list[str]:
     history: list[str] = []
     for message in messages:
@@ -3097,6 +3110,9 @@ class WattleApp:
             compaction_keep_recent_tokens=self.compaction_keep_recent_tokens,
             provider_context_tokens=lambda: self._last_context_tokens,
             on_stream_retry=on_stream_retry or self._write_stream_retry_status,
+            runtime_context_provider=self.runtime.runtime_context_projection,
+            on_runtime_event=self._record_runtime_event,
+            provider_name=self.current_provider_name,
         )
 
     def _configure_subagents(self, *, provider: Provider | None = None) -> None:
@@ -3231,6 +3247,7 @@ class WattleApp:
                 block,
                 self._available_tools(),
                 self.permission_gate,
+                runtime_event_callback=self._record_runtime_event,
             )
             result = _first_tool_result(block, blocks)
             edit_item = _edit_render_item(block, result)
@@ -4082,6 +4099,15 @@ class WattleApp:
             source=source or {"kind": "internal"},
             data={"path": str(default_settings_path()), "changes": changes},
         )
+        self._session_record = replace(
+            self._session_record,
+            events=[*self._session_record.events, event],
+        )
+
+    def _record_runtime_event(self, raw_event: dict[str, Any]) -> None:
+        if self._session_record is None:
+            return
+        event = _session_event_from_runtime(raw_event)
         self._session_record = replace(
             self._session_record,
             events=[*self._session_record.events, event],
@@ -5996,8 +6022,9 @@ class _LiveTerminal:
                 block,
                 {tool.name: tool},
                 None,
-                callback,
-                cancel_event,
+                tool_event_callback=callback,
+                cancel_event=cancel_event,
+                runtime_event_callback=self.app._record_runtime_event,
             )
         )
 
@@ -6099,9 +6126,13 @@ class _LiveTerminal:
                 rows.append(_styled_terminal_line(f"  ... +{omitted} more", STATUS_STYLE, width))
         if running_background_tasks:
             noun = "task" if running_background_tasks == 1 else "tasks"
+            background_text = (
+                f" Background · {running_background_tasks} running {noun}; "
+                "type /stop to stop all"
+            )
             rows.append(
                 _styled_terminal_line(
-                    f" Background · {running_background_tasks} running {noun}; type /stop to stop all",
+                    background_text,
                     STATUS_STYLE,
                     width,
                 )

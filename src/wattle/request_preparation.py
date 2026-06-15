@@ -9,7 +9,9 @@ projection.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+import os
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from typing import Literal
@@ -38,6 +40,12 @@ from wattle.providers import (
     TransientProviderError,
 )
 from wattle.providers.base import stream_idle_timeout_seconds_from_env
+from wattle.runtime_context import (
+    RuntimeContextProjection,
+    append_runtime_context_projection,
+    projection_hash,
+    render_runtime_context_projection,
+)
 from wattle.session import message_to_dict
 
 DEFAULT_STREAM_MAX_RETRIES = 3
@@ -45,6 +53,8 @@ DEFAULT_STREAM_MAX_RETRIES = 3
 type RetryableProviderError = IncompleteStreamError | TransientProviderError
 type StreamRetryCallback = Callable[[int, int, BaseException, float], None]
 type ProviderContextTokens = int | Callable[[], int | None] | None
+type RuntimeContextProvider = Callable[[], RuntimeContextProjection | None]
+type RuntimeEventCallback = Callable[[dict[str, object]], None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,6 +91,9 @@ class RequestPreparer:
         stream_idle_timeout_seconds: float | None = None,
         on_stream_retry: StreamRetryCallback | None = None,
         run_deadline: RunDeadline | None = None,
+        runtime_context_provider: RuntimeContextProvider | None = None,
+        on_runtime_event: RuntimeEventCallback | None = None,
+        provider_name: str | None = None,
     ) -> None:
         self.provider = provider
         self.model = model
@@ -106,6 +119,9 @@ class RequestPreparer:
         )
         self.on_stream_retry = on_stream_retry
         self.run_deadline = run_deadline if run_deadline is not None else run_deadline_from_env()
+        self.runtime_context_provider = runtime_context_provider
+        self.on_runtime_event = on_runtime_event
+        self.provider_name = provider_name
 
     def _provider_context_tokens(self, messages: list[Message]) -> int | None:
         history_tokens = _latest_provider_context_tokens(messages)
@@ -129,6 +145,26 @@ class RequestPreparer:
             model=self.model,
         )
         request_system = append_runtime_deadline_notice(self.system, self.run_deadline)
+        projection_text: str | None = None
+        if self.runtime_context_provider is not None and _runtime_context_enabled():
+            projection = self.runtime_context_provider()
+            if projection is not None and not projection.is_empty():
+                projection_text = render_runtime_context_projection(projection)
+                request_system = append_runtime_context_projection(
+                    request_system,
+                    projection,
+                )
+                self._emit_runtime_event(
+                    {
+                        "type": "runtime_context_projection",
+                        "source": {},
+                        "data": {
+                            "rendered": projection_text,
+                            "sha256": projection_hash(projection_text),
+                            "fact_keys": projection.fact_keys,
+                        },
+                    }
+                )
         raw_context_tokens = estimate_request_context_tokens(
             system=request_system,
             messages=projected_input_messages,
@@ -170,6 +206,36 @@ class RequestPreparer:
         ):
             reason = "overflow" if force_compaction else "threshold"
             self.on_compaction_record(state, reason, raw_context_tokens, context_tokens)
+        request_event_data = {
+            "provider": self.provider_name or type(self.provider).__name__,
+            "model": self.model,
+            "message_count": len(projected_messages),
+            "system_sha256": _optional_sha256(request_system),
+            "runtime_projection_sha256": projection_hash(projection_text),
+            "tool_names": [
+                str(tool.get("name"))
+                for tool in self.tools
+                if isinstance(tool, dict) and tool.get("name") is not None
+            ],
+            "context_tokens": context_tokens,
+            "request_bytes": estimate_serialized_request_bytes(
+                model=self.model,
+                messages=projected_messages,
+                max_tokens=self.max_tokens,
+                system=request_system,
+                tools=self.tools,
+                thinking=self.thinking,
+                effort=self.effort,
+            ),
+            "compacted": compacted,
+        }
+        self._emit_runtime_event(
+            {
+                "type": "provider_request_prepared",
+                "source": {},
+                "data": request_event_data,
+            }
+        )
         return PreparedRequest(
             request=CompletionRequest(
                 model=self.model,
@@ -181,17 +247,14 @@ class RequestPreparer:
                 effort=self.effort,
             ),
             context_tokens=context_tokens,
-            request_bytes=estimate_serialized_request_bytes(
-                model=self.model,
-                messages=projected_messages,
-                max_tokens=self.max_tokens,
-                system=request_system,
-                tools=self.tools,
-                thinking=self.thinking,
-                effort=self.effort,
-            ),
+            request_bytes=int(request_event_data["request_bytes"]),
             compacted=compacted,
         )
+
+    def _emit_runtime_event(self, event: dict[str, object]) -> None:
+        if self.on_runtime_event is None:
+            return
+        self.on_runtime_event(event)
 
 
 def project_messages_for_model_modalities(
@@ -366,6 +429,17 @@ def _notify_stream_retry(
         preparer.on_stream_retry(attempt, preparer.stream_max_retries, exc, delay)
 
 
+def _runtime_context_enabled() -> bool:
+    raw = os.environ.get("WATTLE_RUNTIME_CONTEXT_INJECTION")
+    if raw is None:
+        return True
+    return raw.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _optional_sha256(text: str | None) -> str | None:
+    if text is None:
+        return None
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def estimate_serialized_request_bytes(

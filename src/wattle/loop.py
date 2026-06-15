@@ -42,7 +42,7 @@ from .request_preparation import (
     astream_with_recovery,
 )
 from .tool_events import ToolRunEvent
-from .tools.base import Tool
+from .tools.base import Tool, ToolExecutionResult
 
 MAX_MALFORMED_TOOL_CALL_REPAIRS = 1
 
@@ -59,6 +59,9 @@ def run(
     thinking: bool = False,
     effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None,
     messages_out: MutableSequence[Message] | None = None,
+    runtime_events_out: MutableSequence[dict[str, Any]] | None = None,
+    messages_callback: Callable[[list[Message]], None] | None = None,
+    runtime_event_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> CompletionResponse:
     """Run the agent loop until the model stops.
 
@@ -86,6 +89,9 @@ def run(
             thinking=thinking,
             effort=effort,
             messages_out=messages_out,
+            runtime_events_out=runtime_events_out,
+            messages_callback=messages_callback,
+            runtime_event_callback=runtime_event_callback,
         )
     )
 
@@ -108,6 +114,9 @@ async def arun(
     thinking: bool = False,
     effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None,
     messages_out: MutableSequence[Message] | None = None,
+    runtime_events_out: MutableSequence[dict[str, Any]] | None = None,
+    messages_callback: Callable[[list[Message]], None] | None = None,
+    runtime_event_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> CompletionResponse:
     """Async version of :func:`run`."""
 
@@ -130,6 +139,20 @@ async def arun(
     messages: list[Message] = [
         Message(role="user", content=[TextBlock(text=user_input)])
     ]
+
+    def publish_messages() -> None:
+        snapshot = list(messages)
+        if messages_out is not None:
+            messages_out[:] = snapshot
+        if messages_callback is not None:
+            messages_callback(snapshot)
+
+    def on_runtime_event(event: dict[str, Any]) -> None:
+        if runtime_events_out is not None:
+            runtime_events_out.append(event)
+        if runtime_event_callback is not None:
+            runtime_event_callback(event)
+
     preparer = RequestPreparer(
         provider=provider,
         model=model,
@@ -139,9 +162,16 @@ async def arun(
         thinking=thinking,
         effort=effort,
         context_window=context_window,
+        runtime_context_provider=(
+            runtime.runtime_context_projection
+            if runtime is not None and hasattr(runtime, "runtime_context_projection")
+            else None
+        ),
+        on_runtime_event=on_runtime_event,
     )
 
     malformed_tool_call_repairs = 0
+    publish_messages()
     for _ in itertools.count():
         try:
             response = await acomplete_with_recovery(preparer, messages)
@@ -150,17 +180,18 @@ async def arun(
                 raise
             malformed_tool_call_repairs += 1
             messages.append(_malformed_tool_call_repair_message(exc))
+            publish_messages()
             continue
         messages.append(_assistant_message(response))
+        publish_messages()
         malformed_tool_call_repairs = 0
 
         if response.stop_reason != "tool_use":
             monitor_blocks = _drain_monitor_event_blocks(runtime)
             if not monitor_blocks:
-                if messages_out is not None:
-                    messages_out[:] = messages
                 return response
             messages.append(Message(role="user", content=monitor_blocks))
+            publish_messages()
             continue
 
         tool_results: list[ContentBlock] = []
@@ -168,7 +199,12 @@ async def arun(
             if not isinstance(block, ToolUseBlock):
                 continue
             tool_results.extend(
-                await dispatch_tool_blocks_async(block, model_tools_by_name, permission_gate)
+                await dispatch_tool_blocks_async(
+                    block,
+                    model_tools_by_name,
+                    permission_gate,
+                    runtime_event_callback=on_runtime_event,
+                )
             )
         monitor_blocks = _drain_monitor_event_blocks(runtime)
 
@@ -176,11 +212,10 @@ async def arun(
         # would be a provider bug; bail rather than spin.
         followup_blocks = [*tool_results, *monitor_blocks]
         if not followup_blocks:
-            if messages_out is not None:
-                messages_out[:] = messages
             return response
 
         messages.append(Message(role="user", content=followup_blocks))
+        publish_messages()
 
     raise RuntimeError("unreachable agent loop exit")
 
@@ -197,6 +232,8 @@ def run_streaming(
     context_window: int | None = None,
     thinking: bool = False,
     effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None,
+    runtime_event_callback: Callable[[dict[str, Any]], None] | None = None,
+    messages_callback: Callable[[list[Message]], None] | None = None,
 ) -> CompletionResponse:
     """Run the agent loop using streaming for each model turn.
 
@@ -225,6 +262,8 @@ def run_streaming(
             context_window=context_window,
             thinking=thinking,
             effort=effort,
+            runtime_event_callback=runtime_event_callback,
+            messages_callback=messages_callback,
         )
     )
 
@@ -241,6 +280,8 @@ async def arun_streaming(
     context_window: int | None = None,
     thinking: bool = False,
     effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None,
+    runtime_event_callback: Callable[[dict[str, Any]], None] | None = None,
+    messages_callback: Callable[[list[Message]], None] | None = None,
 ) -> CompletionResponse:
     """Async version of :func:`run_streaming`."""
 
@@ -263,6 +304,15 @@ async def arun_streaming(
     messages: list[Message] = [
         Message(role="user", content=[TextBlock(text=user_input)])
     ]
+
+    def publish_messages() -> None:
+        if messages_callback is not None:
+            messages_callback(list(messages))
+
+    def on_runtime_event(event: dict[str, Any]) -> None:
+        if runtime_event_callback is not None:
+            runtime_event_callback(event)
+
     preparer = RequestPreparer(
         provider=provider,
         model=model,
@@ -272,9 +322,16 @@ async def arun_streaming(
         thinking=thinking,
         effort=effort,
         context_window=context_window,
+        runtime_context_provider=(
+            runtime.runtime_context_projection
+            if runtime is not None and hasattr(runtime, "runtime_context_projection")
+            else None
+        ),
+        on_runtime_event=on_runtime_event,
     )
 
     malformed_tool_call_repairs = 0
+    publish_messages()
     for _ in itertools.count():
         response = None
         try:
@@ -287,6 +344,7 @@ async def arun_streaming(
                 raise
             malformed_tool_call_repairs += 1
             messages.append(_malformed_tool_call_repair_message(exc))
+            publish_messages()
             continue
         if response is None:
             raise RuntimeError(
@@ -294,6 +352,7 @@ async def arun_streaming(
             )
 
         messages.append(_assistant_message(response))
+        publish_messages()
         malformed_tool_call_repairs = 0
 
         if response.stop_reason != "tool_use":
@@ -301,6 +360,7 @@ async def arun_streaming(
             if not monitor_blocks:
                 return response
             messages.append(Message(role="user", content=monitor_blocks))
+            publish_messages()
             continue
 
         tool_results: list[ContentBlock] = []
@@ -308,7 +368,12 @@ async def arun_streaming(
             if not isinstance(block, ToolUseBlock):
                 continue
             tool_results.extend(
-                await dispatch_tool_blocks_async(block, model_tools_by_name, permission_gate)
+                await dispatch_tool_blocks_async(
+                    block,
+                    model_tools_by_name,
+                    permission_gate,
+                    runtime_event_callback=on_runtime_event,
+                )
             )
         monitor_blocks = _drain_monitor_event_blocks(runtime)
 
@@ -317,6 +382,7 @@ async def arun_streaming(
             return response
 
         messages.append(Message(role="user", content=followup_blocks))
+        publish_messages()
 
     raise RuntimeError("unreachable streaming agent loop exit")
 
@@ -337,6 +403,7 @@ async def dispatch_tool_blocks_async(
     permission_gate: PermissionGate | None = None,
     tool_event_callback: Callable[[ToolRunEvent], None] | None = None,
     cancel_event: threading.Event | None = None,
+    runtime_event_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> list[ContentBlock]:
     """Async tool dispatch, allowing tools to return extra content blocks."""
 
@@ -349,20 +416,39 @@ async def dispatch_tool_blocks_async(
             return [_tool_error(block, permission.denial or "Tool execution denied.")]
     try:
         if tool_event_callback is not None:
-            output = await tool.arun_with_events(
-                emit=tool_event_callback,
-                tool_use_id=block.id,
-                cancel_event=cancel_event,
-                **block.input,
-            )
-        else:
-            arun = getattr(tool, "arun", None)
-            if arun is None:
-                output = await asyncio.to_thread(tool.run, **block.input)
+            arun_result_with_events = getattr(tool, "arun_execution_result_with_events", None)
+            if callable(arun_result_with_events):
+                output = await arun_result_with_events(
+                    emit=tool_event_callback,
+                    tool_use_id=block.id,
+                    cancel_event=cancel_event,
+                    **block.input,
+                )
             else:
-                output = await arun(**block.input)
+                output = await tool.arun_with_events(
+                    emit=tool_event_callback,
+                    tool_use_id=block.id,
+                    cancel_event=cancel_event,
+                    **block.input,
+                )
+        else:
+            run_execution_result = getattr(tool, "run_execution_result", None)
+            if callable(run_execution_result):
+                output = await asyncio.to_thread(run_execution_result, **block.input)
+            else:
+                arun = getattr(tool, "arun", None)
+                if arun is None:
+                    output = await asyncio.to_thread(tool.run, **block.input)
+                else:
+                    output = await arun(**block.input)
     except Exception as exc:  # noqa: BLE001 — surface anything as a tool error
         return [_tool_error(block, f"{type(exc).__name__}: {exc}")]
+    _record_tool_execution_metadata(
+        block,
+        tool,
+        output,
+        runtime_event_callback=runtime_event_callback,
+    )
     return _normalize_tool_output(block, output)
 
 
@@ -380,6 +466,7 @@ def dispatch_tool_blocks(
     block: ToolUseBlock,
     tools_by_name: Mapping[str, Tool],
     permission_gate: PermissionGate | None = None,
+    runtime_event_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> list[ContentBlock]:
     """Run one tool call, allowing tools to return extra content blocks."""
     tool = tools_by_name.get(block.name)
@@ -390,9 +477,19 @@ def dispatch_tool_blocks(
         if not permission.allowed:
             return [_tool_error(block, permission.denial or "Tool execution denied.")]
     try:
-        output = tool.run(**block.input)
+        run_execution_result = getattr(tool, "run_execution_result", None)
+        if callable(run_execution_result):
+            output = run_execution_result(**block.input)
+        else:
+            output = tool.run(**block.input)
     except Exception as exc:  # noqa: BLE001 — surface anything as a tool error
         return [_tool_error(block, f"{type(exc).__name__}: {exc}")]
+    _record_tool_execution_metadata(
+        block,
+        tool,
+        output,
+        runtime_event_callback=runtime_event_callback,
+    )
     return _normalize_tool_output(block, output)
 
 
@@ -415,6 +512,8 @@ def _first_tool_result(
 
 
 def _normalize_tool_output(block: ToolUseBlock, output: object) -> list[ContentBlock]:
+    if isinstance(output, ToolExecutionResult):
+        return _normalize_tool_output(block, output.content)
     if isinstance(output, ToolResultBlock):
         return [output]
     if isinstance(output, str):
@@ -439,6 +538,30 @@ def _normalize_tool_output(block: ToolUseBlock, output: object) -> list[ContentB
             summary = f"Attached {len(content)} content block(s)."
         return [ToolResultBlock(tool_use_id=block.id, content=summary), *content]
     return [ToolResultBlock(tool_use_id=block.id, content=str(output))]
+
+
+def _record_tool_execution_metadata(
+    block: ToolUseBlock,
+    tool: Tool,
+    output: object,
+    *,
+    runtime_event_callback: Callable[[dict[str, Any]], None] | None,
+) -> None:
+    if not isinstance(output, ToolExecutionResult):
+        return
+    runtime = getattr(tool, "runtime", None)
+    context = getattr(runtime, "context", None)
+    if context is None or not hasattr(context, "record_tool_metadata"):
+        return
+    events = context.record_tool_metadata(
+        tool_use_id=block.id,
+        tool_name=block.name,
+        metadata=output.metadata,
+    )
+    if runtime_event_callback is None:
+        return
+    for event in events:
+        runtime_event_callback(event)
 
 
 def _attached_image_text(block: ImageBlock) -> str:

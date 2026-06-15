@@ -286,11 +286,65 @@ def _is_text_block(block: object) -> TypeGuard[TextBlock]:
     return getattr(block, "type", None) == "text" and isinstance(getattr(block, "text", None), str)
 
 
+class _HeadlessSessionWriter:
+    def __init__(self, args: argparse.Namespace) -> None:
+        from wattle.session import new_session, save_session
+
+        self._save_session = save_session
+        self._record = new_session(
+            provider=args.provider,
+            model=args.model,
+            system=None,
+            max_tokens=args.max_tokens,
+            thinking=bool(getattr(args, "thinking", False)),
+            effort=getattr(args, "effort", None),
+        )
+        self.path = self._save_session(self._record)
+
+    def update(self, snapshot: object) -> None:
+        from wattle.session import SessionSettings
+
+        self._record = replace(
+            self._record,
+            settings=SessionSettings(
+                provider=self._record.settings.provider,
+                model=self._record.settings.model,
+                system=getattr(snapshot, "system", None),
+                max_tokens=self._record.settings.max_tokens,
+                thinking=self._record.settings.thinking,
+                effort=self._record.settings.effort,
+            ),
+            messages=list(getattr(snapshot, "messages", [])),
+            events=list(getattr(snapshot, "events", [])),
+        )
+        self.path = self._save_session(self._record, self.path)
+
+    def finish(self, result: AgentRunResultType) -> Path:
+        from wattle.session import SessionSettings
+
+        self._record = replace(
+            self._record,
+            settings=SessionSettings(
+                provider=self._record.settings.provider,
+                model=self._record.settings.model,
+                system=result.system,
+                max_tokens=self._record.settings.max_tokens,
+                thinking=self._record.settings.thinking,
+                effort=self._record.settings.effort,
+            ),
+            messages=list(result.messages),
+            events=list(result.events),
+        )
+        self.path = self._save_session(self._record, self.path)
+        return self.path
+
+
 def _run_headless(args: argparse.Namespace) -> int:
     """Run one prompt and print only the final assistant text."""
     permission_mode = PermissionMode.YOLO
 
     if bool(getattr(args, "persist", False)):
+        session_writer = _HeadlessSessionWriter(args)
         result = run_agent_with_history(
             args.provider,
             args.model,
@@ -299,9 +353,10 @@ def _run_headless(args: argparse.Namespace) -> int:
             permission_mode=permission_mode,
             thinking=bool(getattr(args, "thinking", False)),
             effort=getattr(args, "effort", None),
+            on_snapshot=session_writer.update,
         )
         response = result.response
-        session_path = _persist_headless_session(args, result)
+        session_path = session_writer.finish(result)
     else:
         response = run_agent(
             args.provider,
@@ -324,20 +379,6 @@ def _run_headless(args: argparse.Namespace) -> int:
         sys.stderr.write(f"Saved session: {session_path}\n")
         sys.stderr.flush()
     return 0
-
-
-def _persist_headless_session(args: argparse.Namespace, result: AgentRunResultType) -> Path:
-    from wattle.session import new_session, save_session
-
-    record = new_session(
-        provider=args.provider,
-        model=args.model,
-        system=result.system,
-        max_tokens=args.max_tokens,
-        thinking=bool(getattr(args, "thinking", False)),
-        effort=getattr(args, "effort", None),
-    )
-    return save_session(replace(record, messages=list(result.messages)))
 
 
 def _run_tui(args: argparse.Namespace) -> int:

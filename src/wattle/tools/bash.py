@@ -18,7 +18,7 @@ from wattle.runtime import TaskStatus, WattleRuntime
 from wattle.settings import load_settings
 from wattle.tool_events import ToolRunEvent
 
-from .base import Tool
+from .base import Tool, ToolExecutionResult
 from .utils.output import externalize_large_output
 
 
@@ -99,6 +99,26 @@ class BashTool(Tool):
         max_output_chars: int | None = None,
         max_event_chars: int | None = None,
     ) -> str:
+        return str(
+            self.run_execution_result(
+                command=command,
+                timeout=timeout,
+                background=background,
+                tty=tty,
+                max_output_chars=max_output_chars,
+                max_event_chars=max_event_chars,
+            ).content
+        )
+
+    def run_execution_result(
+        self,
+        command: str,
+        timeout: float = 120.0,
+        background: bool = False,
+        tty: bool = False,
+        max_output_chars: int | None = None,
+        max_event_chars: int | None = None,
+    ) -> ToolExecutionResult:
         if background:
             return self._run_background(command, tty=tty)
         output_limit = _output_limit(max_output_chars, max_event_chars)
@@ -119,6 +139,32 @@ class BashTool(Tool):
         max_output_chars: int | None = None,
         max_event_chars: int | None = None,
     ) -> str:
+        result = await self.arun_execution_result_with_events(
+            emit=emit,
+            tool_use_id=tool_use_id,
+            cancel_event=cancel_event,
+            command=command,
+            timeout=timeout,
+            background=background,
+            tty=tty,
+            max_output_chars=max_output_chars,
+            max_event_chars=max_event_chars,
+        )
+        return str(result.content)
+
+    async def arun_execution_result_with_events(
+        self,
+        *,
+        emit: Callable[[ToolRunEvent], None],
+        tool_use_id: str,
+        cancel_event: threading.Event | None = None,
+        command: str,
+        timeout: float = 120.0,
+        background: bool = False,
+        tty: bool = False,
+        max_output_chars: int | None = None,
+        max_event_chars: int | None = None,
+    ) -> ToolExecutionResult:
         return await asyncio.to_thread(
             self._run_with_events,
             emit=emit,
@@ -144,7 +190,7 @@ class BashTool(Tool):
         max_output_chars: int | None,
         max_event_chars: int | None,
         cancel_event: threading.Event | None,
-    ) -> str:
+    ) -> ToolExecutionResult:
         if background:
             return self._run_background(command, tty=tty)
         output_limit = _output_limit(max_output_chars, max_event_chars)
@@ -180,7 +226,7 @@ class BashTool(Tool):
         max_output_chars: int | None = None,
         emit: Callable[[str, str], None] | None = None,
         cancel_event: threading.Event | None = None,
-    ) -> str:
+    ) -> ToolExecutionResult:
         clamped_timeout = min(float(timeout), self.MAX_TIMEOUT_SECONDS)
         started_at = time.monotonic()
         attribution = self._git_attribution_env(command)
@@ -223,11 +269,22 @@ class BashTool(Tool):
             if stderr_text:
                 parts.append(f"[stderr]\n{stderr_text.rstrip(chr(10))}")
             _kill_new_processes_under_cwd(existing_pids, self.cwd)
-            return externalize_large_output(
+            output = externalize_large_output(
                 _prepend_warnings("\n".join(parts), attribution.warnings),
                 root=self.cwd,
                 tool_name=self.name,
                 **_externalize_limits(max_output_chars),
+            )
+            return _bash_result(
+                output,
+                command=command,
+                cwd=self.cwd,
+                status="cancelled",
+                exit_code=None,
+                elapsed_seconds=elapsed,
+                timeout_seconds=clamped_timeout,
+                stdout_tail=stdout_text,
+                stderr_tail=stderr_text,
             )
         except subprocess.TimeoutExpired as timeout_error:
             with suppress(ProcessLookupError, PermissionError):
@@ -268,11 +325,22 @@ class BashTool(Tool):
                 parts.append(stdout_text.rstrip("\n"))
             if stderr_text:
                 parts.append(f"[stderr]\n{stderr_text.rstrip(chr(10))}")
-            return externalize_large_output(
+            output = externalize_large_output(
                 _prepend_warnings("\n".join(parts), attribution.warnings),
                 root=self.cwd,
                 tool_name=self.name,
                 **_externalize_limits(max_output_chars),
+            )
+            return _bash_result(
+                output,
+                command=command,
+                cwd=self.cwd,
+                status="timed_out",
+                exit_code=None,
+                elapsed_seconds=elapsed,
+                timeout_seconds=clamped_timeout,
+                stdout_tail=stdout_text,
+                stderr_tail=stderr_text,
             )
 
         _kill_process_group(process.pid)
@@ -289,6 +357,7 @@ class BashTool(Tool):
         if not parts:
             parts.append("[no output]")
         output = "\n".join(parts)
+        elapsed = time.monotonic() - started_at
         externalized = externalize_large_output(
             output,
             root=self.cwd,
@@ -296,8 +365,20 @@ class BashTool(Tool):
             **_externalize_limits(max_output_chars),
         )
         if externalized != output:
-            return externalized
-        return "\n".join([output, f"[elapsed {time.monotonic() - started_at:.2f}s]"])
+            output = externalized
+        else:
+            output = "\n".join([output, f"[elapsed {elapsed:.2f}s]"])
+        return _bash_result(
+            output,
+            command=command,
+            cwd=self.cwd,
+            status="success" if process.returncode == 0 else "failed",
+            exit_code=process.returncode,
+            elapsed_seconds=elapsed,
+            timeout_seconds=clamped_timeout,
+            stdout_tail=stdout_text,
+            stderr_tail=stderr_text,
+        )
 
     def _run_foreground_tty(
         self,
@@ -307,7 +388,7 @@ class BashTool(Tool):
         max_output_chars: int | None = None,
         emit: Callable[[str], None] | None = None,
         cancel_event: threading.Event | None = None,
-    ) -> str:
+    ) -> ToolExecutionResult:
         clamped_timeout = min(float(timeout), self.MAX_TIMEOUT_SECONDS)
         started_at = time.monotonic()
         master_fd, slave_fd = pty.openpty()
@@ -384,6 +465,7 @@ class BashTool(Tool):
         if not parts:
             parts.append("[no output]")
         output = "\n".join(parts)
+        elapsed = time.monotonic() - started_at
         externalized = externalize_large_output(
             output,
             root=self.cwd,
@@ -391,10 +473,30 @@ class BashTool(Tool):
             **_externalize_limits(max_output_chars),
         )
         if externalized != output:
-            return externalized
-        return "\n".join([output, f"[elapsed {time.monotonic() - started_at:.2f}s]"])
+            output = externalized
+        else:
+            output = "\n".join([output, f"[elapsed {elapsed:.2f}s]"])
+        if cancelled:
+            status = "cancelled"
+        elif timed_out:
+            status = "timed_out"
+        elif process.returncode == 0:
+            status = "success"
+        else:
+            status = "failed"
+        return _bash_result(
+            output,
+            command=command,
+            cwd=self.cwd,
+            status=status,
+            exit_code=process.returncode,
+            elapsed_seconds=elapsed,
+            timeout_seconds=clamped_timeout,
+            stdout_tail=output_text,
+            stderr_tail="",
+        )
 
-    def _run_background(self, command: str, *, tty: bool) -> str:
+    def _run_background(self, command: str, *, tty: bool) -> ToolExecutionResult:
         started_at = time.time()
         log_path = self.runtime.tasks.jobs_dir / f"shell-{int(started_at * 1000)}-{os.getpid()}.log"
         attribution = self._git_attribution_env(command)
@@ -458,7 +560,7 @@ class BashTool(Tool):
 
         threading.Thread(target=watch, name=f"wattle-watch-{task.task_id}", daemon=True).start()
 
-        return "\n".join(
+        output = "\n".join(
             [
                 f"task_id: {task.task_id}",
                 f"pid: {task.pid}",
@@ -467,6 +569,20 @@ class BashTool(Tool):
                 f"status_path: {task.status_path}",
                 *([f"tty: {str(tty).lower()}"] if tty else []),
             ]
+        )
+        return _bash_result(
+            output,
+            command=command,
+            cwd=self.cwd,
+            status="background",
+            exit_code=None,
+            elapsed_seconds=0.0,
+            timeout_seconds=None,
+            stdout_tail="",
+            stderr_tail="",
+            background_task_id=task.task_id,
+            log_path=str(task.log_path),
+            status_path=str(task.status_path),
         )
 
     def _git_attribution_env(self, command: str):
@@ -638,6 +754,52 @@ def _externalize_limits(max_output_chars: int | None) -> dict[str, int]:
         "max_inline_chars": max_output_chars,
         "max_excerpt_chars": excerpt_chars,
     }
+
+
+def _bash_result(
+    content: str,
+    *,
+    command: str,
+    cwd: Path,
+    status: str,
+    exit_code: int | None,
+    elapsed_seconds: float,
+    timeout_seconds: float | None,
+    stdout_tail: str,
+    stderr_tail: str,
+    background_task_id: str | None = None,
+    log_path: str | None = None,
+    status_path: str | None = None,
+) -> ToolExecutionResult:
+    metadata: dict[str, object] = {
+        "kind": "command",
+        "command": command,
+        "cwd": str(cwd),
+        "status": status,
+        "exit_code": exit_code,
+        "elapsed_seconds": elapsed_seconds,
+        "timeout_seconds": timeout_seconds,
+        "background_task_id": background_task_id,
+        "log_path": log_path,
+        "status_path": status_path,
+        "stdout_tail": _tail_text(stdout_tail),
+        "stderr_tail": _tail_text(stderr_tail),
+    }
+    output_artifact = _full_output_path_from_text(content)
+    if output_artifact is not None:
+        metadata["output_artifact"] = output_artifact
+    return ToolExecutionResult(content=content, metadata=metadata)
+
+
+def _tail_text(text: str, *, max_chars: int = 2000) -> str:
+    return text if len(text) <= max_chars else text[-max_chars:]
+
+
+def _full_output_path_from_text(text: str) -> str | None:
+    for line in text.splitlines():
+        if line.startswith("full_output_path: "):
+            return line.split(": ", 1)[1]
+    return None
 
 
 def _copy_pty_to_log(master_fd: int, process: subprocess.Popen[bytes], log_file) -> None:

@@ -617,10 +617,19 @@ def test_headless_with_persist_saves_session_and_prints_final_text(
         Message(role="user", content=[TextBlock(text="persist this")]),
         Message(role="assistant", content=[TextBlock(text="saved response")]),
     ]
+    live_messages = [messages[0]]
     calls: list[tuple[Any, ...]] = []
 
     def fake_run_agent_with_history(*args: Any, **kwargs: Any) -> cli.AgentRunResult:
         calls.append((args, kwargs))
+        kwargs["on_snapshot"](
+            SimpleNamespace(system="system prompt", messages=live_messages, events=[])
+        )
+        session_files = list(tmp_path.glob("*.jsonl"))
+        assert len(session_files) == 1
+        live_record = load_session(session_files[0])
+        assert live_record.settings.system == "system prompt"
+        assert live_record.messages == live_messages
         return cli.AgentRunResult(response=response, messages=messages, system="system prompt")
 
     stdout = io.StringIO()
@@ -648,17 +657,14 @@ def test_headless_with_persist_saves_session_and_prints_final_text(
     assert rc == 0
     assert stdout.getvalue() == "saved response\n"
     assert "Saved session:" in stderr.getvalue()
-    assert calls == [
-        (
-            ("anthropic", "claude-sonnet-4-6", "persist this"),
-            {
-                "max_tokens": 512,
-                "permission_mode": cli.PermissionMode.YOLO,
-                "thinking": True,
-                "effort": "high",
-            },
-        )
-    ]
+    assert len(calls) == 1
+    call_args, call_kwargs = calls[0]
+    assert call_args == ("anthropic", "claude-sonnet-4-6", "persist this")
+    assert call_kwargs["max_tokens"] == 512
+    assert call_kwargs["permission_mode"] == cli.PermissionMode.YOLO
+    assert call_kwargs["thinking"] is True
+    assert call_kwargs["effort"] == "high"
+    assert callable(call_kwargs["on_snapshot"])
 
     session_files = list(tmp_path.glob("*.jsonl"))
     assert len(session_files) == 1

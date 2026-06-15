@@ -182,6 +182,7 @@ def test_session_record_round_trips_through_jsonl_file(tmp_path: Path) -> None:
             },
         },
     }
+
     assert lines[4]["message"]["output_tokens"] == 12
     assert lines[4]["message"]["cached_tokens"] == 80
     assert lines[4]["message"]["content"][0] == {
@@ -199,6 +200,37 @@ def test_session_record_round_trips_through_jsonl_file(tmp_path: Path) -> None:
         "tokens_after": 300,
         "created_at": "2026-05-08T10:05:00Z",
     }
+
+
+def test_runtime_projection_event_round_trips_separately_from_messages() -> None:
+    record = session.SessionRecord(
+        metadata=session.SessionMetadata(id="sess_runtime"),
+        settings=session.SessionSettings(provider="openai_codex", model="gpt-5.5"),
+        messages=[Message(role="user", content=[TextBlock(text="start")])],
+        events=[
+            session.SessionEvent(
+                type="runtime_context_projection",
+                created_at="2026-06-15T12:35:02Z",
+                source={"turn_id": "turn-8"},
+                data={
+                    "rendered": "Runtime context:\nSignals:\n- metric: `score=0.62`",
+                    "sha256": "abc123",
+                    "fact_keys": ["metric:score:validation.txt"],
+                },
+            )
+        ],
+    )
+
+    lines = [json.loads(line) for line in session.session_to_jsonl_lines(record)]
+    loaded = session.session_from_jsonl_lines(
+        [json.dumps(line, separators=(",", ":")) for line in lines]
+    )
+
+    assert [line["type"] for line in lines] == ["session", "message", "event"]
+    assert lines[1]["message"]["role"] == "user"
+    assert lines[2]["event"]["type"] == "runtime_context_projection"
+    assert loaded.messages == record.messages
+    assert loaded.events == record.events
 
 
 def test_message_and_content_block_helpers_are_explicit() -> None:

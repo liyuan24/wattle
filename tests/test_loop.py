@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections import deque
 from collections.abc import AsyncIterator, Iterable
+from pathlib import Path
 
 from wattle import request_preparation
 from wattle.loop import run, run_streaming
@@ -111,6 +112,115 @@ def test_loop_runs_tool_and_terminates() -> None:
     assert messages_out[1].cached_tokens == 4
     assert messages_out[3].input_tokens == 20
     assert messages_out[3].output_tokens == 8
+
+
+def test_loop_publishes_tool_use_snapshot_before_tool_execution() -> None:
+    snapshots: list[list[Message]] = []
+    saw_tool_use_before_execution = False
+
+    class InspectingTool:
+        name = "inspect_snapshot"
+        description = "inspect the live transcript snapshot"
+        input_schema = {"type": "object", "properties": {}}
+
+        def spec(self) -> dict:
+            return {
+                "name": self.name,
+                "description": self.description,
+                "input_schema": self.input_schema,
+            }
+
+        def run(self, **_: object) -> str:
+            nonlocal saw_tool_use_before_execution
+            last = snapshots[-1][-1]
+            saw_tool_use_before_execution = (
+                last.role == "assistant"
+                and len(last.content) == 1
+                and isinstance(last.content[0], ToolUseBlock)
+                and last.content[0].name == self.name
+            )
+            return "ok"
+
+    tool = InspectingTool()
+    provider = StubProvider(
+        [
+            CompletionResponse(
+                content=[ToolUseBlock(id="call_1", name=tool.name, input={})],
+                stop_reason="tool_use",
+            ),
+            CompletionResponse(content=[TextBlock(text="done")], stop_reason="end_turn"),
+        ]
+    )
+
+    run(
+        provider=provider,
+        tools_by_name={tool.name: tool},  # type: ignore[dict-item]
+        system=None,
+        user_input="use tool",
+        model="stub-model",
+        messages_callback=lambda messages: snapshots.append(messages),
+    )
+
+    assert saw_tool_use_before_execution is True
+    assert [[message.role for message in snapshot] for snapshot in snapshots] == [
+        ["user"],
+        ["user", "assistant"],
+        ["user", "assistant", "user"],
+        ["user", "assistant", "user", "assistant"],
+    ]
+
+
+def test_loop_records_runtime_events_and_injects_projection(tmp_path: Path) -> None:
+    bash = BashTool(cwd=tmp_path)
+    provider = StubProvider(
+        [
+            CompletionResponse(
+                content=[
+                    ToolUseBlock(
+                        id="call_1",
+                        name="bash",
+                        input={"command": "printf 'score: 0.62\\n'"},
+                    )
+                ],
+                stop_reason="tool_use",
+            ),
+            CompletionResponse(
+                content=[TextBlock(text="done")],
+                stop_reason="end_turn",
+            ),
+        ]
+    )
+    messages_out: list[Message] = []
+    runtime_events: list[dict[str, object]] = []
+
+    run(
+        provider=provider,
+        tools_by_name={bash.name: bash},
+        system="Base system.",
+        user_input="measure it",
+        model="stub-model",
+        messages_out=messages_out,
+        runtime_events_out=runtime_events,
+    )
+
+    assert [event["type"] for event in runtime_events] == [
+        "provider_request_prepared",
+        "command_finished",
+        "metric_observed",
+        "runtime_context_projection",
+        "provider_request_prepared",
+    ]
+    assert provider.requests[0].system == "Base system."
+    assert provider.requests[1].system is not None
+    assert "Runtime context:" in provider.requests[1].system
+    assert "score=0.62" in provider.requests[1].system
+    assert [message.role for message in messages_out] == [
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+    ]
+    assert isinstance(messages_out[2].content[0], ToolResultBlock)
 
 
 def test_loop_retries_context_length_error_with_compacted_history() -> None:
@@ -450,7 +560,7 @@ def test_loop_repeated_malformed_tool_call_fails_cleanly() -> None:
     assert len(provider.requests) == 2
 
 
-def test_loop_yolo_permission_gate_allows_bash_without_changing_system_prompt() -> None:
+def test_loop_yolo_permission_gate_allows_bash_and_preserves_base_system_prompt() -> None:
     bash = BashTool()
     provider = StubProvider(
         [
@@ -472,7 +582,9 @@ def test_loop_yolo_permission_gate_allows_bash_without_changing_system_prompt() 
     )
 
     assert provider.requests[0].system == "stable system"
-    assert provider.requests[1].system == "stable system"
+    assert provider.requests[1].system is not None
+    assert provider.requests[1].system.startswith("stable system")
+    assert "Runtime context:" in provider.requests[1].system
     result_block = provider.requests[1].messages[2].content[0]
     assert isinstance(result_block, ToolResultBlock)
     assert result_block.is_error is False

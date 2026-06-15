@@ -2,6 +2,7 @@ import asyncio
 import threading
 from abc import ABC, abstractmethod
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from typing import Any, ClassVar, TypedDict
 
 from wattle.tool_events import ToolRunEvent
@@ -22,6 +23,14 @@ class ToolSpec(TypedDict):
     input_schema: dict[str, Any]
 
 
+@dataclass(frozen=True, slots=True)
+class ToolExecutionResult:
+    """Tool output plus runtime-owned metadata not shown as transcript text."""
+
+    content: object
+    metadata: dict[str, object] = field(default_factory=dict)
+
+
 class Tool(ABC):
     name: ClassVar[str]
     description: ClassVar[str]
@@ -32,10 +41,10 @@ class Tool(ABC):
     # Any: kwargs are deserialized from the model's tool-call arguments
     # (`json.loads(...)`). The shape is dictated by `input_schema`, which the
     # tool author writes in JSON Schema; there is no static type for it.
-    def run(self, **kwargs: Any) -> str: ...
+    def run(self, **kwargs: Any) -> object: ...
 
     # Any: kwargs are deserialized from model tool-call arguments, same as run().
-    async def arun(self, **kwargs: Any) -> str:
+    async def arun(self, **kwargs: Any) -> object:
         """Async tool hook.
 
         Tools with async-native implementations should override this. Sync
@@ -51,7 +60,7 @@ class Tool(ABC):
         tool_use_id: str,
         cancel_event: threading.Event | None = None,
         **kwargs: Any,
-    ) -> str:
+    ) -> object:
         """Async tool hook with optional runtime UI events.
 
         The default implementation preserves existing tool behavior. Tools that

@@ -14,6 +14,8 @@ from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
+from wattle.runtime_context import RuntimeContextProjection, RuntimeContextStore
+
 if TYPE_CHECKING:
     from wattle.subagents import SubagentManager
 
@@ -307,7 +309,14 @@ class WattleRuntime:
         self.tasks = TaskRegistry(root=root)
         self.monitors = MonitorRegistry()
         self.events = MonitorEventQueue()
+        self.context = RuntimeContextStore(
+            root=self.tasks.root,
+            tasks_snapshot=self.tasks.snapshots,
+        )
         self._subagents: SubagentManager | None = None
+
+    def runtime_context_projection(self) -> RuntimeContextProjection | None:
+        return self.context.project()
 
     @property
     def subagents(self) -> SubagentManager:
