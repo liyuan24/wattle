@@ -174,6 +174,10 @@ class RequestPreparer:
             model=self.model,
         )
         projected_messages = append_post_tool_observation_checkpoint(projected_messages)
+        projected_messages = append_runtime_deadline_status(
+            projected_messages,
+            self.run_deadline,
+        )
         context_tokens = estimate_request_context_tokens(
             system=request_system,
             messages=projected_messages,
@@ -269,6 +273,27 @@ def append_post_tool_observation_checkpoint(
             input_tokens=latest.input_tokens,
             output_tokens=latest.output_tokens,
             cached_tokens=latest.cached_tokens,
+        ),
+    ]
+
+
+def append_runtime_deadline_status(
+    messages: list[Message],
+    deadline: RunDeadline | None,
+) -> list[Message]:
+    """Append volatile remaining-time guidance at the request tail.
+
+    The exact remaining time changes often, so it stays at the end of the
+    provider request where it does not invalidate the cacheable conversation
+    prefix.
+    """
+    if deadline is None:
+        return messages
+    return [
+        *messages,
+        Message(
+            role="user",
+            content=[TextBlock(text=deadline.request_status())],
         ),
     ]
 

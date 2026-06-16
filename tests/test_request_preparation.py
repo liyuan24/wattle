@@ -17,6 +17,7 @@ from wattle.request_preparation import (
     POST_TOOL_OBSERVATION_CHECKPOINT,
     RequestPreparer,
     append_post_tool_observation_checkpoint,
+    append_runtime_deadline_status,
     project_messages_for_model_modalities,
 )
 
@@ -187,9 +188,10 @@ def test_prepare_prefers_provider_context_tokens_from_message_history() -> None:
     assert prepared.request.messages[-1] == messages[-1]
 
 
-def test_prepare_adds_fresh_runtime_deadline_notice_to_request_system() -> None:
+def test_prepare_keeps_deadline_out_of_system_and_appends_tail_status() -> None:
     now = [1000.0]
     deadline = RunDeadline(epoch_ms=1_900_000, clock=lambda: now[0])
+    events: list[dict[str, object]] = []
     preparer = RequestPreparer(
         provider=StubProvider([]),
         model="test-model",
@@ -197,6 +199,7 @@ def test_prepare_adds_fresh_runtime_deadline_notice_to_request_system() -> None:
         tools=[],
         max_tokens=1024,
         run_deadline=deadline,
+        on_runtime_event=events.append,
     )
     messages = [Message(role="user", content=[TextBlock(text="do it")])]
 
@@ -205,15 +208,29 @@ def test_prepare_adds_fresh_runtime_deadline_notice_to_request_system() -> None:
     second = asyncio.run(preparer.aprepare(messages))
 
     assert first.request.system is not None
-    assert first.request.system.startswith("Base system.")
-    assert "Wall-clock budget remaining for this run: about 15 minutes." in (
-        first.request.system
-    )
+    assert first.request.system == "Base system."
     assert second.request.system is not None
-    assert "Wall-clock budget remaining for this run: about 50 seconds." in (
-        second.request.system
-    )
-    assert "only start commands that fit in the remaining time" in second.request.system
+    assert first.request.system == second.request.system
+    assert "about 15 minutes" in first.request.messages[-1].content[0].text
+    assert "about 50 seconds" in second.request.messages[-1].content[0].text
+    system_hashes = [
+        event["data"]["system_sha256"]
+        for event in events
+        if event.get("type") == "provider_request_prepared"
+    ]
+    assert len(set(system_hashes)) == 1
+
+
+def test_runtime_deadline_status_is_appended_at_request_tail() -> None:
+    deadline = RunDeadline(epoch_ms=160_000, clock=lambda: 100.0)
+    messages = [Message(role="user", content=[TextBlock(text="do it")])]
+
+    with_status = append_runtime_deadline_status(messages, deadline)
+
+    assert with_status[:-1] == messages
+    assert with_status[-1].role == "user"
+    assert "about 60 seconds" in with_status[-1].content[0].text
+    assert append_runtime_deadline_status(messages, None) is messages
 
 
 def test_prepare_adds_provider_only_observation_checkpoint_after_tool_result() -> None:
@@ -286,5 +303,5 @@ def test_runtime_deadline_notice_can_be_loaded_from_env() -> None:
 
     system = append_runtime_deadline_notice(None, deadline)
 
-    assert system is not None
-    assert "Wall-clock budget remaining for this run: about 60 seconds." in system
+    assert system is None
+    assert "about 60 seconds" in deadline.request_status()

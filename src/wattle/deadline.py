@@ -18,26 +18,17 @@ class RunDeadline:
     def remaining_seconds(self) -> float:
         return max(0.0, (self.epoch_ms / 1000.0) - self.clock())
 
-    def system_notice(self) -> str:
+    def request_status(self) -> str:
         remaining = self.remaining_seconds()
         if remaining <= 0:
             return (
-                "Run deadline:\n"
-                "- The wall-clock deadline for this run has passed. Finish with the "
-                "current state and avoid starting new long-running work."
+                "Runtime deadline status: the wall-clock deadline for this run has "
+                "passed. Finish with the current state and avoid starting new work."
             )
-        guidance = (
-            "Use this to choose a feasible plan and validation scope."
-            if remaining > 300
-            else (
-                "Prioritize completing the required work, avoid extra exploration, "
-                "and only start commands that fit in the remaining time."
-            )
-        )
         return (
-            "Run deadline:\n"
-            f"- Wall-clock budget remaining for this run: {_format_remaining(remaining)}.\n"
-            f"- {guidance}"
+            "Runtime deadline status: wall-clock budget remaining for this run is "
+            f"{_format_remaining(remaining)}. Use this to size only the next action "
+            "and validation scope."
         )
 
 
@@ -59,12 +50,7 @@ def run_deadline_from_env(
 
 
 def append_runtime_deadline_notice(system: str | None, deadline: RunDeadline | None) -> str | None:
-    if deadline is None:
-        return system
-    notice = deadline.system_notice()
-    if not system:
-        return notice
-    return f"{system}\n\n{notice}"
+    return system
 
 
 def _format_remaining(seconds: float) -> str:
