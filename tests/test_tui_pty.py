@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import textwrap
 from pathlib import Path
 
@@ -68,6 +69,47 @@ def _slow_wattle_child_code(
             permission_mode=PermissionMode.YOLO,
         )
         raise SystemExit(WattleApp(args, SlowProvider()).run())
+        """
+    )
+
+
+def _statusline_picker_child_code(settings_path: Path) -> str:
+    return textwrap.dedent(
+        f"""
+        import argparse
+        import os
+
+        from wattle.permissions import PermissionMode
+        from wattle.providers import CompletionResponse, Provider, TextBlock
+        from wattle.tui import WattleApp
+
+
+        class StaticProvider(Provider):
+            async def acomplete(self, request):
+                return CompletionResponse(
+                    content=[TextBlock(text="ok")],
+                    stop_reason="end_turn",
+                    usage={{}},
+                )
+
+            async def astream(self, request):
+                raise NotImplementedError
+                yield
+
+
+        os.environ["WATTLE_SETTINGS_PATH"] = {str(settings_path)!r}
+        args = argparse.Namespace(
+            provider="openai_responses",
+            model="gpt-5.5",
+            max_tokens=4096,
+            thinking=False,
+            effort=None,
+            prompt=None,
+            persist_session=False,
+            permission_mode=PermissionMode.YOLO,
+            statusline_fields=("model", "thinking", "cwd"),
+        )
+        raise SystemExit(WattleApp(args, StaticProvider()).run())
         """
     )
 
@@ -1260,6 +1302,30 @@ def test_pty_resize_keeps_user_image_history_as_anchor(tmp_path: Path) -> None:
         assert "check [image#1]" in screen_text
         assert "[image] dragged image.png" not in screen_text
         assert str(image) not in screen_text
+
+
+def test_pty_statusline_picker_toggles_and_persists_fields(tmp_path: Path) -> None:
+    settings_path = tmp_path / "settings.json"
+    with PtySession.spawn_python(
+        _statusline_picker_child_code(settings_path),
+        cwd=tmp_path,
+        cols=100,
+        rows=30,
+    ) as session:
+        session.read_until("gpt-5.5 | thinking: off", timeout=3)
+        session.write("/statusline")
+        session.read_until("x to select/deselect", timeout=3)
+        session.read_until("> [x] model", timeout=3)
+        session.write("x")
+        session.read_until("> [ ] model", timeout=3)
+        session.write("\x1b[B\x1b[B\x1b[B")
+        session.read_until("> [ ] context_remaining", timeout=3)
+        session.write("x\n")
+        session.read_until("Statusline fields: thinking, context_remaining, cwd", timeout=3)
+        session.write("/exit\n")
+
+    saved = json.loads(settings_path.read_text(encoding="utf-8"))
+    assert saved["tui"]["statusline"] == ["thinking", "context_remaining", "cwd"]
 
 
 def test_pty_queue_command_renders_end_turn_followup_panel(tmp_path: Path) -> None:

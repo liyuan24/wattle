@@ -164,6 +164,7 @@ SLASH_COMMAND_HINTS: tuple[tuple[str, str], ...] = (
     ("/resume", "switch to a saved session"),
     ("/session", "show persistence and saved session path"),
     ("/status", "show session and status details"),
+    ("/statusline", "choose fields in status line at bottom"),
     ("/stop", "stop all running background tasks"),
 )
 
@@ -1467,6 +1468,7 @@ STATUSLINE_FIELD_DESCRIPTIONS = (
     ("quota_5h", "5 hour quota limit"),
     ("quota_1w", "1 week subscription limit"),
 )
+STATUSLINE_PICKER_FIELDS = tuple(field for field, _description in STATUSLINE_FIELD_DESCRIPTIONS)
 
 _STATUSLINE_FIELD_ALIASES = {
     "context": "context_used",
@@ -1785,6 +1787,33 @@ def _render_login_picker_rows(
             rows.append(f"{STATUS_STYLE}{line}{RESET}")
         else:
             rows.append(line)
+    return rows
+
+
+def _render_statusline_picker_rows(
+    *,
+    selected_index: int,
+    selected_fields: tuple[str, ...],
+    width: int,
+    styles_enabled: bool,
+) -> list[str]:
+    field_width = max(len(field) for field in STATUSLINE_PICKER_FIELDS)
+    rows = [
+        " Use ↑/↓ to move, x to select/deselect, Enter to confirm."[:width].ljust(width)
+    ]
+    for index, (field, description) in enumerate(STATUSLINE_FIELD_DESCRIPTIONS):
+        marker = ">" if index == selected_index else " "
+        checkbox = "[x]" if field in selected_fields else "[ ]"
+        line = f" {marker} {checkbox} {field:<{field_width}}  {description}"
+        line = line[:width].ljust(width)
+        if styles_enabled and index == selected_index:
+            rows.append(f"{SELECTED_ROW_STYLE}{line}{RESET}")
+        elif styles_enabled:
+            rows.append(f"{STATUS_STYLE}{line}{RESET}")
+        else:
+            rows.append(line)
+    if styles_enabled:
+        rows[0] = f"{STATUS_STYLE}{rows[0]}{RESET}"
     return rows
 
 
@@ -3824,6 +3853,9 @@ class WattleApp:
         if cmd in ("/session", "/status"):
             self._write_session_status()
             return False
+        if cmd == "/statusline":
+            self._handle_statusline(rest)
+            return False
         if cmd == "/stop":
             self._handle_stop_background_tasks()
             return False
@@ -4077,6 +4109,35 @@ class WattleApp:
             return None
         return expand_skill_invocation(text, Path.cwd())
 
+    def _handle_statusline(self, rest: str) -> None:
+        if rest:
+            self._write_panel(
+                "error",
+                "Use /statusline to choose fields from the picker.",
+                ERROR_STYLE,
+            )
+            return
+        self._write_panel(
+            "statusline",
+            "Open the /statusline picker from the live prompt. "
+            "Use x to select fields and Enter to confirm.",
+            STATUS_STYLE,
+        )
+
+    def _apply_statusline_fields(self, fields: tuple[str, ...]) -> None:
+        self._statusline_fields = _normalize_statusline_fields(list(fields))
+        self._statusline_enabled = bool(self._statusline_fields)
+        self._persist_user_settings(
+            source={"kind": "slash_command", "name": "/statusline"},
+            tui=TuiSettings(
+                statusline=self._statusline_fields,
+                show_thinking=self.show_thinking_content,
+            ),
+        )
+        self._persist_session()
+        summary = ", ".join(self._statusline_fields) if self._statusline_fields else "none"
+        self._write_panel("statusline", f"Statusline fields: {summary}", STATUS_STYLE)
+
     def _handle_model(self, rest: str) -> None:
         choices = available_model_choices()
         verb, _, _arg = rest.partition(" ")
@@ -4316,6 +4377,7 @@ class WattleApp:
         self._write_line("  /model [name]      List or switch models.")
         self._write_line("  /resume <session-id> Switch to a saved session.")
         self._write_line("  /session, /status  Show persistence and session status.")
+        self._write_line("  /statusline       Choose fields in status line at bottom.")
         self._write_line("")
         self._write_line("Settings:")
         self._write_line(f"  provider:      {self._display_provider_name()}")
@@ -4951,6 +5013,8 @@ class _LiveTerminal:
         self.model_picker_choices: list[ModelChoice] | None = None
         self.model_picker_selected = 0
         self.login_picker_selected = 0
+        self.statusline_picker_selected = 0
+        self.statusline_picker_fields: tuple[str, ...] | None = None
         self.input_hint_rows: list[str] | None = None
         self.input_hint_source = ""
         self.input_hint_selected = 0
@@ -5103,6 +5167,9 @@ class _LiveTerminal:
                 self.running = False
             elif ch == "\x16":
                 self._paste_clipboard_image_or_insert_literal(ch)
+                self._draw_prompt()
+            elif ch in ("x", "X") and self._statusline_picker_active():
+                self._toggle_statusline_picker_selection()
                 self._draw_prompt()
             elif ch == "\x15":
                 self.buffer = ""
@@ -5288,6 +5355,9 @@ class _LiveTerminal:
     def _login_picker_active(self) -> bool:
         return not self.streaming and self.buffer.strip() == "/login"
 
+    def _statusline_picker_active(self) -> bool:
+        return not self.streaming and self.buffer.strip() == "/statusline"
+
     def _ensure_model_picker(self) -> list[ModelChoice] | None:
         if not self._model_picker_active():
             self.model_picker_choices = None
@@ -5322,11 +5392,48 @@ class _LiveTerminal:
             min(len(LOGIN_PROVIDER_CHOICES) - 1, self.login_picker_selected + delta),
         )
 
+    def _ensure_statusline_picker_fields(self) -> tuple[str, ...]:
+        if not self._statusline_picker_active():
+            self.statusline_picker_selected = 0
+            self.statusline_picker_fields = None
+            return ()
+        if self.statusline_picker_fields is None:
+            selected = set(self.app._statusline_fields)
+            self.statusline_picker_fields = tuple(
+                field for field in STATUSLINE_PICKER_FIELDS if field in selected
+            )
+        self.statusline_picker_selected = max(
+            0,
+            min(len(STATUSLINE_PICKER_FIELDS) - 1, self.statusline_picker_selected),
+        )
+        return self.statusline_picker_fields
+
+    def _move_statusline_picker_selection(self, delta: int) -> None:
+        self._ensure_statusline_picker_fields()
+        self.statusline_picker_selected = max(
+            0,
+            min(len(STATUSLINE_PICKER_FIELDS) - 1, self.statusline_picker_selected + delta),
+        )
+
+    def _toggle_statusline_picker_selection(self) -> None:
+        selected_fields = set(self._ensure_statusline_picker_fields())
+        field = STATUSLINE_PICKER_FIELDS[self.statusline_picker_selected]
+        if field in selected_fields:
+            selected_fields.remove(field)
+        else:
+            selected_fields.add(field)
+        self.statusline_picker_fields = tuple(
+            picker_field
+            for picker_field in STATUSLINE_PICKER_FIELDS
+            if picker_field in selected_fields
+        )
+
     def _input_hints_active(self) -> bool:
         return (
             not self.streaming
             and not self._model_picker_active()
             and not self._login_picker_active()
+            and not self._statusline_picker_active()
         )
 
     def _ensure_input_hints(self) -> list[str]:
@@ -5362,11 +5469,17 @@ class _LiveTerminal:
             self._move_model_picker_selection(delta)
         elif self._login_picker_active():
             self._move_login_picker_selection(delta)
+        elif self._statusline_picker_active():
+            self._move_statusline_picker_selection(delta)
         else:
             self._move_input_hint_selection(delta)
 
     def _move_picker_or_history(self, delta: int) -> None:
-        if self._model_picker_active() or self._login_picker_active():
+        if (
+            self._model_picker_active()
+            or self._login_picker_active()
+            or self._statusline_picker_active()
+        ):
             self._move_picker_selection(delta)
             return
 
@@ -5454,6 +5567,9 @@ class _LiveTerminal:
             return
         if self._login_picker_active():
             self._submit_login_picker_selection()
+            return
+        if self._statusline_picker_active():
+            self._submit_statusline_picker_selection()
             return
         if use_selected_hint and self._submit_input_hint_selection():
             return
@@ -5566,7 +5682,7 @@ class _LiveTerminal:
             self._draw_prompt()
             return True
         text = _apply_hint_to_input(self.buffer, selected)
-        if text.strip() in {"/login", "/model"}:
+        if text.strip() in {"/login", "/model", "/statusline"}:
             self.buffer = text.strip()
             self.cursor = len(self.buffer)
             self.pasted_ranges = []
@@ -5613,6 +5729,17 @@ class _LiveTerminal:
         self.login_picker_selected = 0
         self._clear_prompt()
         self.app._handle_login(provider)
+        self._draw_prompt()
+
+    def _submit_statusline_picker_selection(self) -> None:
+        selected_fields = self._ensure_statusline_picker_fields()
+        self.buffer = ""
+        self.cursor = 0
+        self.pasted_ranges = []
+        self.statusline_picker_selected = 0
+        self.statusline_picker_fields = None
+        self._clear_prompt()
+        self.app._apply_statusline_fields(selected_fields)
         self._draw_prompt()
 
     def _interrupt_with_buffer_if_possible(self) -> None:
@@ -6411,6 +6538,14 @@ class _LiveTerminal:
                 styles_enabled=self.app._styles_enabled(),
             )
             rows.extend(_filled_terminal_line(row, STATUS_STYLE, width) for row in login_rows)
+        elif self._statusline_picker_active():
+            statusline_rows = _render_statusline_picker_rows(
+                selected_index=self.statusline_picker_selected,
+                selected_fields=self._ensure_statusline_picker_fields(),
+                width=line_width,
+                styles_enabled=self.app._styles_enabled(),
+            )
+            rows.extend(_filled_terminal_line(row, STATUS_STYLE, width) for row in statusline_rows)
         else:
             input_hints = self._ensure_input_hints()
             if input_hints:

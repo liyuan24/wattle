@@ -21,7 +21,6 @@ import pytest
 from wattle import auth, cli, request_preparation, session, settings, tui
 from wattle.command_summary import CommandSummary, CommandSummaryKind
 from wattle.models import ModelChoice
-from wattle.runtime import TaskStatus, WattleRuntime
 from wattle.providers import (
     CompletionRequest,
     CompletionResponse,
@@ -38,6 +37,7 @@ from wattle.providers import (
     ToolUseDelta,
     TransientProviderError,
 )
+from wattle.runtime import TaskStatus, WattleRuntime
 from wattle.tools import TOOLS_BY_NAME
 from wattle.tools.base import Tool
 from wattle.version import get_wattle_version
@@ -1068,7 +1068,7 @@ def test_command_hints_match_slash_prefix() -> None:
     rendered = tui._render_command_hints("/stat")
 
     assert "/status  show session and status details" in rendered
-    assert "/statusline" not in rendered
+    assert "/statusline  choose fields in status line at bottom" in rendered
     assert "/model" not in rendered
     assert "/clear" not in rendered
 
@@ -3047,6 +3047,26 @@ def test_live_prompt_shows_login_picker_for_login_command() -> None:
     assert "/login  authenticate a provider" not in rendered
 
 
+def test_live_prompt_shows_statusline_picker_for_statusline_command() -> None:
+    out = _TTYBuffer()
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+    live = tui._LiveTerminal(app)
+    live.buffer = "/statusline"
+    live.cursor = len(live.buffer)
+
+    live._draw_prompt()
+
+    rendered = _strip_ansi(out.getvalue())
+    assert " > /statusline" in rendered
+    assert "Use ↑/↓ to move, x to select/deselect, Enter to confirm." in rendered
+    assert "> [x] model" in rendered
+    assert "  [x] thinking" in rendered
+    assert "  [x] cwd" in rendered
+    assert "  [ ] context_used" in rendered
+    assert "/statusline  choose fields in status line at bottom" not in rendered
+
+
 def test_live_prompt_shows_auto_compacting_status() -> None:
     out = _TTYBuffer()
     app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
@@ -3098,6 +3118,48 @@ def test_live_tab_completes_selected_login_provider_without_submitting() -> None
     assert live.buffer == "/login openai-codex"
     assert live.cursor == len(live.buffer)
     assert app.messages == []
+
+
+def test_live_statusline_picker_x_toggles_selected_field() -> None:
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=_TTYBuffer())
+    live = tui._LiveTerminal(app)
+    live.buffer = "/statusline"
+    live.cursor = len(live.buffer)
+
+    live._ensure_statusline_picker_fields()
+    live._toggle_statusline_picker_selection()
+    live._move_statusline_picker_selection(3)
+    live._toggle_statusline_picker_selection()
+
+    assert live.statusline_picker_fields == ("thinking", "context_remaining", "cwd")
+
+
+def test_live_statusline_picker_enter_applies_and_persists_fields(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(settings.SETTINGS_PATH_ENV, str(tmp_path / "settings.json"))
+    out = _TTYBuffer()
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+    live = tui._LiveTerminal(app)
+    live.buffer = "/statusline"
+    live.cursor = len(live.buffer)
+    live._ensure_statusline_picker_fields()
+    live._toggle_statusline_picker_selection()
+    live._move_statusline_picker_selection(3)
+    live._toggle_statusline_picker_selection()
+
+    live._submit_buffer()
+
+    assert live.buffer == ""
+    assert app._statusline_fields == ("thinking", "context_remaining", "cwd")
+    assert settings.load_settings().tui.statusline == (
+        "thinking",
+        "context_remaining",
+        "cwd",
+    )
+    assert "Statusline fields: thinking, context_remaining, cwd" in out.getvalue()
 
 
 def test_live_model_picker_moves_highlight_with_up_and_down(
@@ -6823,7 +6885,7 @@ def test_tui_prefetches_codex_quota_for_startup_statusline() -> None:
     assert captured[0].full_url == "https://chatgpt.com/backend-api/wham/usage"
 
 
-def test_terminal_statusline_command_is_not_supported(
+def test_terminal_statusline_command_rejects_typed_arguments(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -6839,7 +6901,7 @@ def test_terminal_statusline_command_is_not_supported(
 
     out, app = _drive(provider, ["/statusline off", "go", "/exit"])
 
-    assert "Unknown command: /statusline" in out
+    assert "Use /statusline to choose fields from the picker." in out
     assert app._statusline_enabled is True
     assert settings.load_settings().tui.statusline == ("model", "thinking", "cwd")
 

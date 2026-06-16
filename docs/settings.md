@@ -74,6 +74,8 @@ Wattle supports only `yolo` permission mode. Tool calls run without runtime conf
 
 ## TUI statusline
 
+Run `/statusline` in the TUI to choose fields interactively. Use the arrow keys to move, press `x` to select or deselect a field, then press Enter to save the selection.
+
 The default statusline fields are:
 
 ```json
