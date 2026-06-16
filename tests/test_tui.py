@@ -3390,7 +3390,7 @@ def test_live_prompt_shows_end_turn_queue_in_separate_panel(tmp_path: Path) -> N
     assert str(second) not in rendered
 
 
-def test_live_prompt_shows_subagent_lifecycle_status(
+def test_live_prompt_shows_only_active_subagent_lifecycle_status(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     out = _TTYBuffer()
@@ -3409,6 +3409,14 @@ def test_live_prompt_shows_subagent_lifecycle_status(
                     "status": "completed",
                     "task": "Inspect the prompt state",
                     "result": "TUI input path identified",
+                },
+                {
+                    "subagent_id": "subagent-234",
+                    "display_name": "Katherine",
+                    "role": "explorer",
+                    "status": "failed",
+                    "task": "Inspect failing review setup",
+                    "error": "PermissionError: local codex denied",
                 },
                 {
                     "subagent_id": "subagent-456",
@@ -3433,14 +3441,17 @@ def test_live_prompt_shows_subagent_lifecycle_status(
     rendered = out.getvalue()
     expected_title = (
         f"\x1b[0m\x1b[2K{tui.SUBAGENT_WAIT_TITLE_STYLE} "
-        "Subagents · 1 complete, 2 running"
+        "Subagents · 2 running"
     )
     assert expected_title in rendered
     assert "Waiting for subagent(s)" not in rendered
-    assert "Subagents · 1 complete, 2 running" in rendered
-    assert "Hopper [explorer] complete · TUI input path identified" in rendered
+    assert "Subagents · 2 running" in rendered
     assert "Grace [explorer] running · Inspect tool flows" in rendered
     assert "Ada [worker] running · Patch tests" in rendered
+    assert "Hopper [explorer]" not in rendered
+    assert "TUI input path identified" not in rendered
+    assert "Katherine [explorer]" not in rendered
+    assert "PermissionError: local codex denied" not in rendered
 
 
 def test_live_prompt_suppresses_generic_wait_agent_status_for_active_subagents(

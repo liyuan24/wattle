@@ -241,6 +241,12 @@ def _guidelines(
         guidelines.append("Use read to examine files before editing.")
     if {"spawn_agent", "wait_agent"}.issubset(names):
         guidelines.append(
+            "Do not spawn a subagent as the first action for a user-requested "
+            "investigation, debugging task, code review, or repository inspection. "
+            "First inspect the relevant local files/state yourself enough to decide "
+            "whether there is truly independent, bounded work to delegate."
+        )
+        guidelines.append(
             "Before spawning subagents, quickly decide the work split: what "
             "you will continue doing locally now, what each subagent owns, and "
             "when you must wait before continuing."
@@ -253,12 +259,18 @@ def _guidelines(
         )
         guidelines.append(
             "Use subagents only for independent, bounded side tasks that can run "
-            "without blocking your immediate next local step. After spawning, do "
-            "not duplicate a subagent's assigned work while it is still running. "
-            "Continue locally only on non-overlapping work, and use wait_agent "
-            "before synthesizing results, making decisions that depend on "
-            "delegated findings, editing shared files, or giving a final answer "
-            "that depends on delegated work."
+            "without blocking your immediate next local step; do not use them to "
+            "hand off the user's main request. After spawning, do not duplicate a "
+            "subagent's assigned work while it is still running. Continue locally "
+            "only on non-overlapping work, and use wait_agent before synthesizing "
+            "results, making decisions that depend on delegated findings, editing "
+            "shared files, or giving a final answer that depends on delegated work."
+        )
+        guidelines.append(
+            "If a subagent fails due to provider, auth, permission, environment, "
+            "or runtime setup errors, do not spawn replacement subagents for the "
+            "same task unless the user explicitly asks or the failure cause has "
+            "been fixed. Report the failure and continue locally when possible."
         )
         guidelines.append(
             "When spawning, write the task so the ownership is clear in prose. "

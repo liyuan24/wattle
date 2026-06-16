@@ -337,7 +337,8 @@ SELECTED_ROW_STYLE = "\x1b[48;5;240;38;5;255;1m"
 COMPACTION_FRAMES = ("◐", "◓", "◑", "◒")
 WAIT_AGENT_RUNNING_TITLE = "Waiting for subagent"
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b[78]")
-SUBAGENT_VISIBLE_STATUSES = frozenset(
+SUBAGENT_VISIBLE_STATUSES = frozenset({"pending", "running", "closing"})
+SUBAGENT_TOOL_RESULT_STATUSES = frozenset(
     {"pending", "running", "closing", "completed", "failed"}
 )
 SUBAGENT_STATUS_LABELS = {
@@ -716,6 +717,16 @@ def _visible_subagent_snapshots(snapshots: list[dict[str, object]]) -> list[dict
         snapshot
         for snapshot in snapshots
         if snapshot.get("status") in SUBAGENT_VISIBLE_STATUSES
+    ]
+
+
+def _tool_result_subagent_snapshots(
+    snapshots: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    return [
+        snapshot
+        for snapshot in snapshots
+        if snapshot.get("status") in SUBAGENT_TOOL_RESULT_STATUSES
     ]
 
 
@@ -3707,7 +3718,8 @@ class WattleApp:
         block: ToolUseBlock,
     ) -> list[dict[str, object]]:
         target_id = str(block.input.get("subagent_id") or "")
-        visible = self._visible_subagent_snapshots()
+        snapshots = self._subagent_snapshots()
+        visible = _tool_result_subagent_snapshots(snapshots)
         if target_id and any(snapshot.get("subagent_id") == target_id for snapshot in visible):
             if len(visible) > 1:
                 return visible
@@ -3719,7 +3731,7 @@ class WattleApp:
         if not target_id and len(visible) > 1:
             return visible
         if target_id:
-            for snapshot in self._subagent_snapshots():
+            for snapshot in snapshots:
                 if snapshot.get("subagent_id") == target_id:
                     return [snapshot]
             return []

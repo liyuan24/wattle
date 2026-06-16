@@ -12,10 +12,13 @@ class SpawnAgentTool(Tool):
     description = (
         "Start a managed Wattle subagent in the current runtime. The subagent "
         "runs in-process with its own message history and can be waited on with "
-        "wait_agent. Use this for independent, bounded work. Before calling it, "
-        "decide what the primary agent will keep doing locally, what this "
-        "subagent owns, and when the primary must wait. Put the subagent's "
-        "scope and edit/read-only expectations in the task or instructions text."
+        "wait_agent. Use this only for independent, bounded side work after the "
+        "primary agent has inspected enough local context to define a "
+        "non-overlapping delegation. Do not use it as the first action for a "
+        "user-requested review/debug/investigation, and do not retry equivalent "
+        "subagents after provider/auth/permission/environment failures unless "
+        "the cause is fixed or the user asks. Put the subagent's scope and "
+        "edit/read-only expectations in the task or instructions text."
     )
     input_schema = {
         "type": "object",

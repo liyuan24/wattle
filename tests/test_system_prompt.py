@@ -56,9 +56,13 @@ def test_build_system_prompt_uses_wattle_default_without_pi_docs(tmp_path: Path)
     assert "prefer conventional entrypoint names and process shapes" in prompt
     assert "Before starting a long-running, expensive, or quiet operation" in prompt
     assert "Wattle does not automatically start monitors after background commands" in prompt
+    assert "Do not spawn a subagent as the first action" in prompt
+    assert "code review, or repository inspection" in prompt
     assert "Before spawning subagents, quickly decide the work split" in prompt
     assert "set agent_type explicitly when the role matters" in prompt
+    assert "do not use them to hand off the user's main request" in prompt
     assert "do not duplicate a subagent's assigned work while it is still running" in prompt
+    assert "do not spawn replacement subagents for the same task" in prompt
     assert "write the task so the ownership is clear in prose" in prompt
     assert "first find the image path using available file-search tools" in prompt
     assert "Use update_plan sparingly for complex, ambiguous, or long-running work" in prompt
