@@ -343,31 +343,36 @@ def _run_headless(args: argparse.Namespace) -> int:
     """Run one prompt and print only the final assistant text."""
     permission_mode = PermissionMode.YOLO
 
-    if bool(getattr(args, "persist", False)):
-        session_writer = _HeadlessSessionWriter(args)
-        result = run_agent_with_history(
-            args.provider,
-            args.model,
-            args.print_prompt,
-            max_tokens=args.max_tokens,
-            permission_mode=permission_mode,
-            thinking=bool(getattr(args, "thinking", False)),
-            effort=getattr(args, "effort", None),
-            on_snapshot=session_writer.update,
-        )
-        response = result.response
-        session_path = session_writer.finish(result)
-    else:
-        response = run_agent(
-            args.provider,
-            args.model,
-            args.print_prompt,
-            max_tokens=args.max_tokens,
-            permission_mode=permission_mode,
-            thinking=bool(getattr(args, "thinking", False)),
-            effort=getattr(args, "effort", None),
-        )
-        session_path = None
+    try:
+        if bool(getattr(args, "persist", False)):
+            session_writer = _HeadlessSessionWriter(args)
+            result = run_agent_with_history(
+                args.provider,
+                args.model,
+                args.print_prompt,
+                max_tokens=args.max_tokens,
+                permission_mode=permission_mode,
+                thinking=bool(getattr(args, "thinking", False)),
+                effort=getattr(args, "effort", None),
+                on_snapshot=session_writer.update,
+            )
+            response = result.response
+            session_path = session_writer.finish(result)
+        else:
+            response = run_agent(
+                args.provider,
+                args.model,
+                args.print_prompt,
+                max_tokens=args.max_tokens,
+                permission_mode=permission_mode,
+                thinking=bool(getattr(args, "thinking", False)),
+                effort=getattr(args, "effort", None),
+            )
+            session_path = None
+    except _normalized_provider_error_types() as exc:
+        sys.stderr.write(f"[error] {_headless_provider_error_text(exc)}\n")
+        sys.stderr.flush()
+        return 1
 
     text = "".join(block.text for block in response.content if _is_text_block(block))
     if text:
@@ -379,6 +384,21 @@ def _run_headless(args: argparse.Namespace) -> int:
         sys.stderr.write(f"Saved session: {session_path}\n")
         sys.stderr.flush()
     return 0
+
+
+def _normalized_provider_error_types() -> tuple[type[BaseException], ...]:
+    from wattle.providers import ProviderError, TransientProviderError
+
+    return (ProviderError, TransientProviderError)
+
+
+def _headless_provider_error_text(error: BaseException) -> str:
+    from wattle.providers import TransientProviderError
+
+    text = str(error).strip() or type(error).__name__
+    if isinstance(error, TransientProviderError):
+        return f"Temporary provider error after retries: {text}"
+    return text
 
 
 def _run_tui(args: argparse.Namespace) -> int:

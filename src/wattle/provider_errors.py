@@ -44,6 +44,7 @@ _RETRYABLE_CODES = {
     "overloaded_error",
     "rate_limit_error",
     "rate_limit_exceeded",
+    "server_error",
     "server_is_overloaded",
     "slow_down",
     "timeout_error",

@@ -767,6 +767,36 @@ def test_codex_provider_response_failed_rate_limit_parses_retry_delay() -> None:
         raise AssertionError("expected rate_limit_exceeded to be retryable")
 
 
+def test_codex_provider_error_event_server_error_is_retryable() -> None:
+    provider = _provider_for_events(
+        [
+            {
+                "type": "error",
+                "error": {
+                    "type": "server_error",
+                    "code": "server_error",
+                    "message": (
+                        "An error occurred while processing your request. "
+                        "Please include the request ID req_123."
+                    ),
+                    "param": None,
+                },
+                "sequence_number": 6,
+            }
+        ]
+    )
+
+    try:
+        _stream(provider, _request())
+    except TransientProviderError as exc:
+        assert exc.provider == "openai_codex"
+        assert exc.code == "server_error"
+        assert "processing your request" in str(exc)
+        assert "sequence_number" not in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("expected streamed server_error to be retryable")
+
+
 def test_codex_provider_response_failed_context_length_keeps_recovery_signal() -> None:
     provider = _provider_for_events(
         [_response_failed_error("context_length_exceeded", "too much context")]

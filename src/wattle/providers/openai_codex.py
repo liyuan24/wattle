@@ -490,7 +490,8 @@ def _map_event(
 ) -> tuple[StreamEvent | None, str | None, dict[str, Any] | None]:
     event_type = event.get("type")
     if event_type == "error":
-        raise RuntimeError(f"Codex error: {event.get('message') or event}")
+        normalized = normalize_provider_error(event, provider="openai_codex")
+        raise normalized
     if event_type == "response.failed":
         normalized = normalize_provider_error(
             _provider_payload_from_codex_error(_codex_response_error(event)),

@@ -153,6 +153,25 @@ def test_normalize_openai_503_overload_is_retryable() -> None:
     assert normalized.code == "server_is_overloaded"
 
 
+def test_normalize_nested_server_error_event_is_retryable() -> None:
+    err = {
+        "type": "error",
+        "error": {
+            "type": "server_error",
+            "code": "server_error",
+            "message": "An error occurred while processing your request.",
+        },
+        "sequence_number": 6,
+    }
+
+    normalized = normalize_provider_error(err, provider="openai_codex")
+
+    assert isinstance(normalized, TransientProviderError)
+    assert normalized.code == "server_error"
+    assert normalized.provider == "openai_codex"
+    assert "processing your request" in str(normalized)
+
+
 def test_normalize_anthropic_529_overloaded_is_retryable() -> None:
     err = _ProviderException(
         "overloaded",

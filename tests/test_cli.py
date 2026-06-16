@@ -15,7 +15,13 @@ import pytest
 from wattle import cli, models
 from wattle.auth import AuthCredential
 from wattle.permissions import PermissionMode
-from wattle.providers import CompletionResponse, Message, TextBlock
+from wattle.providers import (
+    CompletionResponse,
+    Message,
+    ProviderQuotaError,
+    TextBlock,
+    TransientProviderError,
+)
 from wattle.session import load_session
 from wattle.settings import TuiSettings, WattleSettings
 
@@ -598,6 +604,69 @@ def test_headless_calls_run_agent_and_prints_final_text(
             },
         )
     ]
+
+
+def test_headless_provider_error_returns_controlled_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    monkeypatch.setattr(
+        cli,
+        "run_agent",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            TransientProviderError("upstream reset", provider="openai_codex")
+        ),
+    )
+    monkeypatch.setattr(sys, "stdout", stdout)
+    monkeypatch.setattr(sys, "stderr", stderr)
+
+    rc = cli._run_headless(
+        argparse.Namespace(
+            provider="openai_codex",
+            model="gpt-5.5",
+            max_tokens=512,
+            permission_mode=cli.PermissionMode.YOLO,
+            print_prompt="follow the prompt",
+            prompt=None,
+            persist=False,
+        )
+    )
+
+    assert rc == 1
+    assert stdout.getvalue() == ""
+    assert stderr.getvalue() == (
+        "[error] Temporary provider error after retries: upstream reset\n"
+    )
+
+
+def test_headless_non_retryable_provider_error_returns_controlled_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stderr = io.StringIO()
+    monkeypatch.setattr(
+        cli,
+        "run_agent",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            ProviderQuotaError("usage limit reached", provider="openai_codex")
+        ),
+    )
+    monkeypatch.setattr(sys, "stderr", stderr)
+
+    rc = cli._run_headless(
+        argparse.Namespace(
+            provider="openai_codex",
+            model="gpt-5.5",
+            max_tokens=512,
+            permission_mode=cli.PermissionMode.YOLO,
+            print_prompt="follow the prompt",
+            prompt=None,
+            persist=False,
+        )
+    )
+
+    assert rc == 1
+    assert stderr.getvalue() == "[error] usage limit reached\n"
 
 
 def test_main_rejects_persist_without_print_prompt() -> None:
