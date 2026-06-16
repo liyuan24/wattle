@@ -2622,6 +2622,57 @@ def test_live_prompt_collapses_pasted_content_placeholder() -> None:
     assert live.cursor == len(pasted)
 
 
+def test_live_prompt_keeps_pasted_placeholder_after_space_backspace() -> None:
+    out = _TTYBuffer()
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+    app._statusline_enabled = False
+    live = tui._LiveTerminal(app)
+    read_fd, write_fd = os.pipe()
+    pasted = "Instruction\n" + ("Set up service.\n" * 40)
+    try:
+        live.fd = read_fd
+        os.write(write_fd, f"\x1b[200~{pasted}\x1b[201~ \x7f".encode())
+        live._read_available_input()
+    finally:
+        os.close(read_fd)
+        os.close(write_fd)
+
+    rendered = out.getvalue()
+    assert f"[Pasted Content {len(pasted)} chars]" in rendered
+    assert "Set up service." not in rendered
+    assert live.buffer == pasted
+    assert live.cursor == len(pasted)
+    assert live.pasted_ranges == [(0, len(pasted))]
+
+
+def test_live_prompt_keeps_pasted_placeholder_after_newline_backspace() -> None:
+    out = _TTYBuffer()
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+    app._statusline_enabled = False
+    live = tui._LiveTerminal(app)
+    pasted = "Instruction\n" + ("Set up service.\n" * 40)
+
+    live._insert_pasted_text(pasted)
+    live._insert_text("\n")
+    live.buffer = live.buffer[: live.cursor - 1] + live.buffer[live.cursor :]
+    live.pasted_ranges = tui._delete_pasted_ranges(
+        live.pasted_ranges,
+        start=live.cursor - 1,
+        deleted_length=1,
+    )
+    live.cursor -= 1
+    live._draw_prompt()
+
+    rendered = out.getvalue()
+    assert f"[Pasted Content {len(pasted)} chars]" in rendered
+    assert "Set up service." not in rendered
+    assert live.buffer == pasted
+    assert live.cursor == len(pasted)
+    assert live.pasted_ranges == [(0, len(pasted))]
+
+
 def test_live_prompt_shows_short_multiline_pasted_content() -> None:
     out = _TTYBuffer()
     app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)

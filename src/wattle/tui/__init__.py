@@ -1920,6 +1920,30 @@ def _shift_pasted_ranges(
     return shifted
 
 
+def _delete_pasted_ranges(
+    ranges: list[tuple[int, int]],
+    *,
+    start: int,
+    deleted_length: int,
+) -> list[tuple[int, int]]:
+    if deleted_length <= 0:
+        return ranges
+    deleted_end = start + deleted_length
+    shifted: list[tuple[int, int]] = []
+    for range_start, range_end in ranges:
+        if range_end <= start:
+            shifted.append((range_start, range_end))
+            continue
+        if range_start >= deleted_end:
+            shifted.append((range_start - deleted_length, range_end - deleted_length))
+            continue
+        if range_start < start:
+            shifted.append((range_start, start))
+        if range_end > deleted_end:
+            shifted.append((start, range_end - deleted_length))
+    return _merge_pasted_ranges(shifted)
+
+
 def _render_prompt_input(
     buffer: str,
     pasted_ranges: list[tuple[int, int]],
@@ -5076,9 +5100,14 @@ class _LiveTerminal:
                 self._draw_prompt()
             elif ch in ("\x7f", "\b"):
                 if self.cursor > 0:
-                    self.buffer = self.buffer[: self.cursor - 1] + self.buffer[self.cursor :]
-                    self.pasted_ranges = []
-                    self.cursor -= 1
+                    delete_start = self.cursor - 1
+                    self.buffer = self.buffer[:delete_start] + self.buffer[self.cursor :]
+                    self.pasted_ranges = _delete_pasted_ranges(
+                        self.pasted_ranges,
+                        start=delete_start,
+                        deleted_length=1,
+                    )
+                    self.cursor = delete_start
                 self._draw_prompt()
             elif ch == "\x1b":
                 candidate = data[index - 1 :]
