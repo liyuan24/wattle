@@ -151,20 +151,30 @@ def prompt_for_tui_update(
         return False
 
     options = (
-        f"Update from {current_version} to {latest.version} ({install_command(latest)})",
+        f"Update from {current_version} to {latest.version}",
         "Skip update",
     )
     selected = 0
+    rendered_lines = 0
 
     def draw() -> None:
-        out.write("\r\x1b[J")
+        nonlocal rendered_lines
+        if rendered_lines:
+            out.write(f"\x1b[{rendered_lines}A\r\x1b[J")
+        else:
+            out.write("\r\x1b[J")
+        lines = [
+            f"Wattle {latest.version} is available. You have {current_version}.",
+            *(
+                f" {'>' if index == selected else ' '} {option}"
+                for index, option in enumerate(options)
+            ),
+            "Use up/down and Enter to select.",
+        ]
         out.write(
-            f"Wattle {latest.version} is available. You have {current_version}.\n"
+            "\n".join(lines) + "\n"
         )
-        for index, option in enumerate(options):
-            marker = ">" if index == selected else " "
-            out.write(f" {marker} {option}\n")
-        out.write("Use up/down and Enter to select.\n")
+        rendered_lines = len(lines)
         out.flush()
 
     fd = input_stream.fileno()

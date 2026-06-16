@@ -9,6 +9,19 @@ from types import SimpleNamespace
 from wattle import update
 
 
+class _FakeTtyInput:
+    def fileno(self) -> int:
+        return 99
+
+    def isatty(self) -> bool:
+        return True
+
+
+class _FakeTtyOutput(io.StringIO):
+    def isatty(self) -> bool:
+        return True
+
+
 def test_normalize_version_accepts_optional_v_prefix() -> None:
     assert update.normalize_version("0.2.1") == "0.2.1"
     assert update.normalize_version("v0.2.1") == "0.2.1"
@@ -153,3 +166,45 @@ def test_run_installer_returns_process_code(monkeypatch) -> None:
     )
 
     assert update.run_installer(update.LatestVersion(version="0.2.1", tag="v0.2.1")) == 17
+
+
+def test_tui_update_prompt_hides_installer_command(monkeypatch) -> None:
+    latest = update.LatestVersion(version="0.2.1", tag="v0.2.1")
+    input_stream = _FakeTtyInput()
+    out = _FakeTtyOutput()
+    installer_calls: list[update.LatestVersion] = []
+
+    monkeypatch.setattr(update.termios, "tcgetattr", lambda _fd: ["old"])
+    monkeypatch.setattr(update.termios, "tcsetattr", lambda *_args: None)
+    monkeypatch.setattr(update.tty, "setcbreak", lambda _fd: None)
+    monkeypatch.setattr(update.os, "read", lambda _fd, _size: b"\n")
+    monkeypatch.setattr(
+        update,
+        "run_installer",
+        lambda version: installer_calls.append(version) or 0,
+    )
+
+    assert update.prompt_for_tui_update("0.2.0", latest, input_stream=input_stream, out=out)
+    rendered = out.getvalue()
+    assert "Update from 0.2.0 to 0.2.1" in rendered
+    assert "curl -fsSL" not in rendered
+    assert installer_calls == [latest]
+
+
+def test_tui_update_prompt_redraws_in_place_on_arrow_keys(monkeypatch) -> None:
+    latest = update.LatestVersion(version="0.2.1", tag="v0.2.1")
+    input_stream = _FakeTtyInput()
+    out = _FakeTtyOutput()
+    keys = iter([b"\x1b[B", b"\n"])
+
+    monkeypatch.setattr(update.termios, "tcgetattr", lambda _fd: ["old"])
+    monkeypatch.setattr(update.termios, "tcsetattr", lambda *_args: None)
+    monkeypatch.setattr(update.tty, "setcbreak", lambda _fd: None)
+    monkeypatch.setattr(update.os, "read", lambda _fd, _size: next(keys))
+    monkeypatch.setattr(update, "run_installer", lambda _latest: 0)
+
+    assert not update.prompt_for_tui_update("0.2.0", latest, input_stream=input_stream, out=out)
+    rendered = out.getvalue()
+    assert "\x1b[4A\r\x1b[J" in rendered
+    assert rendered.count("Wattle 0.2.1 is available. You have 0.2.0.") == 2
+    assert rendered.count("Update from 0.2.0 to 0.2.1") == 2

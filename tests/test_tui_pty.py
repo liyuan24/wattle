@@ -72,6 +72,21 @@ def _slow_wattle_child_code(
     )
 
 
+def _update_prompt_child_code() -> str:
+    return textwrap.dedent(
+        """
+        from wattle import update
+
+        update.run_installer = lambda _latest: 0
+        handled = update.prompt_for_tui_update(
+            "0.2.0",
+            update.LatestVersion(version="0.2.1", tag="v0.2.1"),
+        )
+        print(f"handled={handled}")
+        """
+    )
+
+
 def _resume_search_child_code() -> str:
     return textwrap.dedent(
         """
@@ -952,6 +967,37 @@ def _plan_update_child_code() -> str:
         raise SystemExit(WattleApp(args, PlanUpdateProvider()).run())
         """
     )
+
+
+def test_pty_update_prompt_redraws_without_duplicate_options(tmp_path: Path) -> None:
+    with PtySession.spawn_python(
+        _update_prompt_child_code(),
+        cwd=tmp_path,
+        cols=100,
+        rows=12,
+    ) as session:
+        session.read_until("Update from 0.2.0 to 0.2.1")
+        assert "curl -fsSL" not in session.screen.text()
+
+        session.write("\x1b[B")
+        session.read_for(0.1)
+        screen_text = session.screen.text()
+        assert screen_text.count("Update from 0.2.0 to 0.2.1") == 1
+        assert screen_text.count("Skip update") == 1
+        assert " > Skip update" in screen_text
+
+        session.write("\x1b[A")
+        session.read_for(0.1)
+        screen_text = session.screen.text()
+        assert screen_text.count("Update from 0.2.0 to 0.2.1") == 1
+        assert screen_text.count("Skip update") == 1
+        assert " > Update from 0.2.0 to 0.2.1" in screen_text
+
+        session.write("\x1b[B")
+        session.read_for(0.1)
+        session.write("\r")
+        session.read_until("handled=False")
+        assert session.process.wait(timeout=3) == 0
 
 
 def test_pty_update_plan_renders_semantic_cell_without_tool_result(tmp_path: Path) -> None:
