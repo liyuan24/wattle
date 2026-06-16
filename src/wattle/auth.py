@@ -7,7 +7,8 @@ Canonical file format::
 
     {
       "anthropic": {
-        "api_key": {"api_key": "sk-ant-..."}
+        "api_key": {"api_key": "sk-ant-..."},
+        "oauth": {"access_token": "...", "refresh_token": "..."}
       },
       "deepseek": {
         "api_key": {"api_key": "sk-..."}
@@ -63,6 +64,17 @@ from pathlib import Path
 from typing import Literal
 from urllib import error, parse, request
 
+
+@dataclass(frozen=True)
+class _OAuthRefreshDefaults:
+    token_url: str | None = None
+    client_id: str | None = None
+    request_format: Literal["form", "json"] = "form"
+    extra_headers: tuple[tuple[str, str], ...] = ()
+    include_scope: bool = True
+    include_client_secret: bool = True
+
+
 # Module-level constant. Importable AND monkeypatchable: tests and alternate
 # entry points override this attribute to redirect reads.
 AUTH_PATH: Path = Path.home() / ".wattle" / "auth.json"
@@ -74,18 +86,28 @@ OPENAI_CODEX_REDIRECT_URI = "http://localhost:1455/auth/callback"
 OPENAI_CODEX_SCOPE = "openid profile email offline_access api.connectors.read api.connectors.invoke"
 OPENAI_CODEX_REQUIRED_SCOPES = frozenset({"api.connectors.read", "api.connectors.invoke"})
 OPENAI_CODEX_AUTH_CLAIM_PATH = "https://api.openai.com/auth"
+ANTHROPIC_OAUTH_TOKEN_URL = "https://api.anthropic.com/v1/oauth/token"
+ANTHROPIC_OAUTH_BETA_HEADER = "oauth-2025-04-20"
 
-_PROVIDER_OAUTH_DEFAULTS: dict[str, dict[str, str]] = {
-    "openai": {
-        "token_url": OPENAI_CODEX_TOKEN_URL,
-        "client_id": OPENAI_CODEX_CLIENT_ID,
-    },
+_PROVIDER_OAUTH_DEFAULTS: dict[str, _OAuthRefreshDefaults] = {
+    "anthropic": _OAuthRefreshDefaults(
+        token_url=ANTHROPIC_OAUTH_TOKEN_URL,
+        request_format="json",
+        extra_headers=(("anthropic-beta", ANTHROPIC_OAUTH_BETA_HEADER),),
+        include_scope=False,
+        include_client_secret=False,
+    ),
+    "openai": _OAuthRefreshDefaults(
+        token_url=OPENAI_CODEX_TOKEN_URL,
+        client_id=OPENAI_CODEX_CLIENT_ID,
+        include_scope=False,
+    ),
 }
 
 
 _EXPECTED_SHAPE = (
     '{\n'
-    '  "anthropic": {"api_key": {"api_key": "sk-ant-..."}},\n'
+    '  "anthropic": {"api_key": {"api_key": "sk-ant-..."}, "oauth": {"access_token": "..."}},\n'
     '  "deepseek": {"api_key": {"api_key": "sk-..."}},\n'
     '  "kimi": {"api_key": {"api_key": "sk-..."}},\n'
     '  "minimax": {"api_key": {"api_key": "sk-..."}},\n'
@@ -326,24 +348,37 @@ def _request_oauth_refresh(
     client_id: str,
     client_secret: str | None = None,
     scope: str | None = None,
+    request_format: Literal["form", "json"] = "form",
+    extra_headers: tuple[tuple[str, str], ...] = (),
 ) -> dict:
-    form: dict[str, str] = {
+    body: dict[str, str] = {
         "grant_type": "refresh_token",
         "refresh_token": refresh_token,
         "client_id": client_id,
     }
     if client_secret:
-        form["client_secret"] = client_secret
+        body["client_secret"] = client_secret
     if scope:
-        form["scope"] = scope
+        body["scope"] = scope
+
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": (
+            "application/json"
+            if request_format == "json"
+            else "application/x-www-form-urlencoded"
+        ),
+        **dict(extra_headers),
+    }
+    if request_format == "json":
+        request_body = json.dumps(body).encode("utf-8")
+    else:
+        request_body = parse.urlencode(body).encode("utf-8")
 
     req = request.Request(
         token_url,
-        data=parse.urlencode(form).encode("utf-8"),
-        headers={
-            "Accept": "application/json",
-            "Content-Type": "application/x-www-form-urlencoded",
-        },
+        data=request_body,
+        headers=headers,
         method="POST",
     )
     try:
@@ -436,6 +471,9 @@ API_KEY_ENV_VARS_BY_VENDOR: dict[str, tuple[str, ...]] = {
     "openai": ("OPENAI_API_KEY",),
     "xiaomi-token-plan-sgp": ("XIAOMI_TOKEN_PLAN_SGP_API_KEY",),
 }
+OAUTH_ENV_VARS_BY_VENDOR: dict[str, tuple[str, ...]] = {
+    "anthropic": ("ANTHROPIC_AUTH_TOKEN",),
+}
 
 
 def api_key_env_vars(vendor: str) -> tuple[str, ...]:
@@ -444,6 +482,11 @@ def api_key_env_vars(vendor: str) -> tuple[str, ...]:
         return API_KEY_ENV_VARS_BY_VENDOR[vendor]
     normalized = _normalized_env_vendor(vendor)
     return (f"{normalized}_API_KEY",)
+
+
+def oauth_env_vars(vendor: str) -> tuple[str, ...]:
+    """Return supported env vars for ``vendor`` OAuth bearer tokens."""
+    return OAUTH_ENV_VARS_BY_VENDOR.get(vendor, ())
 
 
 def _api_key_credential_from_env(vendor: str) -> AuthCredential | None:
@@ -456,6 +499,35 @@ def _api_key_credential_from_env(vendor: str) -> AuthCredential | None:
                 source=f"environment variable {env_var}",
             )
     return None
+
+
+def _oauth_credential_from_env(vendor: str) -> AuthCredential | None:
+    for env_var in oauth_env_vars(vendor):
+        value = os.environ.get(env_var)
+        if value:
+            expires_at = _jwt_expires_at(value)
+            if (
+                expires_at is not None
+                and expires_at <= int(time.time()) + OAUTH_REFRESH_SKEW_SECONDS
+            ):
+                raise ValueError(
+                    f"OAuth credential from environment variable {env_var} is expired "
+                    "or too close to expiry and cannot be refreshed from the environment."
+                )
+            return AuthCredential(
+                kind="oauth",
+                bearer_token=value,
+                source=f"environment variable {env_var}",
+                expires_at=expires_at,
+            )
+    return None
+
+
+def _credential_from_env(vendor: str) -> AuthCredential | None:
+    oauth_credential = _oauth_credential_from_env(vendor)
+    if oauth_credential is not None:
+        return oauth_credential
+    return _api_key_credential_from_env(vendor)
 
 
 def _success_html(message: str) -> bytes:
@@ -726,28 +798,28 @@ def _refresh_oauth_token_map_if_needed(
     if not _oauth_needs_refresh(token_map):
         return
 
-    defaults = _PROVIDER_OAUTH_DEFAULTS.get(vendor, {})
+    defaults = _PROVIDER_OAUTH_DEFAULTS.get(vendor, _OAuthRefreshDefaults())
     token_url = _oauth_string(
         token_map,
         "token_url",
         vendor=vendor,
         path=path,
-        default=defaults.get("token_url"),
+        default=defaults.token_url,
     )
     client_id = _oauth_string(
         token_map,
         "client_id",
         vendor=vendor,
         path=path,
-        default=defaults.get("client_id"),
+        default=defaults.client_id,
     )
     refresh_token = _oauth_string(token_map, "refresh_token", vendor=vendor, path=path)
 
     client_secret = token_map.get("client_secret")
-    if not isinstance(client_secret, str):
+    if not defaults.include_client_secret or not isinstance(client_secret, str):
         client_secret = None
     scope = token_map.get("scope")
-    if vendor == "openai" or not isinstance(scope, str):
+    if not defaults.include_scope or not isinstance(scope, str):
         scope = None
 
     response = _request_oauth_refresh(
@@ -756,6 +828,8 @@ def _refresh_oauth_token_map_if_needed(
         client_id=client_id,
         client_secret=client_secret,
         scope=scope,
+        request_format=defaults.request_format,
+        extra_headers=defaults.extra_headers,
     )
     _apply_oauth_refresh_response(
         vendor=vendor,
@@ -930,7 +1004,7 @@ def get_api_key_credential(vendor: str) -> AuthCredential:
         credential = _api_key_credential_from_env(vendor)
         if credential is not None:
             return credential
-        raise _missing_vendor_error(vendor, path)
+        raise _missing_vendor_error(vendor, path, allow_oauth_env=False)
 
     entry = data[vendor]
     if not isinstance(entry, dict):
@@ -958,12 +1032,19 @@ def get_api_key_credential(vendor: str) -> AuthCredential:
     )
 
 
-def _missing_vendor_error(vendor: str, path: Path) -> KeyError:
+def _missing_vendor_error(
+    vendor: str,
+    path: Path,
+    *,
+    allow_oauth_env: bool = True,
+) -> KeyError:
     env_hint = api_key_env_vars(vendor)[0]
+    oauth_env_hints = oauth_env_vars(vendor)
+    oauth_hint = f" or {oauth_env_hints[0]}" if allow_oauth_env and oauth_env_hints else ""
     return KeyError(
         f"Vendor {vendor!r} not found in Wattle auth file at {path}. "
         f"Add an entry like {{{vendor!r}: {{'api_key': {{'api_key': '...'}}}}}} "
-        f"to that file or set {env_hint}."
+        f"to that file or set {env_hint}{oauth_hint}."
     )
 
 
@@ -983,13 +1064,13 @@ def get_credential(vendor: str) -> AuthCredential:
     try:
         data = load_auth()
     except FileNotFoundError:
-        credential = _api_key_credential_from_env(vendor)
+        credential = _credential_from_env(vendor)
         if credential is not None:
             return credential
         raise
 
     if vendor not in data:
-        credential = _api_key_credential_from_env(vendor)
+        credential = _credential_from_env(vendor)
         if credential is not None:
             return credential
         raise _missing_vendor_error(vendor, path)
@@ -1050,7 +1131,7 @@ def get_credential(vendor: str) -> AuthCredential:
     if api_key_credential is not None:
         return api_key_credential
 
-    env_credential = _api_key_credential_from_env(vendor)
+    env_credential = _credential_from_env(vendor)
     if env_credential is not None:
         return env_credential
 

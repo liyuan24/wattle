@@ -32,6 +32,7 @@ def auth_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         for env_var in auth.api_key_env_vars(vendor):
             monkeypatch.delenv(env_var, raising=False)
     for env_var in (
+        "ANTHROPIC_AUTH_TOKEN",
         "MOONSHOT_API_KEY",
         "WATTLE_ANTHROPIC_API_KEY",
         "WATTLE_DEEPSEEK_API_KEY",
@@ -408,6 +409,8 @@ def test_get_credential_refreshes_expired_oauth_for_any_provider(
             "client_id": "example-client",
             "client_secret": None,
             "scope": None,
+            "request_format": "form",
+            "extra_headers": (),
         }
     ]
 
@@ -499,6 +502,145 @@ def test_get_credential_does_not_refresh_unexpired_oauth(
     assert auth.get_credential("example").bearer_token == token
 
 
+def test_get_credential_refreshes_anthropic_oauth_with_provider_defaults(
+    auth_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    old_token = _jwt_with_exp(1)
+    new_token = _jwt_with_exp(2_000_000_000)
+    seen: dict[str, object] = {}
+
+    def fake_refresh(**kwargs: object) -> dict[str, object]:
+        seen.update(kwargs)
+        return {"access_token": new_token, "refresh_token": "refresh-rotated"}
+
+    monkeypatch.setattr(auth, "_request_oauth_refresh", fake_refresh)
+    auth_file.write_text(
+        json.dumps(
+            {
+                "anthropic": {
+                    "oauth": {
+                        "access_token": old_token,
+                        "refresh_token": "refresh-existing",
+                        "client_id": "anthropic-client",
+                        "scope": "ignored-for-anthropic-refresh",
+                        "client_secret": "ignored-for-anthropic-refresh",
+                    }
+                }
+            }
+        )
+    )
+
+    credential = auth.get_credential("anthropic")
+    saved = json.loads(auth_file.read_text(encoding="utf-8"))
+
+    assert credential.kind == "oauth"
+    assert credential.bearer_token == new_token
+    assert saved["anthropic"]["oauth"]["refresh_token"] == "refresh-rotated"
+    assert seen == {
+        "token_url": "https://api.anthropic.com/v1/oauth/token",
+        "refresh_token": "refresh-existing",
+        "client_id": "anthropic-client",
+        "client_secret": None,
+        "scope": None,
+        "request_format": "json",
+        "extra_headers": (("anthropic-beta", "oauth-2025-04-20"),),
+    }
+
+
+def test_get_credential_uses_anthropic_auth_token_env_when_auth_file_missing(
+    auth_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    token = _jwt_with_exp(2_000_000_000)
+    assert not auth_file.exists()
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", token)
+
+    credential = auth.get_credential("anthropic")
+
+    assert credential.kind == "oauth"
+    assert credential.bearer_token == token
+    assert credential.source == "environment variable ANTHROPIC_AUTH_TOKEN"
+    assert credential.expires_at == 2_000_000_000
+
+
+def test_get_credential_rejects_expired_anthropic_auth_token_env(
+    auth_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert not auth_file.exists()
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", _jwt_with_exp(1))
+
+    with pytest.raises(ValueError, match="expired.*cannot be refreshed"):
+        auth.get_credential("anthropic")
+
+
+def test_get_credential_rejects_near_expiry_anthropic_auth_token_env(
+    auth_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert not auth_file.exists()
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", _jwt_with_exp(int(auth.time.time()) + 10))
+
+    with pytest.raises(ValueError, match="too close to expiry.*cannot be refreshed"):
+        auth.get_credential("anthropic")
+
+
+def test_get_api_key_credential_ignores_anthropic_auth_token_env(
+    auth_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert not auth_file.exists()
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "oauth-token")
+
+    with pytest.raises(FileNotFoundError):
+        auth.get_api_key_credential("anthropic")
+
+
+def test_request_oauth_refresh_can_send_json_with_extra_headers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        def __enter__(self) -> FakeResponse:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return b'{"access_token": "new-token"}'
+
+    def fake_urlopen(req: object, *, timeout: int) -> FakeResponse:
+        captured["req"] = req
+        captured["timeout"] = timeout
+        return FakeResponse()
+
+    monkeypatch.setattr(auth.request, "urlopen", fake_urlopen)
+
+    response = auth._request_oauth_refresh(
+        token_url="https://provider.example/oauth/token",
+        refresh_token="refresh-existing",
+        client_id="example-client",
+        request_format="json",
+        extra_headers=(("anthropic-beta", "oauth-2025-04-20"),),
+    )
+
+    req = captured["req"]
+    assert response == {"access_token": "new-token"}
+    assert captured["timeout"] == 30
+    assert req.full_url == "https://provider.example/oauth/token"
+    assert req.get_method() == "POST"
+    assert req.headers["Content-type"] == "application/json"
+    assert req.headers["Anthropic-beta"] == "oauth-2025-04-20"
+    assert json.loads(req.data.decode("utf-8")) == {
+        "grant_type": "refresh_token",
+        "refresh_token": "refresh-existing",
+        "client_id": "example-client",
+    }
+
+
 def test_get_credential_refreshes_openai_with_provider_defaults(
     auth_file: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -533,6 +675,8 @@ def test_get_credential_refreshes_openai_with_provider_defaults(
     assert seen["token_url"] == "https://auth.openai.com/oauth/token"
     assert seen["client_id"] == "app_EMoamEEZ73f0CkXaXp7hrann"
     assert seen["scope"] is None
+    assert seen["request_format"] == "form"
+    assert seen["extra_headers"] == ()
 
 
 def test_login_openai_codex_persists_openai_oauth(

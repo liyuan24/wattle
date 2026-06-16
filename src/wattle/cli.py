@@ -27,7 +27,7 @@ from wattle.version import get_wattle_version
 
 AUTH_REQUIRED_MESSAGE = (
     "No authenticated provider is configured. Run `wattle` and use /login, "
-    "or set an API-key environment variable for a supported provider."
+    "or set an API-key or supported OAuth environment variable."
 )
 
 if TYPE_CHECKING:
@@ -104,21 +104,21 @@ _API_KEY_ONLY_PROVIDERS = frozenset(
 
 
 def _provider_dispatch() -> dict[str, _ProviderSpec[Any]]:
-    from wattle.agent import _ProviderSpec, _sdk_timeout_kwargs
+    from wattle.agent import _anthropic_auth_kwargs, _ProviderSpec, _sdk_timeout_kwargs
 
     return {
         "anthropic": _ProviderSpec[Any](
             vendor="anthropic",
-            client_factory=lambda key: anthropic.AsyncAnthropic(
-                api_key=key,
+            client_factory=lambda credential: anthropic.AsyncAnthropic(
+                **_anthropic_auth_kwargs(credential),
                 **_sdk_timeout_kwargs(),
             ),
             provider_factory=lambda client: globals()["AnthropicProvider"](async_client=client),
         ),
         "deepseek": _ProviderSpec[Any](
             vendor="deepseek",
-            client_factory=lambda key: openai.AsyncOpenAI(
-                api_key=key,
+            client_factory=lambda credential: openai.AsyncOpenAI(
+                api_key=credential.bearer_token,
                 base_url="https://api.deepseek.com",
                 **_sdk_timeout_kwargs(),
             ),
@@ -128,8 +128,8 @@ def _provider_dispatch() -> dict[str, _ProviderSpec[Any]]:
         ),
         "kimi": _ProviderSpec[Any](
             vendor="kimi",
-            client_factory=lambda key: openai.AsyncOpenAI(
-                api_key=key,
+            client_factory=lambda credential: openai.AsyncOpenAI(
+                api_key=credential.bearer_token,
                 base_url="https://api.moonshot.ai/v1",
                 **_sdk_timeout_kwargs(),
             ),
@@ -139,8 +139,8 @@ def _provider_dispatch() -> dict[str, _ProviderSpec[Any]]:
         ),
         "minimax": _ProviderSpec[Any](
             vendor="minimax",
-            client_factory=lambda key: openai.AsyncOpenAI(
-                api_key=key,
+            client_factory=lambda credential: openai.AsyncOpenAI(
+                api_key=credential.bearer_token,
                 base_url="https://api.minimax.io/v1",
                 **_sdk_timeout_kwargs(),
             ),
@@ -150,8 +150,8 @@ def _provider_dispatch() -> dict[str, _ProviderSpec[Any]]:
         ),
         "xiaomi-token-plan-sgp": _ProviderSpec[Any](
             vendor="xiaomi-token-plan-sgp",
-            client_factory=lambda key: openai.AsyncOpenAI(
-                api_key=key,
+            client_factory=lambda credential: openai.AsyncOpenAI(
+                api_key=credential.bearer_token,
                 base_url="https://token-plan-sgp.xiaomimimo.com/v1",
                 **_sdk_timeout_kwargs(),
             ),
@@ -161,15 +161,15 @@ def _provider_dispatch() -> dict[str, _ProviderSpec[Any]]:
         ),
         "openai_codex": _ProviderSpec[str](
             vendor="openai",
-            client_factory=lambda key: key,
+            client_factory=lambda credential: credential.bearer_token,
             provider_factory=lambda token: globals()["OpenAICodexResponsesProvider"](
                 bearer_token=token
             ),
         ),
         "openai_completions": _ProviderSpec[Any](
             vendor="openai",
-            client_factory=lambda key: openai.AsyncOpenAI(
-                api_key=key,
+            client_factory=lambda credential: openai.AsyncOpenAI(
+                api_key=credential.bearer_token,
                 **_sdk_timeout_kwargs(),
             ),
             provider_factory=lambda client: globals()["OpenAICompletionsProvider"](
@@ -178,8 +178,8 @@ def _provider_dispatch() -> dict[str, _ProviderSpec[Any]]:
         ),
         "openai_responses": _ProviderSpec[Any](
             vendor="openai",
-            client_factory=lambda key: openai.AsyncOpenAI(
-                api_key=key,
+            client_factory=lambda credential: openai.AsyncOpenAI(
+                api_key=credential.bearer_token,
                 **_sdk_timeout_kwargs(),
             ),
             provider_factory=lambda client: globals()["OpenAIResponsesProvider"](
@@ -246,7 +246,7 @@ def _build_provider(provider_name: str) -> Provider:
         credential = get_api_key_credential(spec.vendor)
     else:
         credential = get_credential(spec.vendor)
-    return spec.build(credential.bearer_token)
+    return spec.build(credential)
 
 
 def _provider_auth_available(provider_name: str) -> bool:
@@ -369,7 +369,9 @@ def _run_headless(args: argparse.Namespace) -> int:
                 effort=getattr(args, "effort", None),
             )
             session_path = None
-    except _normalized_provider_error_types() as exc:
+    except RuntimeError as exc:
+        if not _is_normalized_provider_error(exc):
+            raise
         sys.stderr.write(f"[error] {_headless_provider_error_text(exc)}\n")
         sys.stderr.flush()
         return 1
@@ -392,11 +394,30 @@ def _normalized_provider_error_types() -> tuple[type[BaseException], ...]:
     return (ProviderError, TransientProviderError)
 
 
+def _is_normalized_provider_error(error: BaseException) -> bool:
+    if isinstance(error, _normalized_provider_error_types()):
+        return True
+    return _is_named_provider_error(error, "ProviderError") or _is_named_provider_error(
+        error,
+        "TransientProviderError",
+    )
+
+
+def _is_named_provider_error(error: BaseException, class_name: str) -> bool:
+    return any(
+        cls.__module__.startswith("wattle.providers") and cls.__name__ == class_name
+        for cls in type(error).__mro__
+    )
+
+
 def _headless_provider_error_text(error: BaseException) -> str:
     from wattle.providers import TransientProviderError
 
     text = str(error).strip() or type(error).__name__
-    if isinstance(error, TransientProviderError):
+    if isinstance(error, TransientProviderError) or _is_named_provider_error(
+        error,
+        "TransientProviderError",
+    ):
         return f"Temporary provider error after retries: {text}"
     return text
 

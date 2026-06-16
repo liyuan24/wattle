@@ -158,6 +158,43 @@ def test_text_only_headless_agent_passes_full_tool_map_to_loop() -> None:
     assert "view_image" not in system_tools
 
 
+def test_anthropic_provider_wires_anthropic_oauth_bearer(
+    loop_run_sentinel: MagicMock,
+) -> None:
+    fake_client = object()
+    fake_provider = object()
+
+    with (
+        patch.object(
+            agent,
+            "get_credential",
+            return_value=AuthCredential(
+                kind="oauth",
+                bearer_token="fake-anthropic-oauth-token",
+                source="test",
+            ),
+        ) as gc,
+        patch.object(agent.anthropic, "AsyncAnthropic", return_value=fake_client) as anth,
+        patch.object(agent.openai, "AsyncOpenAI") as oa,
+        patch.object(agent, "AnthropicProvider", return_value=fake_provider) as ap,
+    ):
+        result = run_agent(
+            "anthropic",
+            model="claude-x",
+            user_input="hi",
+        )
+
+    gc.assert_called_once_with("anthropic")
+    anth.assert_called_once_with(
+        auth_token="fake-anthropic-oauth-token",
+        default_headers={"anthropic-beta": "oauth-2025-04-20"},
+        timeout=agent.DEFAULT_PROVIDER_REQUEST_TIMEOUT_SECONDS,
+    )
+    oa.assert_not_called()
+    ap.assert_called_once_with(async_client=fake_client)
+    assert result is loop_run_sentinel.sentinel
+
+
 def test_openai_codex_provider_wires_openai_oauth_bearer(
     loop_run_sentinel: MagicMock,
 ) -> None:

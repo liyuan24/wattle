@@ -20,7 +20,13 @@ import anthropic
 import openai
 
 from wattle import loop
-from wattle.auth import get_api_key_credential, get_credential, get_openai_codex_credential
+from wattle.auth import (
+    ANTHROPIC_OAUTH_BETA_HEADER,
+    AuthCredential,
+    get_api_key_credential,
+    get_credential,
+    get_openai_codex_credential,
+)
 from wattle.permissions import PermissionMode
 from wattle.providers import (
     AnthropicProvider,
@@ -79,15 +85,15 @@ def _sdk_timeout_kwargs() -> dict[str, float]:
 # still being callable through a single typed surface.
 @dataclass(frozen=True)
 class _ProviderSpec[ClientT]:
-    """How to build one provider end-to-end from a bearer token."""
+    """How to build one provider end-to-end from a credential."""
 
     vendor: str
-    client_factory: Callable[[str], ClientT]
+    client_factory: Callable[[AuthCredential], ClientT]
     provider_factory: Callable[[ClientT], Provider]
 
-    def build(self, bearer_token: str) -> Provider:
+    def build(self, credential: AuthCredential) -> Provider:
         """Construct the SDK client and wrap it in a Provider."""
-        return self.provider_factory(self.client_factory(bearer_token))
+        return self.provider_factory(self.client_factory(credential))
 
 
 type _DispatchSpec = (
@@ -97,22 +103,32 @@ type _DispatchSpec = (
 )
 
 
+def _anthropic_auth_kwargs(credential: AuthCredential) -> dict[str, object]:
+    """Return Anthropic SDK auth kwargs for an API-key or OAuth credential."""
+    if credential.kind == "oauth":
+        return {
+            "auth_token": credential.bearer_token,
+            "default_headers": {"anthropic-beta": ANTHROPIC_OAUTH_BETA_HEADER},
+        }
+    return {"api_key": credential.bearer_token}
+
+
 # Single principled dispatch. Adding a new provider = one entry here. The
 # value type erases `ClientT` (each entry's SDK client may differ); the
 # `build()` method preserves the per-entry consistency internally.
 _PROVIDER_DISPATCH: dict[str, _DispatchSpec] = {
     "anthropic": _ProviderSpec[anthropic.AsyncAnthropic](
         vendor="anthropic",
-        client_factory=lambda key: anthropic.AsyncAnthropic(
-            api_key=key,
+        client_factory=lambda credential: anthropic.AsyncAnthropic(
+            **_anthropic_auth_kwargs(credential),
             **_sdk_timeout_kwargs(),
         ),
         provider_factory=lambda client: AnthropicProvider(async_client=client),
     ),
     "deepseek": _ProviderSpec[openai.AsyncOpenAI](
         vendor="deepseek",
-        client_factory=lambda key: openai.AsyncOpenAI(
-            api_key=key,
+        client_factory=lambda credential: openai.AsyncOpenAI(
+            api_key=credential.bearer_token,
             base_url="https://api.deepseek.com",
             **_sdk_timeout_kwargs(),
         ),
@@ -120,8 +136,8 @@ _PROVIDER_DISPATCH: dict[str, _DispatchSpec] = {
     ),
     "kimi": _ProviderSpec[openai.AsyncOpenAI](
         vendor="kimi",
-        client_factory=lambda key: openai.AsyncOpenAI(
-            api_key=key,
+        client_factory=lambda credential: openai.AsyncOpenAI(
+            api_key=credential.bearer_token,
             base_url="https://api.moonshot.ai/v1",
             **_sdk_timeout_kwargs(),
         ),
@@ -129,8 +145,8 @@ _PROVIDER_DISPATCH: dict[str, _DispatchSpec] = {
     ),
     "minimax": _ProviderSpec[openai.AsyncOpenAI](
         vendor="minimax",
-        client_factory=lambda key: openai.AsyncOpenAI(
-            api_key=key,
+        client_factory=lambda credential: openai.AsyncOpenAI(
+            api_key=credential.bearer_token,
             base_url="https://api.minimax.io/v1",
             **_sdk_timeout_kwargs(),
         ),
@@ -138,8 +154,8 @@ _PROVIDER_DISPATCH: dict[str, _DispatchSpec] = {
     ),
     "xiaomi-token-plan-sgp": _ProviderSpec[openai.AsyncOpenAI](
         vendor="xiaomi-token-plan-sgp",
-        client_factory=lambda key: openai.AsyncOpenAI(
-            api_key=key,
+        client_factory=lambda credential: openai.AsyncOpenAI(
+            api_key=credential.bearer_token,
             base_url="https://token-plan-sgp.xiaomimimo.com/v1",
             **_sdk_timeout_kwargs(),
         ),
@@ -147,21 +163,21 @@ _PROVIDER_DISPATCH: dict[str, _DispatchSpec] = {
     ),
     "openai_codex": _ProviderSpec[str](
         vendor="openai",
-        client_factory=lambda key: key,
+        client_factory=lambda credential: credential.bearer_token,
         provider_factory=lambda token: OpenAICodexResponsesProvider(bearer_token=token),
     ),
     "openai_completions": _ProviderSpec[openai.AsyncOpenAI](
         vendor="openai",
-        client_factory=lambda key: openai.AsyncOpenAI(
-            api_key=key,
+        client_factory=lambda credential: openai.AsyncOpenAI(
+            api_key=credential.bearer_token,
             **_sdk_timeout_kwargs(),
         ),
         provider_factory=lambda client: OpenAICompletionsProvider(async_client=client),
     ),
     "openai_responses": _ProviderSpec[openai.AsyncOpenAI](
         vendor="openai",
-        client_factory=lambda key: openai.AsyncOpenAI(
-            api_key=key,
+        client_factory=lambda credential: openai.AsyncOpenAI(
+            api_key=credential.bearer_token,
             **_sdk_timeout_kwargs(),
         ),
         provider_factory=lambda client: OpenAIResponsesProvider(async_client=client),
@@ -218,7 +234,7 @@ def _build_provider_and_system(
         credential = get_api_key_credential(spec.vendor)
     else:
         credential = get_credential(spec.vendor)
-    provider = spec.build(credential.bearer_token)
+    provider = spec.build(credential)
     model_tools_by_name = loop._tools_for_model(TOOLS_BY_NAME, model)
     built_system = build_system_prompt(
         tools_by_name=model_tools_by_name,
