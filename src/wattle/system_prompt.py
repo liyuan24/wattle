@@ -23,6 +23,14 @@ DEFAULT_SYSTEM_PROMPT = (
     "commands, editing code, and writing new files."
 )
 
+VALIDATION_DISCIPLINE_PROMPT = (
+    "Validation discipline:\n"
+    "- Treat tests, validation datasets, benchmarks, request payloads, and "
+    "consumer inputs as part of the final interface; a validation result is "
+    "credible only when it preserves the same payload contents and input "
+    "contract the delivered result will consume."
+)
+
 DEFAULT_AGENTS_MD_FILENAME = "AGENTS.md"
 LOCAL_AGENTS_MD_FILENAME = "AGENTS.override.md"
 PROJECT_ROOT_MARKERS = (".git",)
@@ -407,6 +415,7 @@ def build_system_prompt(
             "In addition to the tools above, you may have access to other custom "
             "tools depending on the project."
         ),
+        VALIDATION_DISCIPLINE_PROMPT,
         (f"Guidelines:\n{_format_guidelines(_guidelines(tools_by_name, permission_mode))}"),
     ]
 

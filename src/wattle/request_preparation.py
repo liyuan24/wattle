@@ -1,9 +1,8 @@
 """Shared provider-request preparation.
 
-This module owns the runtime projection Wattle sends to providers. Durable
-session history can stay complete while request preparation estimates size,
-compacts when needed, and resets stateful providers before sending a compacted
-projection.
+This module owns provider request assembly. Durable session history can stay
+complete while request preparation estimates size, compacts when needed, and
+resets stateful providers before sending a compacted request.
 """
 
 from __future__ import annotations
@@ -11,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import os
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from typing import Literal
@@ -38,22 +36,22 @@ from wattle.providers import (
     StreamEvent,
     TextBlock,
     TransientProviderError,
+    ToolResultBlock,
 )
 from wattle.providers.base import stream_idle_timeout_seconds_from_env
-from wattle.runtime_context import (
-    RuntimeContextProjection,
-    append_runtime_context_projection,
-    projection_hash,
-    render_runtime_context_projection,
-)
 from wattle.session import message_to_dict
 
 DEFAULT_STREAM_MAX_RETRIES = 3
+POST_TOOL_OBSERVATION_CHECKPOINT = (
+    "Internal checkpoint: before choosing the next action, verify that any "
+    "derived file, command, or artifact still matches the user's required "
+    "interface and preserves the meaning of the observed inputs. Do not "
+    "restate this checklist."
+)
 
 type RetryableProviderError = IncompleteStreamError | TransientProviderError
 type StreamRetryCallback = Callable[[int, int, BaseException, float], None]
 type ProviderContextTokens = int | Callable[[], int | None] | None
-type RuntimeContextProvider = Callable[[], RuntimeContextProjection | None]
 type RuntimeEventCallback = Callable[[dict[str, object]], None]
 
 
@@ -91,7 +89,6 @@ class RequestPreparer:
         stream_idle_timeout_seconds: float | None = None,
         on_stream_retry: StreamRetryCallback | None = None,
         run_deadline: RunDeadline | None = None,
-        runtime_context_provider: RuntimeContextProvider | None = None,
         on_runtime_event: RuntimeEventCallback | None = None,
         provider_name: str | None = None,
     ) -> None:
@@ -119,7 +116,6 @@ class RequestPreparer:
         )
         self.on_stream_retry = on_stream_retry
         self.run_deadline = run_deadline if run_deadline is not None else run_deadline_from_env()
-        self.runtime_context_provider = runtime_context_provider
         self.on_runtime_event = on_runtime_event
         self.provider_name = provider_name
 
@@ -144,27 +140,10 @@ class RequestPreparer:
             messages,
             model=self.model,
         )
+        projected_input_messages = append_post_tool_observation_checkpoint(
+            projected_input_messages
+        )
         request_system = append_runtime_deadline_notice(self.system, self.run_deadline)
-        projection_text: str | None = None
-        if self.runtime_context_provider is not None and _runtime_context_enabled():
-            projection = self.runtime_context_provider()
-            if projection is not None and not projection.is_empty():
-                projection_text = render_runtime_context_projection(projection)
-                request_system = append_runtime_context_projection(
-                    request_system,
-                    projection,
-                )
-                self._emit_runtime_event(
-                    {
-                        "type": "runtime_context_projection",
-                        "source": {},
-                        "data": {
-                            "rendered": projection_text,
-                            "sha256": projection_hash(projection_text),
-                            "fact_keys": projection.fact_keys,
-                        },
-                    }
-                )
         raw_context_tokens = estimate_request_context_tokens(
             system=request_system,
             messages=projected_input_messages,
@@ -194,6 +173,7 @@ class RequestPreparer:
             request_messages,
             model=self.model,
         )
+        projected_messages = append_post_tool_observation_checkpoint(projected_messages)
         context_tokens = estimate_request_context_tokens(
             system=request_system,
             messages=projected_messages,
@@ -211,7 +191,6 @@ class RequestPreparer:
             "model": self.model,
             "message_count": len(projected_messages),
             "system_sha256": _optional_sha256(request_system),
-            "runtime_projection_sha256": projection_hash(projection_text),
             "tool_names": [
                 str(tool.get("name"))
                 for tool in self.tools
@@ -267,6 +246,38 @@ def project_messages_for_model_modalities(
     if model_supports_modality(model, "image"):
         return messages
     return [_replace_images_with_text(message, model=model) for message in messages]
+
+
+def append_post_tool_observation_checkpoint(
+    messages: list[Message],
+) -> list[Message]:
+    """Append a compact provider-only check immediately after tool observations."""
+
+    if not _latest_message_has_tool_result(messages):
+        return messages
+    latest = messages[-1]
+    if any(
+        isinstance(block, TextBlock) and block.text == POST_TOOL_OBSERVATION_CHECKPOINT
+        for block in latest.content
+    ):
+        return messages
+    return [
+        *messages[:-1],
+        Message(
+            role=latest.role,
+            content=[*latest.content, TextBlock(text=POST_TOOL_OBSERVATION_CHECKPOINT)],
+            input_tokens=latest.input_tokens,
+            output_tokens=latest.output_tokens,
+            cached_tokens=latest.cached_tokens,
+        ),
+    ]
+
+
+def _latest_message_has_tool_result(messages: list[Message]) -> bool:
+    if not messages:
+        return False
+    latest = messages[-1]
+    return any(isinstance(block, ToolResultBlock) for block in latest.content)
 
 
 def _latest_provider_context_tokens(messages: list[Message]) -> int | None:
@@ -427,13 +438,6 @@ def _notify_stream_retry(
 ) -> None:
     if preparer.on_stream_retry is not None:
         preparer.on_stream_retry(attempt, preparer.stream_max_retries, exc, delay)
-
-
-def _runtime_context_enabled() -> bool:
-    raw = os.environ.get("WATTLE_RUNTIME_CONTEXT_INJECTION")
-    if raw is None:
-        return True
-    return raw.strip().lower() not in {"0", "false", "no", "off"}
 
 
 def _optional_sha256(text: str | None) -> str | None:

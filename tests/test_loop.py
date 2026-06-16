@@ -90,12 +90,15 @@ def test_loop_runs_tool_and_terminates() -> None:
     assert second.messages[1].output_tokens == 5
     assert second.messages[1].cached_tokens == 4
     tool_result_msg = second.messages[2]
-    assert len(tool_result_msg.content) == 1
+    assert len(tool_result_msg.content) == 2
     block = tool_result_msg.content[0]
     assert isinstance(block, ToolResultBlock)
     assert block.tool_use_id == "call_1"
     assert block.is_error is False
     assert "hello" in block.content
+    checkpoint = tool_result_msg.content[1]
+    assert isinstance(checkpoint, TextBlock)
+    assert checkpoint.text == request_preparation.POST_TOOL_OBSERVATION_CHECKPOINT
 
     # Final response is the second scripted one.
     assert result.stop_reason == "end_turn"
@@ -170,7 +173,9 @@ def test_loop_publishes_tool_use_snapshot_before_tool_execution() -> None:
     ]
 
 
-def test_loop_records_runtime_events_and_injects_projection(tmp_path: Path) -> None:
+def test_loop_records_provider_request_events_without_runtime_projection(
+    tmp_path: Path,
+) -> None:
     bash = BashTool(cwd=tmp_path)
     provider = StubProvider(
         [
@@ -205,15 +210,13 @@ def test_loop_records_runtime_events_and_injects_projection(tmp_path: Path) -> N
 
     assert [event["type"] for event in runtime_events] == [
         "provider_request_prepared",
-        "command_finished",
-        "metric_observed",
-        "runtime_context_projection",
         "provider_request_prepared",
     ]
     assert provider.requests[0].system == "Base system."
-    assert provider.requests[1].system is not None
-    assert "Runtime context:" in provider.requests[1].system
-    assert "score=0.62" in provider.requests[1].system
+    assert provider.requests[1].system == "Base system."
+    checkpoint = provider.requests[1].messages[2].content[-1]
+    assert isinstance(checkpoint, TextBlock)
+    assert checkpoint.text == request_preparation.POST_TOOL_OBSERVATION_CHECKPOINT
     assert [message.role for message in messages_out] == [
         "user",
         "assistant",
@@ -582,13 +585,14 @@ def test_loop_yolo_permission_gate_allows_bash_and_preserves_base_system_prompt(
     )
 
     assert provider.requests[0].system == "stable system"
-    assert provider.requests[1].system is not None
-    assert provider.requests[1].system.startswith("stable system")
-    assert "Runtime context:" in provider.requests[1].system
+    assert provider.requests[1].system == "stable system"
     result_block = provider.requests[1].messages[2].content[0]
     assert isinstance(result_block, ToolResultBlock)
     assert result_block.is_error is False
     assert "hi" in result_block.content
+    checkpoint = provider.requests[1].messages[2].content[-1]
+    assert isinstance(checkpoint, TextBlock)
+    assert checkpoint.text == request_preparation.POST_TOOL_OBSERVATION_CHECKPOINT
 
 
 def test_loop_preserves_thinking_blocks_in_history() -> None:

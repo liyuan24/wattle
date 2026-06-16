@@ -162,11 +162,6 @@ async def arun(
         thinking=thinking,
         effort=effort,
         context_window=context_window,
-        runtime_context_provider=(
-            runtime.runtime_context_projection
-            if runtime is not None and hasattr(runtime, "runtime_context_projection")
-            else None
-        ),
         on_runtime_event=on_runtime_event,
     )
 
@@ -322,11 +317,6 @@ async def arun_streaming(
         thinking=thinking,
         effort=effort,
         context_window=context_window,
-        runtime_context_provider=(
-            runtime.runtime_context_projection
-            if runtime is not None and hasattr(runtime, "runtime_context_projection")
-            else None
-        ),
         on_runtime_event=on_runtime_event,
     )
 
@@ -443,12 +433,6 @@ async def dispatch_tool_blocks_async(
                     output = await arun(**block.input)
     except Exception as exc:  # noqa: BLE001 — surface anything as a tool error
         return [_tool_error(block, f"{type(exc).__name__}: {exc}")]
-    _record_tool_execution_metadata(
-        block,
-        tool,
-        output,
-        runtime_event_callback=runtime_event_callback,
-    )
     return _normalize_tool_output(block, output)
 
 
@@ -484,12 +468,6 @@ def dispatch_tool_blocks(
             output = tool.run(**block.input)
     except Exception as exc:  # noqa: BLE001 — surface anything as a tool error
         return [_tool_error(block, f"{type(exc).__name__}: {exc}")]
-    _record_tool_execution_metadata(
-        block,
-        tool,
-        output,
-        runtime_event_callback=runtime_event_callback,
-    )
     return _normalize_tool_output(block, output)
 
 
@@ -538,30 +516,6 @@ def _normalize_tool_output(block: ToolUseBlock, output: object) -> list[ContentB
             summary = f"Attached {len(content)} content block(s)."
         return [ToolResultBlock(tool_use_id=block.id, content=summary), *content]
     return [ToolResultBlock(tool_use_id=block.id, content=str(output))]
-
-
-def _record_tool_execution_metadata(
-    block: ToolUseBlock,
-    tool: Tool,
-    output: object,
-    *,
-    runtime_event_callback: Callable[[dict[str, Any]], None] | None,
-) -> None:
-    if not isinstance(output, ToolExecutionResult):
-        return
-    runtime = getattr(tool, "runtime", None)
-    context = getattr(runtime, "context", None)
-    if context is None or not hasattr(context, "record_tool_metadata"):
-        return
-    events = context.record_tool_metadata(
-        tool_use_id=block.id,
-        tool_name=block.name,
-        metadata=output.metadata,
-    )
-    if runtime_event_callback is None:
-        return
-    for event in events:
-        runtime_event_callback(event)
 
 
 def _attached_image_text(block: ImageBlock) -> str:

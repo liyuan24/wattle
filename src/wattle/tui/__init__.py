@@ -3301,7 +3301,6 @@ class WattleApp:
             compaction_keep_recent_tokens=self.compaction_keep_recent_tokens,
             provider_context_tokens=lambda: self._last_context_tokens,
             on_stream_retry=on_stream_retry or self._write_stream_retry_status,
-            runtime_context_provider=self.runtime.runtime_context_projection,
             on_runtime_event=self._record_runtime_event,
             provider_name=self.current_provider_name,
         )

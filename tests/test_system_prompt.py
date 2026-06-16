@@ -26,6 +26,14 @@ def test_build_system_prompt_uses_wattle_default_without_pi_docs(tmp_path: Path)
     assert "Pi documentation" not in prompt
     assert "- read:" in prompt
     assert "- bash:" in prompt
+    assert "Validation discipline:" in prompt
+    assert "consumer inputs as part of the final interface" in prompt
+    assert "preserves the same payload contents" in prompt
+    assert "input contract the delivered result will consume" in prompt
+    assert "Derived or modified validation is proxy evidence only" not in prompt
+    assert "include deliberately tiny-capacity" not in prompt
+    assert "do not treat a barely-over-threshold result as robust" not in prompt
+    assert "vary capacity separately from feature or interface choices" not in prompt
     assert "first extract an internal checklist of explicit requirements" in prompt
     assert "Before finalizing, compare the result against that checklist" in prompt
     assert "When instructions specify exact identifiers or literals" in prompt

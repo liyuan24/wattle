@@ -202,20 +202,20 @@ def test_session_record_round_trips_through_jsonl_file(tmp_path: Path) -> None:
     }
 
 
-def test_runtime_projection_event_round_trips_separately_from_messages() -> None:
+def test_runtime_event_round_trips_separately_from_messages() -> None:
     record = session.SessionRecord(
         metadata=session.SessionMetadata(id="sess_runtime"),
         settings=session.SessionSettings(provider="openai_codex", model="gpt-5.5"),
         messages=[Message(role="user", content=[TextBlock(text="start")])],
         events=[
             session.SessionEvent(
-                type="runtime_context_projection",
+                type="provider_request_prepared",
                 created_at="2026-06-15T12:35:02Z",
                 source={"turn_id": "turn-8"},
                 data={
-                    "rendered": "Runtime context:\nSignals:\n- metric: `score=0.62`",
-                    "sha256": "abc123",
-                    "fact_keys": ["metric:score:validation.txt"],
+                    "provider": "OpenAICodexResponsesProvider",
+                    "model": "gpt-5.5",
+                    "message_count": 1,
                 },
             )
         ],
@@ -228,7 +228,7 @@ def test_runtime_projection_event_round_trips_separately_from_messages() -> None
 
     assert [line["type"] for line in lines] == ["session", "message", "event"]
     assert lines[1]["message"]["role"] == "user"
-    assert lines[2]["event"]["type"] == "runtime_context_projection"
+    assert lines[2]["event"]["type"] == "provider_request_prepared"
     assert loaded.messages == record.messages
     assert loaded.events == record.events
 

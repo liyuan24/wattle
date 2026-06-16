@@ -874,10 +874,15 @@ def test_resumed_session_ending_with_tool_result_continues_turn(tmp_path: Path) 
     assert app.run() == 0
 
     assert len(provider.requests) == 1
-    assert provider.requests[0].messages == record.messages
+    assert provider.requests[0].messages[:-1] == record.messages[:-1]
+    assert provider.requests[0].messages[-1].content[:-1] == record.messages[-1].content
+    checkpoint = provider.requests[0].messages[-1].content[-1]
+    assert isinstance(checkpoint, TextBlock)
+    assert checkpoint.text == request_preparation.POST_TOOL_OBSERVATION_CHECKPOINT
     out = out_buffer.getvalue()
     assert "[resumed] Continuing from saved tool result." in out
     saved = session.load_session(app._session_path)
+    assert saved.messages[: len(record.messages)] == record.messages
     assert saved.messages[-1] == Message(role="assistant", content=[TextBlock(text="continued")])
 
 

@@ -22,7 +22,7 @@ class RunDeadline:
         remaining = self.remaining_seconds()
         if remaining <= 0:
             return (
-                "Runtime context:\n"
+                "Run deadline:\n"
                 "- The wall-clock deadline for this run has passed. Finish with the "
                 "current state and avoid starting new long-running work."
             )
@@ -35,7 +35,7 @@ class RunDeadline:
             )
         )
         return (
-            "Runtime context:\n"
+            "Run deadline:\n"
             f"- Wall-clock budget remaining for this run: {_format_remaining(remaining)}.\n"
             f"- {guidance}"
         )
