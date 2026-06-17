@@ -70,13 +70,14 @@ When one or more subagents are active, the TUI shows a vertical selector below t
 
 ```text
 gpt-5.5 | thinking: off | ~/repos/wattle
-▸ main
+▸ input
+○ main
 ○ Hopper explorer running
 ```
 
-The selector has no `Agents:` heading. It always lists `main` first, then active subagents in launch order. Terminal subagents (`completed`, `failed`, or `closed`) disappear from the selector, while their lifecycle/completion notifications remain visible in the main transcript.
+The selector has no `Agents:` heading. It always lists `input` first, then `main`, then active subagents in launch order. Terminal subagents (`completed`, `failed`, or `closed`) disappear from the selector, while their lifecycle/completion notifications remain visible in the main transcript.
 
-Use Up/Down while the selector is visible to switch between `main` and active subagent views. In a subagent view, the transcript shows the main conversation up to the spawn point, a divider such as `── subagent: Hopper explorer ──`, and that subagent's conversation. Typed input targets the selected subagent; if it is still running, pending, or closing, Wattle rejects the input with a clear message instead of queueing it.
+Use Up/Down while the selector is visible to move focus between the input box, `main`, and active subagent views. Choosing `main` or a subagent switches the transcript view; choosing `input` returns focus to typing without changing the current transcript target. In a subagent view, the transcript shows the main conversation up to the spawn point, a divider such as `── subagent: Hopper explorer ──`, and that subagent's conversation. Typed input targets the selected subagent; if it is still running, pending, or closing, Wattle rejects the input with a clear message instead of queueing it.
 
 ## Practical guidance
 

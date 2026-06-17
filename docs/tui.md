@@ -66,7 +66,7 @@ Important input behaviors:
 - Shift+Enter inserts a newline.
 - Tab completes the selected suggestion, or queues a message for the next assistant turn while streaming.
 - Shift+Tab cycles the thinking level.
-- Up/Down move picker selection when a picker is active; otherwise, when active subagents are visible, they switch between `main` and subagent views; without active subagents they navigate input history or suggestions.
+- Up/Down move picker selection when a picker is active; otherwise, when active subagents are visible, they cycle focus through the input box, `main`, and subagent views; without active subagents they navigate input history or suggestions.
 - Esc interrupts an active streaming turn when possible.
 - Bracketed paste is tracked so large pasted text can be represented compactly in the prompt.
 - Clipboard image paste stores the image as a session asset and inserts its path.

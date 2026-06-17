@@ -337,6 +337,7 @@ PROMPT_MARKER_STYLE = "\x1b[48;5;235;38;5;51;1m"
 SELECTED_ROW_STYLE = "\x1b[48;5;240;38;5;255;1m"
 COMPACTION_FRAMES = ("◐", "◓", "◑", "◒")
 WAIT_AGENT_RUNNING_TITLE = "Waiting for subagent"
+INPUT_FOCUS_ID = "input"
 MAIN_AGENT_ID = "main"
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b[78]")
 SUBAGENT_VISIBLE_STATUSES = frozenset({"pending", "running", "closing"})
@@ -739,35 +740,49 @@ def _subagent_selector_label(snapshot: Mapping[str, object]) -> str:
     return f"{display_name} {role} {status}"
 
 
-def _agent_selector_ids(visible_subagents: Sequence[Mapping[str, object]]) -> list[str]:
+def _agent_view_ids(visible_subagents: Sequence[Mapping[str, object]]) -> list[str]:
     return [MAIN_AGENT_ID, *[str(snapshot.get("subagent_id")) for snapshot in visible_subagents]]
+
+
+def _agent_selector_ids(visible_subagents: Sequence[Mapping[str, object]]) -> list[str]:
+    return [INPUT_FOCUS_ID, *_agent_view_ids(visible_subagents)]
 
 
 def _normalize_active_agent_id(
     active_agent_id: str,
     visible_subagents: Sequence[Mapping[str, object]],
 ) -> str:
-    if active_agent_id in _agent_selector_ids(visible_subagents):
+    if active_agent_id in _agent_view_ids(visible_subagents):
         return active_agent_id
     return MAIN_AGENT_ID
 
 
+def _normalize_active_focus_id(
+    active_focus_id: str,
+    visible_subagents: Sequence[Mapping[str, object]],
+) -> str:
+    if active_focus_id in _agent_selector_ids(visible_subagents):
+        return active_focus_id
+    return INPUT_FOCUS_ID
+
+
 def _agent_selector_row_texts(
     *,
-    active_agent_id: str,
+    active_focus_id: str,
     visible_subagents: Sequence[Mapping[str, object]],
     width: int,
 ) -> list[str]:
     if not visible_subagents:
         return []
-    normalized_active = _normalize_active_agent_id(active_agent_id, visible_subagents)
+    normalized_focus = _normalize_active_focus_id(active_focus_id, visible_subagents)
     max_width = max(1, width)
     rows = [
-        f"{'▸' if normalized_active == MAIN_AGENT_ID else '○'} {MAIN_AGENT_ID}"
+        f"{'▸' if normalized_focus == INPUT_FOCUS_ID else '○'} {INPUT_FOCUS_ID}",
+        f"{'▸' if normalized_focus == MAIN_AGENT_ID else '○'} {MAIN_AGENT_ID}",
     ]
     for snapshot in visible_subagents:
         subagent_id = str(snapshot.get("subagent_id"))
-        marker = "▸" if normalized_active == subagent_id else "○"
+        marker = "▸" if normalized_focus == subagent_id else "○"
         rows.append(f"{marker} {_subagent_selector_label(snapshot)}")
     return [_truncate_cell_text(row, max_width) for row in rows]
 
@@ -2919,6 +2934,7 @@ class WattleApp:
         self._clear_screen_notice: str | None = None
         self._research_run_seen: set[CommandSummary] = set()
         self._active_agent_id = MAIN_AGENT_ID
+        self._active_focus_id = INPUT_FOCUS_ID
         self._subagent_parent_prefixes: dict[str, list[Message]] = {}
 
         if state is not None:
@@ -5610,16 +5626,19 @@ class _LiveTerminal:
         if not visible_subagents:
             return False
         ids = _agent_selector_ids(visible_subagents)
-        active_agent_id = _normalize_active_agent_id(
-            self.app._active_agent_id,
+        active_focus_id = _normalize_active_focus_id(
+            self.app._active_focus_id,
             visible_subagents,
         )
         try:
-            current_index = ids.index(active_agent_id)
+            current_index = ids.index(active_focus_id)
         except ValueError:
             current_index = 0
-        self.app._active_agent_id = ids[(current_index + delta) % len(ids)]
-        self._redraw_visible_screen_after_resize()
+        next_focus_id = ids[(current_index + delta) % len(ids)]
+        self.app._active_focus_id = next_focus_id
+        if next_focus_id != INPUT_FOCUS_ID:
+            self.app._active_agent_id = next_focus_id
+            self._redraw_visible_screen_after_resize()
         return True
 
     def _move_input_history(self, delta: int) -> None:
@@ -6237,14 +6256,20 @@ class _LiveTerminal:
     def _queue_monitor_event(self, event: dict[str, object]) -> None:
         if event.get("event_type") == "subagent":
             active_before = self.app._active_agent_id
+            focus_before = self.app._active_focus_id
             visible_subagents = self._visible_subagent_snapshots()
-            visible_ids = _agent_selector_ids(visible_subagents)
-            if self.app._active_agent_id not in visible_ids:
+            view_ids = _agent_view_ids(visible_subagents)
+            selector_ids = _agent_selector_ids(visible_subagents)
+            if self.app._active_agent_id not in view_ids:
                 self.app._active_agent_id = MAIN_AGENT_ID
+            if self.app._active_focus_id not in selector_ids:
+                self.app._active_focus_id = (
+                    INPUT_FOCUS_ID if focus_before == INPUT_FOCUS_ID else MAIN_AGENT_ID
+                )
             terminal_event = event.get("event") in {"completed", "failed", "closed"} or event.get(
                 "status"
             ) in {"completed", "failed", "closed"}
-            if self.running and active_before != MAIN_AGENT_ID:
+            if self.running and active_before != self.app._active_agent_id:
                 self._redraw_visible_screen_after_resize()
             if terminal_event:
                 self._write_subagent_event(event)
@@ -6596,6 +6621,10 @@ class _LiveTerminal:
             self.app._active_agent_id,
             visible_subagents,
         )
+        self.app._active_focus_id = _normalize_active_focus_id(
+            self.app._active_focus_id,
+            visible_subagents,
+        )
         running_background_tasks = self._running_background_task_count()
         if self.compacting:
             frame = COMPACTION_FRAMES[int(time.monotonic() * 8) % len(COMPACTION_FRAMES)]
@@ -6739,7 +6768,7 @@ class _LiveTerminal:
                 statusline = f"{STATUSLINE_STYLE}{_style_statusline_text(line)}{RESET}"
                 rows.append(_filled_terminal_line(statusline, STATUSLINE_STYLE, width))
                 selector_rows = _agent_selector_row_texts(
-                    active_agent_id=self.app._active_agent_id,
+                    active_focus_id=self.app._active_focus_id,
                     visible_subagents=visible_subagents,
                     width=line_width,
                 )
@@ -6758,10 +6787,15 @@ class _LiveTerminal:
         subagents = getattr(self.app.runtime, "_subagents", None)
         if subagents is None:
             self.app._active_agent_id = MAIN_AGENT_ID
+            self.app._active_focus_id = INPUT_FOCUS_ID
             return []
         visible = _visible_subagent_snapshots(subagents.snapshots())
         self.app._active_agent_id = _normalize_active_agent_id(
             self.app._active_agent_id,
+            visible,
+        )
+        self.app._active_focus_id = _normalize_active_focus_id(
+            self.app._active_focus_id,
             visible,
         )
         return visible

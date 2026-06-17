@@ -3459,7 +3459,7 @@ def test_live_prompt_shows_end_turn_queue_in_separate_panel(tmp_path: Path) -> N
 
 def test_subagent_selector_rows_render_required_vertical_contract() -> None:
     rows = tui._agent_selector_row_texts(
-        active_agent_id="subagent-456",
+        active_focus_id="subagent-456",
         visible_subagents=[
             {
                 "subagent_id": "subagent-123",
@@ -3478,6 +3478,7 @@ def test_subagent_selector_rows_render_required_vertical_contract() -> None:
     )
 
     assert rows == [
+        "○ input",
         "○ main",
         "○ Hopper explorer running",
         "▸ Grace worker pending",
@@ -3487,7 +3488,7 @@ def test_subagent_selector_rows_render_required_vertical_contract() -> None:
 
 def test_subagent_selector_rows_truncate_long_rows() -> None:
     rows = tui._agent_selector_row_texts(
-        active_agent_id="main",
+        active_focus_id="input",
         visible_subagents=[
             {
                 "subagent_id": "subagent-123",
@@ -3499,7 +3500,7 @@ def test_subagent_selector_rows_truncate_long_rows() -> None:
         width=12,
     )
 
-    assert rows == ["▸ main", "○ VeryLon..."]
+    assert rows == ["▸ input", "○ main", "○ VeryLon..."]
 
 
 def test_visible_subagent_snapshots_filter_terminal_and_keep_launch_order() -> None:
@@ -3576,10 +3577,12 @@ def test_live_prompt_shows_vertical_subagent_selector_rows(
     assert "Agents:" not in rendered
     assert "Subagents ·" not in rendered
     assert "Waiting for subagent(s)" not in rendered
-    assert "▸ main" in rendered
+    assert "▸ input" in rendered
+    assert "○ main" in rendered
     assert "○ Grace explorer running" in rendered
     assert "○ Ada worker running" in rendered
-    assert rendered.index("▸ main") < rendered.index("○ Grace explorer running")
+    assert rendered.index("▸ input") < rendered.index("○ main")
+    assert rendered.index("○ main") < rendered.index("○ Grace explorer running")
     assert rendered.index("○ Grace explorer running") < rendered.index("○ Ada worker running")
     assert "Hopper explorer" not in rendered
     assert "TUI input path identified" not in rendered
@@ -3616,8 +3619,21 @@ def test_live_down_and_up_arrows_switch_active_agent_view(
         live.fd = read_fd
         os.write(write_fd, b"\x1b[B")
         live._read_available_input()
+        assert app._active_focus_id == tui.MAIN_AGENT_ID
+        assert app._active_agent_id == tui.MAIN_AGENT_ID
+        rendered = _strip_ansi(out.getvalue())
+        assert "○ input" in rendered
+        assert "▸ main" in rendered
+        assert "○ Hopper explorer running" in rendered
+
+        out.seek(0)
+        out.truncate(0)
+        os.write(write_fd, b"\x1b[B")
+        live._read_available_input()
+        assert app._active_focus_id == "subagent-123"
         assert app._active_agent_id == "subagent-123"
         rendered = _strip_ansi(out.getvalue())
+        assert "○ input" in rendered
         assert "○ main" in rendered
         assert "▸ Hopper explorer running" in rendered
         assert "── subagent: Hopper explorer ──" in rendered
@@ -3625,12 +3641,25 @@ def test_live_down_and_up_arrows_switch_active_agent_view(
 
         out.seek(0)
         out.truncate(0)
+        os.write(write_fd, b"\x1b[B")
+        live._read_available_input()
+        assert app._active_focus_id == tui.INPUT_FOCUS_ID
+        assert app._active_agent_id == "subagent-123"
+        rendered = _strip_ansi(out.getvalue())
+        assert "▸ input" in rendered
+        assert "○ main" in rendered
+        assert "○ Hopper explorer running" in rendered
+
+        out.seek(0)
+        out.truncate(0)
         os.write(write_fd, b"\x1b[A")
         live._read_available_input()
-        assert app._active_agent_id == tui.MAIN_AGENT_ID
+        assert app._active_focus_id == "subagent-123"
+        assert app._active_agent_id == "subagent-123"
         rendered = _strip_ansi(out.getvalue())
-        assert "▸ main" in rendered
-        assert "○ Hopper explorer running" in rendered
+        assert "○ input" in rendered
+        assert "○ main" in rendered
+        assert "▸ Hopper explorer running" in rendered
     finally:
         os.close(read_fd)
         os.close(write_fd)
@@ -3699,7 +3728,8 @@ def test_live_prompt_suppresses_generic_wait_agent_status_for_active_subagents(
     live._draw_prompt()
 
     rendered = _strip_ansi(out.getvalue())
-    assert "▸ main" in rendered
+    assert "▸ input" in rendered
+    assert "○ main" in rendered
     assert "○ Hopper explorer running" in rendered
     assert "Subagents ·" not in rendered
     assert "Waiting for subagent\n" not in rendered
