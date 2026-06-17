@@ -1,0 +1,77 @@
+name: Release binaries
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build macOS binary
+    runs-on: macos-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install dependencies
+        run: uv sync --frozen --group dev
+
+      - name: Build standalone binary
+        run: >-
+          uv run pyinstaller
+          --clean
+          --noconfirm
+          --onefile
+          --name wattle
+          --copy-metadata wattle
+          --specpath build/pyinstaller
+          scripts/pyinstaller_entrypoint.py
+
+      - name: Smoke test standalone binary
+        shell: bash
+        run: |
+          ./dist/wattle --version
+          ./dist/wattle --help >/tmp/wattle-help.txt
+          test -s /tmp/wattle-help.txt
+
+      - name: Package standalone binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$(uname -s)" in
+            Darwin) os="apple-darwin" ;;
+            *) echo "Unsupported OS: $(uname -s)" >&2; exit 1 ;;
+          esac
+          case "$(uname -m)" in
+            arm64|aarch64) arch="aarch64" ;;
+            x86_64|amd64) arch="x86_64" ;;
+            *) echo "Unsupported architecture: $(uname -m)" >&2; exit 1 ;;
+          esac
+          archive="wattle-${arch}-${os}.tar.gz"
+          tar -C dist -czf "${archive}" wattle
+          shasum -a 256 "${archive}" > "${archive}.sha256"
+          echo "WATTLE_ARCHIVE=${archive}" >> "${GITHUB_ENV}"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.WATTLE_ARCHIVE }}
+          path: |
+            ${{ env.WATTLE_ARCHIVE }}
+            ${{ env.WATTLE_ARCHIVE }}.sha256
+          if-no-files-found: error
+
+      - name: Upload release artifact
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ env.WATTLE_ARCHIVE }}
+            ${{ env.WATTLE_ARCHIVE }}.sha256
