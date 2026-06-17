@@ -43,10 +43,13 @@ from wattle.session import message_to_dict
 
 DEFAULT_STREAM_MAX_RETRIES = 3
 POST_TOOL_OBSERVATION_CHECKPOINT = (
-    "Internal checkpoint: before choosing the next action, verify that any "
-    "derived file, command, or artifact still matches the user's required "
-    "interface and preserves the meaning of the observed inputs. Do not "
-    "restate this checklist."
+    "[system reminder]\n"
+    "Before choosing the next action, verify that any derived file, command, "
+    "or artifact still matches the user's required interface and preserves "
+    "the meaning of the observed inputs.\n\n"
+    "Before your next action or final answer, check whether the user's request "
+    "is actually complete. If a lightweight verification is useful, run it. "
+    "If not, be clear about what was and was not verified."
 )
 
 type RetryableProviderError = IncompleteStreamError | TransientProviderError

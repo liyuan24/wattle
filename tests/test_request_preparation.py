@@ -264,9 +264,11 @@ def test_prepare_adds_provider_only_observation_checkpoint_after_tool_result() -
     checkpoint = prepared.request.messages[-1].content[-1]
     assert isinstance(checkpoint, TextBlock)
     assert checkpoint.text == POST_TOOL_OBSERVATION_CHECKPOINT
+    assert checkpoint.text.startswith("[system reminder]")
     assert "derived file, command, or artifact" in checkpoint.text
     assert "preserves the meaning of the observed inputs" in checkpoint.text
-    assert "Do not restate this checklist" in checkpoint.text
+    assert "check whether the user's request is actually complete" in checkpoint.text
+    assert "what was and was not verified" in checkpoint.text
     assert messages[-1].content == [
         ToolResultBlock(tool_use_id="call_1", content="observed output", is_error=False)
     ]
