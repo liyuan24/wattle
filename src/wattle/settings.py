@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -73,9 +75,40 @@ def save_settings(settings: WattleSettings, path: str | Path | None = None) -> P
 
 
 def update_settings(path: str | Path | None = None, **changes: Any) -> WattleSettings:
-    settings = replace(load_settings(path), **changes)
-    save_settings(settings, path)
+    old_settings = load_settings(path)
+    settings = replace(old_settings, **changes)
+    target = save_settings(settings, path)
+    _audit_settings_update(target, old_settings, settings, changes)
     return settings
+
+
+def _audit_settings_update(
+    target: Path,
+    old_settings: WattleSettings,
+    new_settings: WattleSettings,
+    changes: dict[str, Any],
+) -> None:
+    """Best-effort audit trail for settings writes."""
+    try:
+        resolved_target = target.expanduser().resolve(strict=False)
+        record = {
+            "event": "settings_update",
+            "created_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+            "pid": os.getpid(),
+            "argv": list(sys.argv),
+            "cwd": str(Path.cwd()),
+            "settings_path": str(resolved_target),
+            "settings_path_input": str(target),
+            "env_settings_path": os.environ.get(SETTINGS_PATH_ENV),
+            "changed_keys": sorted(changes),
+            "provider": {"old": old_settings.provider, "new": new_settings.provider},
+            "model": {"old": old_settings.model, "new": new_settings.model},
+        }
+        audit_path = resolved_target.with_name(f"{resolved_target.stem}.audit.jsonl")
+        with audit_path.open("a", encoding="utf-8") as audit_file:
+            audit_file.write(json.dumps(record, sort_keys=True) + "\n")
+    except OSError:
+        return
 
 
 def settings_to_dict(settings: WattleSettings) -> dict[str, Any]:
