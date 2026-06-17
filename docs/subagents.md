@@ -66,7 +66,17 @@ Statuses include `pending`, `running`, `completed`, `failed`, `closing`, and `cl
 
 ## TUI display
 
-The TUI renders subagent lifecycle events and running status. This makes parallel work visible without forcing the primary agent to block until every delegated task completes.
+When one or more subagents are active, the TUI shows a vertical selector below the normal statusline:
+
+```text
+gpt-5.5 | thinking: off | ~/repos/wattle
+▸ main
+○ Hopper explorer running
+```
+
+The selector has no `Agents:` heading. It always lists `main` first, then active subagents in launch order. Terminal subagents (`completed`, `failed`, or `closed`) disappear from the selector, while their lifecycle/completion notifications remain visible in the main transcript.
+
+Use Up/Down while the selector is visible to switch between `main` and active subagent views. In a subagent view, the transcript shows the main conversation up to the spawn point, a divider such as `── subagent: Hopper explorer ──`, and that subagent's conversation. Typed input targets the selected subagent; if it is still running, pending, or closing, Wattle rejects the input with a clear message instead of queueing it.
 
 ## Practical guidance
 

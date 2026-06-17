@@ -337,6 +337,7 @@ PROMPT_MARKER_STYLE = "\x1b[48;5;235;38;5;51;1m"
 SELECTED_ROW_STYLE = "\x1b[48;5;240;38;5;255;1m"
 COMPACTION_FRAMES = ("◐", "◓", "◑", "◒")
 WAIT_AGENT_RUNNING_TITLE = "Waiting for subagent"
+MAIN_AGENT_ID = "main"
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b[78]")
 SUBAGENT_VISIBLE_STATUSES = frozenset({"pending", "running", "closing"})
 SUBAGENT_TOOL_RESULT_STATUSES = frozenset(
@@ -714,11 +715,75 @@ def _subagent_event_detail(event: Mapping[str, object]) -> str:
 
 
 def _visible_subagent_snapshots(snapshots: list[dict[str, object]]) -> list[dict[str, object]]:
-    return [
+    visible = [
         snapshot
         for snapshot in snapshots
         if snapshot.get("status") in SUBAGENT_VISIBLE_STATUSES
     ]
+    return sorted(
+        visible,
+        key=lambda snapshot: int(
+            snapshot["launch_index"] if snapshot.get("launch_index") is not None else len(visible)
+        ),
+    )
+
+
+def _subagent_selector_label(snapshot: Mapping[str, object]) -> str:
+    display_name = str(
+        snapshot.get("display_name")
+        or snapshot.get("name")
+        or _short_subagent_id(snapshot.get("subagent_id"))
+    )
+    role = str(snapshot.get("role") or "subagent")
+    status = str(snapshot.get("status") or "updated")
+    return f"{display_name} {role} {status}"
+
+
+def _agent_selector_ids(visible_subagents: Sequence[Mapping[str, object]]) -> list[str]:
+    return [MAIN_AGENT_ID, *[str(snapshot.get("subagent_id")) for snapshot in visible_subagents]]
+
+
+def _normalize_active_agent_id(
+    active_agent_id: str,
+    visible_subagents: Sequence[Mapping[str, object]],
+) -> str:
+    if active_agent_id in _agent_selector_ids(visible_subagents):
+        return active_agent_id
+    return MAIN_AGENT_ID
+
+
+def _agent_selector_row_texts(
+    *,
+    active_agent_id: str,
+    visible_subagents: Sequence[Mapping[str, object]],
+    width: int,
+) -> list[str]:
+    if not visible_subagents:
+        return []
+    normalized_active = _normalize_active_agent_id(active_agent_id, visible_subagents)
+    max_width = max(1, width)
+    rows = [
+        f"{'▸' if normalized_active == MAIN_AGENT_ID else '○'} {MAIN_AGENT_ID}"
+    ]
+    for snapshot in visible_subagents:
+        subagent_id = str(snapshot.get("subagent_id"))
+        marker = "▸" if normalized_active == subagent_id else "○"
+        rows.append(f"{marker} {_subagent_selector_label(snapshot)}")
+    return [_truncate_cell_text(row, max_width) for row in rows]
+
+
+def _subagent_view_header(snapshot: Mapping[str, object]) -> str:
+    display_name = str(
+        snapshot.get("display_name")
+        or snapshot.get("name")
+        or _short_subagent_id(snapshot.get("subagent_id"))
+    )
+    role = str(snapshot.get("role") or "subagent")
+    return f"── subagent: {display_name} {role} ──"
+
+
+def _non_subagent_events(events: Sequence[Mapping[str, object]]) -> list[Mapping[str, object]]:
+    return [event for event in events if event.get("event_type") != "subagent"]
 
 
 def _tool_result_subagent_snapshots(
@@ -2853,6 +2918,8 @@ class WattleApp:
         self._cleared_empty_screen_active = False
         self._clear_screen_notice: str | None = None
         self._research_run_seen: set[CommandSummary] = set()
+        self._active_agent_id = MAIN_AGENT_ID
+        self._subagent_parent_prefixes: dict[str, list[Message]] = {}
 
         if state is not None:
             self._restore_state(state)
@@ -3253,7 +3320,7 @@ class WattleApp:
                     if response.stop_reason == "tool_use"
                     else []
                 )
-                monitor_events = self.runtime.events.drain()
+                monitor_events = _non_subagent_events(self.runtime.events.drain())
                 pending_monitor = monitor_event_text_blocks(monitor_events)
                 if self._append_followup_user([*tool_results, *pending_monitor]):
                     if tool_results:
@@ -3263,7 +3330,7 @@ class WattleApp:
                 self._write_worked_duration(started_at)
                 return
 
-            monitor_events = self.runtime.events.drain()
+            monitor_events = _non_subagent_events(self.runtime.events.drain())
             pending_monitor = monitor_event_text_blocks(monitor_events)
             step = build_turn_step(
                 response,
@@ -3652,6 +3719,7 @@ class WattleApp:
         block: ToolUseBlock,
         result: ToolResultBlock,
     ) -> None:
+        self._capture_subagent_parent_prefix(result)
         title = _spawn_agent_title(block, result)
         detail = _spawn_agent_detail(block, result)
         if not self._styles_enabled():
@@ -3773,6 +3841,50 @@ class WattleApp:
 
     def _visible_subagent_snapshots(self) -> list[dict[str, object]]:
         return _visible_subagent_snapshots(self._subagent_snapshots())
+
+    def _capture_subagent_parent_prefix(self, result: ToolResultBlock) -> None:
+        fields = _subagent_summary_fields(result.content)
+        subagent_id = fields.get("subagent_id")
+        if not subagent_id:
+            return
+        self._subagent_parent_prefixes[subagent_id] = [
+            *self.messages,
+            Message(role="user", content=[result]),
+        ]
+
+    def _snapshot_for_subagent(self, subagent_id: str) -> dict[str, object] | None:
+        for snapshot in self._subagent_snapshots():
+            if snapshot.get("subagent_id") == subagent_id:
+                return snapshot
+        return None
+
+    def _active_agent_messages(self) -> list[Message]:
+        if self._active_agent_id == MAIN_AGENT_ID:
+            return list(self.messages)
+        snapshot = self._snapshot_for_subagent(self._active_agent_id)
+        if snapshot is None:
+            self._active_agent_id = MAIN_AGENT_ID
+            return list(self.messages)
+        parent_prefix = self._subagent_parent_prefixes.get(self._active_agent_id, [])
+        messages = [*parent_prefix]
+        messages.append(
+            Message(
+                role="assistant",
+                content=[TextBlock(text=_subagent_view_header(snapshot))],
+            )
+        )
+        subagent_messages = snapshot.get("messages", ())
+        if isinstance(subagent_messages, Sequence) and not isinstance(subagent_messages, str):
+            messages.extend(
+                message for message in subagent_messages if isinstance(message, Message)
+            )
+        return messages
+
+    def _write_active_agent_transcript(self, *, with_separators: bool) -> None:
+        self._write_history_messages(
+            self._active_agent_messages(),
+            with_separators=with_separators,
+        )
 
     def _write_edit_result(
         self,
@@ -4582,7 +4694,7 @@ class WattleApp:
             await self._arun_turn()
 
     def _write_history_transcript(self) -> None:
-        self._write_history_messages(self.messages, with_separators=True)
+        self._write_active_agent_transcript(with_separators=True)
 
     def _write_history_messages(
         self,
@@ -5021,6 +5133,7 @@ class _LiveTerminal:
         self.input_history = _input_history_from_messages(self.app.messages)
         self.input_history_index: int | None = None
         self.input_history_draft = ""
+        self._last_visible_subagent_ids: tuple[str, ...] = ()
 
     def _reset_prompt_state(self) -> None:
         self.prompt_lines = 0
@@ -5483,11 +5596,31 @@ class _LiveTerminal:
             self._move_picker_selection(delta)
             return
 
+        if self._move_active_agent_selection(delta):
+            return
+
         if self._ensure_input_hints():
             self._move_input_hint_selection(delta)
             return
 
         self._move_input_history(delta)
+
+    def _move_active_agent_selection(self, delta: int) -> bool:
+        visible_subagents = self._visible_subagent_snapshots()
+        if not visible_subagents:
+            return False
+        ids = _agent_selector_ids(visible_subagents)
+        active_agent_id = _normalize_active_agent_id(
+            self.app._active_agent_id,
+            visible_subagents,
+        )
+        try:
+            current_index = ids.index(active_agent_id)
+        except ValueError:
+            current_index = 0
+        self.app._active_agent_id = ids[(current_index + delta) % len(ids)]
+        self._redraw_visible_screen_after_resize()
+        return True
 
     def _move_input_history(self, delta: int) -> None:
         if not self.input_history:
@@ -5582,6 +5715,9 @@ class _LiveTerminal:
             self._draw_prompt()
             return
         self._record_input_history(text)
+        if self.app._active_agent_id != MAIN_AGENT_ID:
+            self._submit_subagent_input(text)
+            return
         expanded_text = self.app._expand_skill_text(text)
         if expanded_text is None and _should_route_slash_command(text):
             if self._handle_live_stop_command(text):
@@ -5645,6 +5781,41 @@ class _LiveTerminal:
         self.app.messages.append(Message(role="user", content=content))
         self.app._persist_session()
         self._start_worker()
+        self._draw_prompt()
+
+    def _submit_subagent_input(self, text: str) -> None:
+        snapshot = self.app._snapshot_for_subagent(self.app._active_agent_id)
+        if snapshot is None:
+            self.app._active_agent_id = MAIN_AGENT_ID
+            self.app._write_panel(
+                "subagent",
+                "selected subagent is no longer active; switched back to main.",
+                STATUS_STYLE,
+            )
+            self._redraw_visible_screen_after_resize()
+            self._draw_prompt()
+            return
+        display_name = str(
+            snapshot.get("display_name")
+            or snapshot.get("name")
+            or _short_subagent_id(snapshot.get("subagent_id"))
+        )
+        status = str(snapshot.get("status") or "updated")
+        if status in {"pending", "running", "closing"}:
+            self.app._write_panel(
+                "subagent",
+                f"subagent {display_name} is {status}; wait until it is idle before sending input.",
+                STATUS_STYLE,
+            )
+            self._draw_prompt()
+            return
+        try:
+            self.app.runtime.subagents.send_input(self.app._active_agent_id, text)
+        except Exception as exc:  # noqa: BLE001
+            self.app._write_panel("subagent", str(exc), ERROR_STYLE)
+            self._draw_prompt()
+            return
+        self._redraw_visible_screen_after_resize()
         self._draw_prompt()
 
     def _queue_buffer_for_end_of_turn(self) -> None:
@@ -6065,7 +6236,18 @@ class _LiveTerminal:
 
     def _queue_monitor_event(self, event: dict[str, object]) -> None:
         if event.get("event_type") == "subagent":
-            self._write_subagent_event(event)
+            active_before = self.app._active_agent_id
+            visible_subagents = self._visible_subagent_snapshots()
+            visible_ids = _agent_selector_ids(visible_subagents)
+            if self.app._active_agent_id not in visible_ids:
+                self.app._active_agent_id = MAIN_AGENT_ID
+            terminal_event = event.get("event") in {"completed", "failed", "closed"} or event.get(
+                "status"
+            ) in {"completed", "failed", "closed"}
+            if self.running and active_before != MAIN_AGENT_ID:
+                self._redraw_visible_screen_after_resize()
+            if terminal_event:
+                self._write_subagent_event(event)
             if self.running:
                 self._draw_prompt()
             return
@@ -6410,6 +6592,10 @@ class _LiveTerminal:
         preview = rendered_input.text
         cursor = min(len(preview), rendered_input.cursor)
         visible_subagents = self._visible_subagent_snapshots()
+        self.app._active_agent_id = _normalize_active_agent_id(
+            self.app._active_agent_id,
+            visible_subagents,
+        )
         running_background_tasks = self._running_background_task_count()
         if self.compacting:
             frame = COMPACTION_FRAMES[int(time.monotonic() * 8) % len(COMPACTION_FRAMES)]
@@ -6432,21 +6618,6 @@ class _LiveTerminal:
             rows.append(_default_terminal_line("", width))
             rows.append(self._running_status_line(width))
             rows.append(_default_terminal_line("", width))
-        if visible_subagents:
-            summary = _subagent_count_summary(visible_subagents)
-            rows.append(
-                _styled_terminal_line(
-                    f" Subagents · {summary}",
-                    SUBAGENT_WAIT_TITLE_STYLE,
-                    width,
-                )
-            )
-            for line in _subagent_lifecycle_lines(visible_subagents[:3]):
-                line = _one_line(line, limit=max(20, line_width - 1))
-                rows.append(_styled_terminal_line(line, STATUS_STYLE, width))
-            omitted = len(visible_subagents) - 3
-            if omitted > 0:
-                rows.append(_styled_terminal_line(f"  ... +{omitted} more", STATUS_STYLE, width))
         if running_background_tasks:
             noun = "task" if running_background_tasks == 1 else "tasks"
             background_text = (
@@ -6567,6 +6738,15 @@ class _LiveTerminal:
                 line = f" {status_text}"[:line_width].ljust(line_width)
                 statusline = f"{STATUSLINE_STYLE}{_style_statusline_text(line)}{RESET}"
                 rows.append(_filled_terminal_line(statusline, STATUSLINE_STYLE, width))
+                selector_rows = _agent_selector_row_texts(
+                    active_agent_id=self.app._active_agent_id,
+                    visible_subagents=visible_subagents,
+                    width=line_width,
+                )
+                rows.extend(
+                    _filled_terminal_line(row, STATUS_STYLE, width)
+                    for row in selector_rows
+                )
         return _PromptFrame(
             rows=rows,
             width=line_width,
@@ -6577,8 +6757,14 @@ class _LiveTerminal:
     def _visible_subagent_snapshots(self) -> list[dict[str, object]]:
         subagents = getattr(self.app.runtime, "_subagents", None)
         if subagents is None:
+            self.app._active_agent_id = MAIN_AGENT_ID
             return []
-        return _visible_subagent_snapshots(subagents.snapshots())
+        visible = _visible_subagent_snapshots(subagents.snapshots())
+        self.app._active_agent_id = _normalize_active_agent_id(
+            self.app._active_agent_id,
+            visible,
+        )
+        return visible
 
     def _running_background_task_count(self) -> int:
         return sum(
@@ -6699,14 +6885,18 @@ class _LiveTerminal:
         self.app._write(VISIBLE_SCREEN_CLEAR)
         self.app._write(TERMINAL_HISTORY_CLEAR)
         self.app._write_welcome_card()
-        messages = self.app.messages
-        if self.inflight_tool_results:
+        messages = self._active_agent_messages_for_redraw()
+        self.app._write_history_messages(messages, with_separators=False)
+        self.app._last_transcript_was_separator = False
+
+    def _active_agent_messages_for_redraw(self) -> list[Message]:
+        messages = self.app._active_agent_messages()
+        if self.app._active_agent_id == MAIN_AGENT_ID and self.inflight_tool_results:
             messages = [
                 *messages,
                 Message(role="user", content=list(self.inflight_tool_results)),
             ]
-        self.app._write_history_messages(messages, with_separators=False)
-        self.app._last_transcript_was_separator = False
+        return messages
 
     def _clear_prompt(self) -> None:
         sequence = self._clear_prompt_sequence()

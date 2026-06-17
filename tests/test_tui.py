@@ -3457,7 +3457,74 @@ def test_live_prompt_shows_end_turn_queue_in_separate_panel(tmp_path: Path) -> N
     assert str(second) not in rendered
 
 
-def test_live_prompt_shows_only_active_subagent_lifecycle_status(
+def test_subagent_selector_rows_render_required_vertical_contract() -> None:
+    rows = tui._agent_selector_row_texts(
+        active_agent_id="subagent-456",
+        visible_subagents=[
+            {
+                "subagent_id": "subagent-123",
+                "display_name": "Hopper",
+                "role": "explorer",
+                "status": "running",
+            },
+            {
+                "subagent_id": "subagent-456",
+                "display_name": "Grace",
+                "role": "worker",
+                "status": "pending",
+            },
+        ],
+        width=80,
+    )
+
+    assert rows == [
+        "○ main",
+        "○ Hopper explorer running",
+        "▸ Grace worker pending",
+    ]
+    assert all("Agents:" not in row for row in rows)
+
+
+def test_subagent_selector_rows_truncate_long_rows() -> None:
+    rows = tui._agent_selector_row_texts(
+        active_agent_id="main",
+        visible_subagents=[
+            {
+                "subagent_id": "subagent-123",
+                "display_name": "VeryLongSubagentName",
+                "role": "explorer",
+                "status": "running",
+            }
+        ],
+        width=12,
+    )
+
+    assert rows == ["▸ main", "○ VeryLon..."]
+
+
+def test_visible_subagent_snapshots_filter_terminal_and_keep_launch_order() -> None:
+    snapshots = [
+        {"subagent_id": "closed", "status": "closed", "launch_index": 0},
+        {"subagent_id": "second", "status": "running", "launch_index": 2},
+        {"subagent_id": "first", "status": "pending", "launch_index": 1},
+        {"subagent_id": "failed", "status": "failed", "launch_index": 3},
+    ]
+
+    visible = tui._visible_subagent_snapshots(snapshots)
+
+    assert [snapshot["subagent_id"] for snapshot in visible] == ["first", "second"]
+
+
+def test_subagent_view_header_matches_contract() -> None:
+    assert (
+        tui._subagent_view_header(
+            {"display_name": "Hopper", "role": "explorer", "subagent_id": "subagent-123"}
+        )
+        == "── subagent: Hopper explorer ──"
+    )
+
+
+def test_live_prompt_shows_vertical_subagent_selector_rows(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     out = _TTYBuffer()
@@ -3505,20 +3572,104 @@ def test_live_prompt_shows_only_active_subagent_lifecycle_status(
 
     live._draw_prompt()
 
-    rendered = out.getvalue()
-    expected_title = (
-        f"\x1b[0m\x1b[2K{tui.SUBAGENT_WAIT_TITLE_STYLE} "
-        "Subagents · 2 running"
-    )
-    assert expected_title in rendered
+    rendered = _strip_ansi(out.getvalue())
+    assert "Agents:" not in rendered
+    assert "Subagents ·" not in rendered
     assert "Waiting for subagent(s)" not in rendered
-    assert "Subagents · 2 running" in rendered
-    assert "Grace [explorer] running · Inspect tool flows" in rendered
-    assert "Ada [worker] running · Patch tests" in rendered
-    assert "Hopper [explorer]" not in rendered
+    assert "▸ main" in rendered
+    assert "○ Grace explorer running" in rendered
+    assert "○ Ada worker running" in rendered
+    assert rendered.index("▸ main") < rendered.index("○ Grace explorer running")
+    assert rendered.index("○ Grace explorer running") < rendered.index("○ Ada worker running")
+    assert "Hopper explorer" not in rendered
     assert "TUI input path identified" not in rendered
-    assert "Katherine [explorer]" not in rendered
+    assert "Katherine explorer" not in rendered
     assert "PermissionError: local codex denied" not in rendered
+
+
+def test_live_down_and_up_arrows_switch_active_agent_view(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    out = _TTYBuffer()
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+    app.messages = [Message(role="user", content=[TextBlock(text="main prompt")])]
+    live = tui._LiveTerminal(app)
+
+    class FakeSubagents:
+        def snapshots(self) -> list[dict[str, object]]:
+            return [
+                {
+                    "subagent_id": "subagent-123",
+                    "display_name": "Hopper",
+                    "role": "explorer",
+                    "status": "running",
+                    "messages": (
+                        Message(role="user", content=[TextBlock(text="child task")]),
+                    ),
+                }
+            ]
+
+    monkeypatch.setattr(app.runtime, "_subagents", FakeSubagents())
+    read_fd, write_fd = os.pipe()
+    try:
+        live.fd = read_fd
+        os.write(write_fd, b"\x1b[B")
+        live._read_available_input()
+        assert app._active_agent_id == "subagent-123"
+        rendered = _strip_ansi(out.getvalue())
+        assert "○ main" in rendered
+        assert "▸ Hopper explorer running" in rendered
+        assert "── subagent: Hopper explorer ──" in rendered
+        assert "child task" in rendered
+
+        out.seek(0)
+        out.truncate(0)
+        os.write(write_fd, b"\x1b[A")
+        live._read_available_input()
+        assert app._active_agent_id == tui.MAIN_AGENT_ID
+        rendered = _strip_ansi(out.getvalue())
+        assert "▸ main" in rendered
+        assert "○ Hopper explorer running" in rendered
+    finally:
+        os.close(read_fd)
+        os.close(write_fd)
+
+
+def test_live_subagent_running_input_is_rejected_without_queueing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    out = _TTYBuffer()
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+    app._active_agent_id = "subagent-123"
+    live = tui._LiveTerminal(app)
+    live.buffer = "please change course"
+    live.cursor = len(live.buffer)
+
+    class FakeSubagents:
+        def snapshots(self) -> list[dict[str, object]]:
+            return [
+                {
+                    "subagent_id": "subagent-123",
+                    "display_name": "Hopper",
+                    "role": "explorer",
+                    "status": "running",
+                }
+            ]
+
+        def send_input(self, subagent_id: str, message: str) -> object:  # pragma: no cover
+            raise AssertionError("send_input should not be called for running subagents")
+
+    monkeypatch.setattr(app.runtime, "_subagents", FakeSubagents())
+
+    live._submit_buffer()
+
+    rendered = _strip_ansi(out.getvalue())
+    assert "subagent Hopper is running; wait until it is idle before sending input." in rendered
+    assert live.pending_user_inputs == []
+    assert app.messages == []
+    assert app._active_agent_id == "subagent-123"
 
 
 def test_live_prompt_suppresses_generic_wait_agent_status_for_active_subagents(
@@ -3548,7 +3699,9 @@ def test_live_prompt_suppresses_generic_wait_agent_status_for_active_subagents(
     live._draw_prompt()
 
     rendered = _strip_ansi(out.getvalue())
-    assert "Subagents · 1 running" in rendered
+    assert "▸ main" in rendered
+    assert "○ Hopper explorer running" in rendered
+    assert "Subagents ·" not in rendered
     assert "Waiting for subagent\n" not in rendered
 
 

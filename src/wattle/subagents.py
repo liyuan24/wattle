@@ -8,7 +8,7 @@ import time
 import uuid
 from collections.abc import Mapping
 from contextlib import suppress
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Literal, cast
 
@@ -323,12 +323,21 @@ class SubagentManager:
             return SubagentRecord(**asdict(session.record))
 
     def snapshot(self, subagent_id: str) -> dict[str, object]:
-        return asdict(self.snapshot_record(subagent_id))
+        session = self._require_session(subagent_id)
+        with session.lock:
+            snapshot = asdict(session.record)
+            snapshot["messages"] = tuple(_copy_message(message) for message in session.messages)
+        return snapshot
 
     def snapshots(self) -> list[dict[str, object]]:
         with self._lock:
             ids = list(self._sessions)
-        return [self.snapshot(subagent_id) for subagent_id in ids]
+        snapshots: list[dict[str, object]] = []
+        for launch_index, subagent_id in enumerate(ids):
+            snapshot = self.snapshot(subagent_id)
+            snapshot["launch_index"] = launch_index
+            snapshots.append(snapshot)
+        return snapshots
 
     def cleanup(self) -> None:
         with self._lock:
@@ -479,6 +488,8 @@ class SubagentManager:
     @staticmethod
     def _notify_update(session: _SubagentSession, event: str) -> None:
         session.update_queue.put_nowait(event)
+        if event in {"turn", "tool_result", "monitor"}:
+            SubagentManager._publish_parent_event(session, event)
 
     @staticmethod
     def _publish_parent_event(session: _SubagentSession, event: str) -> None:
@@ -489,6 +500,7 @@ class SubagentManager:
         events.publish(
             {
                 "event_type": "subagent",
+                "event": event,
                 "subagent_id": session.record.subagent_id,
                 "name": session.record.display_name,
                 "role": session.record.role,
@@ -664,6 +676,10 @@ def subagent_snapshot_summary(snapshot: Mapping[str, object]) -> str:
             turns=cast(int, snapshot["turns"]),
         )
     )
+
+
+def _copy_message(message: Message) -> Message:
+    return replace(message, content=list(message.content))
 
 
 def _response_text(response: CompletionResponse) -> str:

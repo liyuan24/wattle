@@ -46,13 +46,13 @@ The live prompt frame can include:
 
 - active running status
 - active bash output cell
-- visible subagent status
 - queued or interrupted user messages
 - the input box
 - model picker
 - login picker
 - input suggestions
 - statusline
+- vertical subagent selector rows below the statusline when active subagents exist
 
 Prompt rows are rebuilt by `_LiveTerminal._build_prompt_frame()` and written by `_write_prompt_frame()`. Low-level row functions in `tui/terminal.py` handle full-width clearing, wrapping, background fill, and ANSI reset behavior.
 
@@ -62,11 +62,11 @@ The live TUI puts the terminal in cbreak mode and reads bytes from stdin with `s
 
 Important input behaviors:
 
-- Enter submits the current buffer.
+- Enter submits the current buffer to the selected agent view.
 - Shift+Enter inserts a newline.
 - Tab completes the selected suggestion, or queues a message for the next assistant turn while streaming.
 - Shift+Tab cycles the thinking level.
-- Arrow keys move picker selection, suggestion selection, or input history.
+- Up/Down move picker selection when a picker is active; otherwise, when active subagents are visible, they switch between `main` and subagent views; without active subagents they navigate input history or suggestions.
 - Esc interrupts an active streaming turn when possible.
 - Bracketed paste is tracked so large pasted text can be represented compactly in the prompt.
 - Clipboard image paste stores the image as a session asset and inserts its path.
