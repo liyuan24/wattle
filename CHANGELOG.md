@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.6.0
+
+### Added
+
+- Added Claude OAuth support.
+- Added an interactive statusline picker.
+
+### Changed
+
+- Kept deadline status out of system prompts.
+
+### Fixed
+
+- Handle provider server errors gracefully.
+
 ## 0.5.0
 
 ### Added
