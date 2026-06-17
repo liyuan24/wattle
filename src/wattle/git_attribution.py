@@ -34,21 +34,26 @@ def apply_git_attribution_env(
     appending Wattle's co-author trailer.
     """
 
-    next_env = dict(env)
+    next_env = _strip_wattle_git_hook_config(env)
     if not enabled:
         return GitAttributionEnv(next_env)
+    if _git_config_count_is_invalid(next_env):
+        return GitAttributionEnv(
+            next_env,
+            _warning_if_commit(command, "existing GIT_CONFIG_COUNT is invalid"),
+        )
 
-    repo = _discover_repo(cwd)
+    repo = _discover_repo(cwd, next_env)
     if repo is None:
         return GitAttributionEnv(next_env)
 
-    if not _git_interpret_trailers_available(cwd):
+    if not _git_interpret_trailers_available(cwd, next_env):
         return GitAttributionEnv(
             next_env,
             _warning_if_commit(command, "git interpret-trailers is unavailable"),
         )
 
-    existing_hooks_path = _effective_hooks_path(cwd, repo)
+    existing_hooks_path = _effective_hooks_path(cwd, repo, next_env)
     if existing_hooks_path is None:
         return GitAttributionEnv(
             next_env,
@@ -79,22 +84,113 @@ def apply_git_attribution_env(
         )
 
 
+def _git_config_count_is_invalid(env: Mapping[str, str]) -> bool:
+    raw_count = env.get("GIT_CONFIG_COUNT")
+    if raw_count is None:
+        return False
+    try:
+        return int(raw_count) < 0
+    except ValueError:
+        return True
+
+
+def _strip_wattle_git_hook_config(env: Mapping[str, str]) -> dict[str, str]:
+    next_env = dict(env)
+    raw_count = next_env.get("GIT_CONFIG_COUNT")
+    if raw_count is not None:
+        try:
+            count = int(raw_count)
+        except ValueError:
+            count = -1
+        if count >= 0:
+            entries: list[tuple[str, str]] = []
+            removed_count_entry = False
+            for index in range(count):
+                key_name = f"GIT_CONFIG_KEY_{index}"
+                value_name = f"GIT_CONFIG_VALUE_{index}"
+                key = next_env.get(key_name)
+                value = next_env.get(value_name)
+                if key == "core.hooksPath" and _is_wattle_hooks_path(value):
+                    removed_count_entry = True
+                    continue
+                if key is not None and value is not None:
+                    entries.append((key, value))
+            if removed_count_entry:
+                for index in range(count):
+                    next_env.pop(f"GIT_CONFIG_KEY_{index}", None)
+                    next_env.pop(f"GIT_CONFIG_VALUE_{index}", None)
+                if entries:
+                    next_env["GIT_CONFIG_COUNT"] = str(len(entries))
+                    for index, (key, value) in enumerate(entries):
+                        next_env[f"GIT_CONFIG_KEY_{index}"] = key
+                        next_env[f"GIT_CONFIG_VALUE_{index}"] = value
+                else:
+                    next_env.pop("GIT_CONFIG_COUNT", None)
+
+    parameters = next_env.get("GIT_CONFIG_PARAMETERS")
+    if parameters:
+        stripped = _strip_wattle_git_config_parameters(parameters)
+        if stripped:
+            next_env["GIT_CONFIG_PARAMETERS"] = stripped
+        else:
+            next_env.pop("GIT_CONFIG_PARAMETERS", None)
+    return next_env
+
+
+def _strip_wattle_git_config_parameters(parameters: str) -> str:
+    try:
+        tokens = shlex.split(parameters)
+    except ValueError:
+        return parameters
+
+    kept: list[str] = []
+    removed = False
+    for token in tokens:
+        key, separator, value = token.partition("=")
+        if separator and key == "core.hooksPath" and _is_wattle_hooks_path(value):
+            removed = True
+            continue
+        kept.append(token)
+    if not removed:
+        return parameters
+
+    rebuilt = ""
+    for token in kept:
+        key, separator, value = token.partition("=")
+        if separator:
+            rebuilt = _append_git_config_parameters(rebuilt, key, value)
+        else:
+            quoted = f"'{_quote_git_config_parameter(token)}'"
+            rebuilt = f"{rebuilt} {quoted}".strip() if rebuilt else quoted
+    return rebuilt
+
+
+def _is_wattle_hooks_path(value: str | None) -> bool:
+    if not value:
+        return False
+    parts = Path(value).parts
+    return any(
+        parts[index : index + 4] == (".wattle", "runtime", "git-hooks", HOOKS_VERSION)
+        for index in range(len(parts) - 3)
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class _RepoInfo:
     root: Path
     git_dir: Path
 
 
-def _discover_repo(cwd: Path) -> _RepoInfo | None:
-    root_text = _git_output(cwd, "rev-parse", "--show-toplevel")
-    git_dir_text = _git_output(cwd, "rev-parse", "--absolute-git-dir")
+def _discover_repo(cwd: Path, env: Mapping[str, str]) -> _RepoInfo | None:
+    root_text = _git_output(cwd, env, "rev-parse", "--show-toplevel")
+    git_dir_text = _git_output(cwd, env, "rev-parse", "--absolute-git-dir")
     if root_text is None or git_dir_text is None:
         return None
     return _RepoInfo(root=Path(root_text), git_dir=Path(git_dir_text))
 
 
-def _effective_hooks_path(cwd: Path, repo: _RepoInfo) -> str | None:
-    configured = _git_output(cwd, "config", "--path", "--get", "core.hooksPath")
+def _effective_hooks_path(cwd: Path, repo: _RepoInfo, env: Mapping[str, str]) -> str | None:
+    configured = _git_output(cwd, env, "config", "--path", "--get", "core.hooksPath")
     if configured is None:
         return str(repo.git_dir / "hooks")
     if not configured:
@@ -102,12 +198,13 @@ def _effective_hooks_path(cwd: Path, repo: _RepoInfo) -> str | None:
     return configured
 
 
-def _git_interpret_trailers_available(cwd: Path) -> bool:
+def _git_interpret_trailers_available(cwd: Path, env: Mapping[str, str]) -> bool:
     try:
         result = subprocess.run(
             ["git", "interpret-trailers", "--parse"],
             cwd=cwd,
             input="",
+            env=env,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             text=True,
@@ -119,11 +216,12 @@ def _git_interpret_trailers_available(cwd: Path) -> bool:
     return result.returncode == 0
 
 
-def _git_output(cwd: Path, *args: str) -> str | None:
+def _git_output(cwd: Path, env: Mapping[str, str], *args: str) -> str | None:
     try:
         result = subprocess.run(
             ["git", *args],
             cwd=cwd,
+            env=env,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,

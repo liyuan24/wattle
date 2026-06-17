@@ -128,6 +128,56 @@ def test_configured_hooks_path_is_chained(tmp_path: Path) -> None:
     assert WATTLE_COAUTHOR_TRAILER in message
 
 
+def test_inherited_wattle_hook_config_does_not_hide_repo_hooks(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    hook = repo / ".git" / "hooks" / "commit-msg"
+    hook.write_text(
+        "#!/bin/sh\nprintf '\\nExisting-Trailer: yes\\n' >> \"$1\"\n",
+        encoding="utf-8",
+    )
+    hook.chmod(hook.stat().st_mode | stat.S_IXUSR)
+    inherited_hooks = tmp_path / ".wattle" / "runtime" / "git-hooks" / "v1"
+    inherited_hooks.mkdir(parents=True)
+    env = {
+        **os.environ,
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "core.hooksPath",
+        "GIT_CONFIG_VALUE_0": str(inherited_hooks),
+        "GIT_CONFIG_PARAMETERS": f"'core.hooksPath={inherited_hooks}'",
+    }
+
+    attribution = apply_git_attribution_env(env, cwd=repo, state_root=tmp_path)
+    result = _make_commit(repo, "test", env=attribution.env)
+
+    assert result.returncode == 0, result.stderr
+    message = _commit_message(repo)
+    assert "Existing-Trailer: yes" in message
+    assert WATTLE_COAUTHOR_TRAILER in message
+
+
+def test_disabled_attribution_strips_inherited_wattle_hook_config(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    inherited_hooks = tmp_path / ".wattle" / "runtime" / "git-hooks" / "v1"
+    inherited_hooks.mkdir(parents=True)
+    env = {
+        **os.environ,
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "core.hooksPath",
+        "GIT_CONFIG_VALUE_0": str(inherited_hooks),
+        "GIT_CONFIG_PARAMETERS": f"'core.hooksPath={inherited_hooks}'",
+    }
+
+    attribution = apply_git_attribution_env(env, cwd=repo, state_root=tmp_path, enabled=False)
+    result = _make_commit(repo, "test", env=attribution.env)
+
+    assert result.returncode == 0, result.stderr
+    assert WATTLE_COAUTHOR_TRAILER not in _commit_message(repo)
+    assert "GIT_CONFIG_COUNT" not in attribution.env
+    assert "GIT_CONFIG_PARAMETERS" not in attribution.env
+
+
 def test_env_injection_preserves_existing_git_config_count(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     _init_repo(repo)
