@@ -334,6 +334,8 @@ def test_prepare_adds_provider_only_observation_checkpoint_after_tool_result() -
     assert "check whether the user's request is actually complete" in checkpoint.text
     assert "what was and was not verified" in checkpoint.text
     assert "inspect the final changed or new files" in checkpoint.text
+    assert "distinguish validation-only artifacts" in checkpoint.text
+    assert "requested final observable state" in checkpoint.text
     assert "Remove artifacts created only for validation or temporary work" in checkpoint.text
     assert "Deliver only files required by the task" in checkpoint.text
     assert messages[-1].content == [
