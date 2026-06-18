@@ -10,8 +10,14 @@ permissions:
 
 jobs:
   build:
-    name: Build macOS binary
-    runs-on: macos-latest
+    name: Build macOS binary (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - macos-latest
+          - macos-13
 
     steps:
       - name: Check out repository
