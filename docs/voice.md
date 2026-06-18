@@ -15,7 +15,7 @@ Before using `/voice`, make sure you have:
 Set the voice dictation key in your shell:
 
 ```bash
-export VOICE_DICTATION_API_KEY="sk-..."
+export WATTLE_VOICE_DICTATION_API_KEY="sk-..."
 ```
 
 Optionally choose a transcription model:
@@ -24,7 +24,7 @@ Optionally choose a transcription model:
 export VOICE_DICTATION_MODEL="gpt-4o-mini-transcribe"
 ```
 
-If `VOICE_DICTATION_API_KEY` is not set, Wattle also checks for an OpenAI API-key credential in `~/.wattle/auth.json` under `openai.api_key`. OAuth credentials are not used for speech-to-text.
+If `WATTLE_VOICE_DICTATION_API_KEY` is not set, Wattle also checks for an OpenAI API-key credential in `~/.wattle/auth.json` under `openai.api_key`. OAuth credentials are not used for speech-to-text.
 
 ## Start Wattle
 
@@ -44,7 +44,7 @@ In the TUI, run:
 /voice
 ```
 
-Wattle will verify that an OpenAI API key is available. If the key is missing, it shows an error explaining how to set `VOICE_DICTATION_API_KEY`.
+Wattle will verify that an OpenAI API key is available. If the key is missing, it shows an error explaining how to set `WATTLE_VOICE_DICTATION_API_KEY`.
 
 You can also be explicit:
 
@@ -103,7 +103,7 @@ The resulting text is inserted at the current cursor position. If needed, Wattle
 Set the voice dictation key before starting Wattle:
 
 ```bash
-export VOICE_DICTATION_API_KEY="sk-..."
+export WATTLE_VOICE_DICTATION_API_KEY="sk-..."
 wattle
 ```
 

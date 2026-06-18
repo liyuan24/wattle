@@ -78,5 +78,5 @@ Available commands:
 - `/resume <session-id>` - switch to a saved session id or JSONL path.
 - `/compact [notes]` - compact the active request projection.
 - `/clear` - reset conversation history.
-- `/voice [on|off]` - toggle voice dictation. When enabled, hold Space in the live input box while talking, then release Space to transcribe speech into the input box. Set `VOICE_DICTATION_API_KEY` to an OpenAI API key; optionally set `VOICE_DICTATION_MODEL` to override the default transcription model.
+- `/voice [on|off]` - toggle voice dictation. When enabled, hold Space in the live input box while talking, then release Space to transcribe speech into the input box. Set `WATTLE_VOICE_DICTATION_API_KEY` to an OpenAI API key; optionally set `VOICE_DICTATION_MODEL` to override the default transcription model.
 - `/exit` or `/quit` - exit the TUI.

@@ -11,7 +11,7 @@ from wattle.auth import AuthCredential
 def test_voice_config_uses_voice_api_key_env() -> None:
     config = voice.resolve_voice_dictation_config(
         {
-            "VOICE_DICTATION_API_KEY": " voice-key ",
+            "WATTLE_VOICE_DICTATION_API_KEY": " voice-key ",
             "VOICE_DICTATION_MODEL": " custom-transcribe ",
         }
     )
@@ -45,5 +45,5 @@ def test_voice_config_rejects_missing_api_key(monkeypatch: pytest.MonkeyPatch) -
 
     monkeypatch.setattr(voice, "get_api_key_credential", fake_get_api_key_credential)
 
-    with pytest.raises(voice.VoiceDictationError, match="VOICE_DICTATION_API_KEY"):
+    with pytest.raises(voice.VoiceDictationError, match="WATTLE_VOICE_DICTATION_API_KEY"):
         voice.resolve_voice_dictation_config({})

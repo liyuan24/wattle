@@ -14,7 +14,7 @@ from pathlib import Path
 
 from wattle.auth import get_api_key_credential
 
-VOICE_DICTATION_API_KEY_ENV = "VOICE_DICTATION_API_KEY"
+VOICE_DICTATION_API_KEY_ENV = "WATTLE_VOICE_DICTATION_API_KEY"
 VOICE_DICTATION_MODEL_ENV = "VOICE_DICTATION_MODEL"
 DEFAULT_VOICE_DICTATION_MODEL = "gpt-4o-mini-transcribe"
 VOICE_SAMPLE_RATE = 16_000
@@ -37,7 +37,7 @@ def resolve_voice_dictation_config(
 ) -> VoiceDictationConfig:
     """Return OpenAI configuration for dictation.
 
-    ``VOICE_DICTATION_API_KEY`` is the primary interface. For local developer
+    ``WATTLE_VOICE_DICTATION_API_KEY`` is the primary interface. For local developer
     convenience, Wattle also accepts an ``openai.api_key`` credential from the
     normal auth store when the voice-specific variable is not set. OAuth tokens
     are intentionally not accepted for OpenAI's platform transcription endpoint.
