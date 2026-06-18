@@ -51,7 +51,11 @@ POST_TOOL_OBSERVATION_CHECKPOINT = (
     "the meaning of the observed inputs.\n\n"
     "Before your next action or final answer, check whether the user's request "
     "is actually complete. If a lightweight verification is useful, run it. "
-    "If not, be clear about what was and was not verified."
+    "If not, be clear about what was and was not verified.\n\n"
+    "Before finalizing, inspect the final changed or new files. Remove artifacts "
+    "created only for validation or temporary work unless the user explicitly "
+    "asked for them. Deliver only files required by the task, then re-check the "
+    "final state."
 )
 
 type RetryableProviderError = IncompleteStreamError | TransientProviderError
