@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.7.0
+
+### Added
+
+- Added `/voice` dictation in the live TUI, using OpenAI speech-to-text to insert microphone transcription into the input box while holding Space.
+- Added voice dictation documentation, including setup, usage, and troubleshooting.
+
+### Changed
+
+- Added `WATTLE_VOICE_DICTATION_API_KEY` as the required API-key environment variable for voice dictation.
+
+### Fixed
+
+- Report missing and non-working voice dictation API keys with clear `WATTLE_VOICE_DICTATION_API_KEY` guidance.
+- Keep the voice dictation reminder inside the live prompt status area instead of leaking repeated rows into scrollback.
+
 ## 0.6.0
 
 ### Added

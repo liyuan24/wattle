@@ -109,6 +109,12 @@ wattle
 
 Do not use an OpenAI OAuth token or a provider credential from `~/.wattle/auth.json` for voice dictation. The OpenAI speech-to-text endpoint requires a platform API key in `WATTLE_VOICE_DICTATION_API_KEY`.
 
+### `/voice` enables, but transcription says the API key is not working
+
+Wattle checks that `WATTLE_VOICE_DICTATION_API_KEY` is set before enabling voice mode. The key is also checked by OpenAI when audio is transcribed. If OpenAI rejects the key, Wattle reports that the voice dictation API key is not working.
+
+Set `WATTLE_VOICE_DICTATION_API_KEY` to a valid OpenAI platform API key, then restart Wattle or run `/voice off` followed by `/voice on`.
+
 ### Recording fails
 
 Voice dictation records on the machine where Wattle is running. If you are connected over SSH, Wattle needs access to a microphone device on the remote machine, not your laptop unless you have forwarded audio devices.

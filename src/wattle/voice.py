@@ -219,6 +219,37 @@ class MicrophoneRecorder:
         self._chunks.clear()
 
 
+def _openai_voice_auth_error_message(exc: BaseException) -> str | None:
+    status_code = getattr(exc, "status_code", None)
+    error_code = getattr(exc, "code", None)
+    text = str(exc).casefold()
+    if status_code in {401, 403} or error_code in {
+        "invalid_api_key",
+        "authentication_error",
+        "permission_denied",
+    }:
+        return (
+            f"OpenAI voice dictation API key is not working. Check "
+            f"{VOICE_DICTATION_API_KEY_ENV} and set it to a valid OpenAI API key."
+        )
+    if any(
+        marker in text
+        for marker in (
+            "invalid api key",
+            "incorrect api key",
+            "authentication",
+            "permission_denied",
+            "401",
+            "403",
+        )
+    ):
+        return (
+            f"OpenAI voice dictation API key is not working. Check "
+            f"{VOICE_DICTATION_API_KEY_ENV} and set it to a valid OpenAI API key."
+        )
+    return None
+
+
 def transcribe_audio_file(
     path: Path,
     *,
@@ -240,6 +271,9 @@ def transcribe_audio_file(
                 file=audio_file,
             )
     except Exception as exc:  # noqa: BLE001
+        auth_message = _openai_voice_auth_error_message(exc)
+        if auth_message is not None:
+            raise VoiceDictationError(auth_message) from exc
         raise VoiceDictationError(f"OpenAI voice transcription failed: {exc}") from exc
 
     text = getattr(transcription, "text", None)
