@@ -24,7 +24,7 @@ Optionally choose a transcription model:
 export VOICE_DICTATION_MODEL="gpt-4o-mini-transcribe"
 ```
 
-If `WATTLE_VOICE_DICTATION_API_KEY` is not set, Wattle also checks for an OpenAI API-key credential in `~/.wattle/auth.json` under `openai.api_key`. OAuth credentials are not used for speech-to-text.
+`WATTLE_VOICE_DICTATION_API_KEY` is required for voice dictation. OAuth credentials and normal chat-provider credentials in `~/.wattle/auth.json` are not used for speech-to-text.
 
 ## Start Wattle
 
@@ -107,19 +107,7 @@ export WATTLE_VOICE_DICTATION_API_KEY="sk-..."
 wattle
 ```
 
-Alternatively, add an OpenAI API-key credential to `~/.wattle/auth.json`:
-
-```json
-{
-  "openai": {
-    "api_key": {
-      "api_key": "sk-..."
-    }
-  }
-}
-```
-
-Do not use an OpenAI OAuth token for voice dictation. The OpenAI speech-to-text endpoint requires a platform API key.
+Do not use an OpenAI OAuth token or a provider credential from `~/.wattle/auth.json` for voice dictation. The OpenAI speech-to-text endpoint requires a platform API key in `WATTLE_VOICE_DICTATION_API_KEY`.
 
 ### Recording fails
 

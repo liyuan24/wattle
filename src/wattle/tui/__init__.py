@@ -6860,24 +6860,6 @@ class _LiveTerminal:
             rows.append(_default_terminal_line("", width))
             rows.append(self._running_status_line(width))
             rows.append(_default_terminal_line("", width))
-        if self._voice_recording:
-            rows.append(
-                _styled_terminal_line(
-                    " Voice · recording; release Space to transcribe",
-                    STATUS_STYLE,
-                    width,
-                )
-            )
-        elif self._voice_transcribing:
-            rows.append(_styled_terminal_line(" Voice · transcribing...", STATUS_STYLE, width))
-        elif self.app._voice_dictation_enabled:
-            rows.append(
-                _styled_terminal_line(
-                    " Voice · hold Space to dictate",
-                    STATUS_STYLE,
-                    width,
-                )
-            )
         if running_background_tasks:
             noun = "task" if running_background_tasks == 1 else "tasks"
             background_text = (
@@ -6993,6 +6975,12 @@ class _LiveTerminal:
                     if self.streaming and preview.strip()
                     else status
                 )
+                if self._voice_recording:
+                    status_text = "Voice · recording; release Space to transcribe"
+                elif self._voice_transcribing:
+                    status_text = "Voice · transcribing..."
+                elif self.app._voice_dictation_enabled:
+                    status_text = "Voice · hold Space to dictate"
                 if running_background_tasks and not preview.strip():
                     status_text = f"{status_text} · /stop stops background tasks"
                 line = f" {status_text}"[:line_width].ljust(line_width)

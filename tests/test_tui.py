@@ -3007,6 +3007,36 @@ def test_live_voice_command_toggles_dictation(monkeypatch: pytest.MonkeyPatch) -
     assert "Voice dictation disabled" in out.getvalue()
 
 
+def test_live_voice_command_requires_voice_env_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    def missing_config() -> object:
+        raise tui.VoiceDictationError(
+            "Set WATTLE_VOICE_DICTATION_API_KEY to a non-empty OpenAI API key."
+        )
+
+    monkeypatch.setattr(tui, "resolve_voice_dictation_config", missing_config)
+    out = _TTYBuffer()
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+
+    app._handle_slash("/voice")
+
+    assert app._voice_dictation_enabled is False
+    assert "WATTLE_VOICE_DICTATION_API_KEY" in out.getvalue()
+
+
+def test_live_voice_idle_hint_uses_existing_statusline_row() -> None:
+    out = _TTYBuffer()
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    live = tui._LiveTerminal(app)
+    normal_frame = live._build_prompt_frame()
+
+    app._voice_dictation_enabled = True
+    voice_frame = live._build_prompt_frame()
+
+    assert len(voice_frame.rows) == len(normal_frame.rows)
+    assert "Voice · hold Space to dictate" in "\n".join(voice_frame.rows)
+    assert " > " in voice_frame.rows[1]
+
+
 def test_live_voice_space_tap_preserves_normal_space() -> None:
     out = _TTYBuffer()
     app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)

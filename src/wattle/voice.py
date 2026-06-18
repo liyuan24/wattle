@@ -12,8 +12,6 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from wattle.auth import get_api_key_credential
-
 VOICE_DICTATION_API_KEY_ENV = "WATTLE_VOICE_DICTATION_API_KEY"
 VOICE_DICTATION_MODEL_ENV = "VOICE_DICTATION_MODEL"
 DEFAULT_VOICE_DICTATION_MODEL = "gpt-4o-mini-transcribe"
@@ -37,22 +35,13 @@ def resolve_voice_dictation_config(
 ) -> VoiceDictationConfig:
     """Return OpenAI configuration for dictation.
 
-    ``WATTLE_VOICE_DICTATION_API_KEY`` is the primary interface. For local developer
-    convenience, Wattle also accepts an ``openai.api_key`` credential from the
-    normal auth store when the voice-specific variable is not set. OAuth tokens
-    are intentionally not accepted for OpenAI's platform transcription endpoint.
+    ``WATTLE_VOICE_DICTATION_API_KEY`` is required. OAuth tokens and normal
+    chat-provider credentials are intentionally not accepted for OpenAI's
+    platform transcription endpoint.
     """
 
     source = env if env is not None else os.environ
     api_key = source.get(VOICE_DICTATION_API_KEY_ENV, "").strip()
-    if not api_key:
-        try:
-            api_key = get_api_key_credential("openai").bearer_token.strip()
-        except Exception as exc:  # noqa: BLE001
-            raise VoiceDictationError(
-                f"Set {VOICE_DICTATION_API_KEY_ENV} to an OpenAI API key "
-                "or add openai.api_key to ~/.wattle/auth.json to use /voice."
-            ) from exc
     if not api_key:
         raise VoiceDictationError(
             f"Set {VOICE_DICTATION_API_KEY_ENV} to a non-empty OpenAI API key."
