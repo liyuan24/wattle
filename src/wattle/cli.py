@@ -370,6 +370,10 @@ def _run_headless(args: argparse.Namespace) -> int:
             )
             session_path = None
     except RuntimeError as exc:
+        if _is_attachment_unavailable_error(exc):
+            sys.stderr.write(f"[error] {exc}\n")
+            sys.stderr.flush()
+            return 1
         if not _is_normalized_provider_error(exc):
             raise
         sys.stderr.write(f"[error] {_headless_provider_error_text(exc)}\n")
@@ -392,6 +396,12 @@ def _normalized_provider_error_types() -> tuple[type[BaseException], ...]:
     from wattle.providers import ProviderError, TransientProviderError
 
     return (ProviderError, TransientProviderError)
+
+
+def _is_attachment_unavailable_error(error: BaseException) -> bool:
+    from wattle.attachments import AttachmentUnavailableError
+
+    return isinstance(error, AttachmentUnavailableError)
 
 
 def _is_normalized_provider_error(error: BaseException) -> bool:

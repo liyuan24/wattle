@@ -55,15 +55,14 @@ exposes enough reasoning content for its own continuation requirements.
 
 from __future__ import annotations
 
-import base64
 import inspect
 import json
 from collections.abc import AsyncIterator, Iterable
-from pathlib import Path
 from typing import Any, Literal, TypedDict
 
 import openai
 
+from wattle.attachments import image_data_url
 from wattle.provider_errors import raise_normalized_provider_error
 from wattle.tools.base import ToolSpec
 
@@ -514,10 +513,9 @@ def _tool_result_to_wire(block: ToolResultBlock) -> dict[str, Any]:
 
 
 def _image_to_wire_part(block: ImageBlock) -> dict[str, Any]:
-    data = base64.b64encode(Path(block.path).read_bytes()).decode("ascii")
     return {
         "type": "image_url",
-        "image_url": {"url": f"data:{block.media_type};base64,{data}"},
+        "image_url": {"url": image_data_url(block)},
     }
 
 

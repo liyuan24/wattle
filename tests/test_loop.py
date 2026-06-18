@@ -13,6 +13,7 @@ from wattle.permissions import PermissionGate, PermissionMode
 from wattle.providers import (
     CompletionRequest,
     CompletionResponse,
+    ImageBlock,
     IncompleteStreamError,
     MalformedToolCallError,
     Message,
@@ -115,6 +116,64 @@ def test_loop_runs_tool_and_terminates() -> None:
     assert messages_out[1].cached_tokens == 4
     assert messages_out[3].input_tokens == 20
     assert messages_out[3].output_tokens == 8
+
+
+def test_loop_omits_stale_tool_attached_image_on_followup_request(tmp_path: Path) -> None:
+    image = tmp_path / "report.png"
+    image.write_bytes(b"image-bytes")
+
+    class DisappearingImageTool:
+        name = "attach_disappearing_image"
+        description = "attach an image that disappears before the next model turn"
+        input_schema = {"type": "object", "properties": {}}
+
+        def spec(self) -> dict:
+            return {
+                "name": self.name,
+                "description": self.description,
+                "input_schema": self.input_schema,
+            }
+
+        def run(self, **_: object) -> ImageBlock:
+            block = ImageBlock(
+                path=str(image),
+                media_type="image/png",
+                filename=image.name,
+                size_bytes=image.stat().st_size,
+            )
+            image.unlink()
+            return block
+
+    tool = DisappearingImageTool()
+    provider = StubProvider(
+        [
+            CompletionResponse(
+                content=[ToolUseBlock(id="call_1", name=tool.name, input={})],
+                stop_reason="tool_use",
+            ),
+            CompletionResponse(content=[TextBlock(text="done")], stop_reason="end_turn"),
+        ]
+    )
+
+    result = run(
+        provider=provider,
+        tools_by_name={tool.name: tool},  # type: ignore[dict-item]
+        system=None,
+        user_input="inspect the image",
+        model="kimi-k2.6",
+    )
+
+    assert result.content == [TextBlock(text="done")]
+    assert len(provider.requests) == 2
+    followup_content = provider.requests[1].messages[2].content
+    assert isinstance(followup_content[0], ToolResultBlock)
+    omitted = followup_content[1]
+    assert isinstance(omitted, TextBlock)
+    assert "image omitted" in omitted.text
+    assert "attached file is no longer available" in omitted.text
+    assert str(image) in omitted.text
+    assert "filename=report.png" in omitted.text
+    assert "media_type=image/png" in omitted.text
 
 
 def test_loop_publishes_tool_use_snapshot_before_tool_execution() -> None:

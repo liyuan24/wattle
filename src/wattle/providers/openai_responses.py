@@ -79,15 +79,14 @@ When `True`, the effort is resolved in this order:
 
 from __future__ import annotations
 
-import base64
 import inspect
 import json
 from collections.abc import AsyncIterator
-from pathlib import Path
 from typing import Any, Literal
 
 import openai
 
+from wattle.attachments import image_data_url
 from wattle.provider_errors import raise_normalized_provider_error
 from wattle.tools.base import ToolSpec
 
@@ -436,8 +435,7 @@ def _block_to_input_item(role: str, block: ContentBlock) -> dict[str, Any] | Non
 
 
 def _image_data_url(block: ImageBlock) -> str:
-    data = base64.b64encode(Path(block.path).read_bytes()).decode("ascii")
-    return f"data:{block.media_type};base64,{data}"
+    return image_data_url(block)
 
 
 # ---------------------------------------------------------------------------

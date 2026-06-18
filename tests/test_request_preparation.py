@@ -69,6 +69,70 @@ def test_project_messages_preserves_images_for_image_capable_model(tmp_path: Pat
     assert project_messages_for_model_modalities(messages, model="kimi-k2.6") is messages
 
 
+def test_project_messages_replaces_unavailable_images_for_image_capable_model(
+    tmp_path: Path,
+) -> None:
+    image = tmp_path / "moved.png"
+    messages = [
+        Message(
+            role="user",
+            content=[
+                TextBlock(text="look at this"),
+                ImageBlock(
+                    path=str(image),
+                    media_type="image/png",
+                    filename=image.name,
+                    size_bytes=12345,
+                ),
+            ],
+        )
+    ]
+
+    projected = project_messages_for_model_modalities(messages, model="kimi-k2.6")
+
+    assert projected is not messages
+    assert projected[0].content[0] == TextBlock(text="look at this")
+    replacement = projected[0].content[1]
+    assert isinstance(replacement, TextBlock)
+    assert "image omitted" in replacement.text
+    assert str(image) in replacement.text
+    assert "filename=moved.png" in replacement.text
+    assert "media_type=image/png" in replacement.text
+    assert "size_bytes=12345" in replacement.text
+    assert messages[0].content[1].type == "image"
+
+
+def test_prepare_omits_unavailable_image_without_mutating_history(tmp_path: Path) -> None:
+    image = tmp_path / "gone.png"
+    messages = [
+        Message(
+            role="user",
+            content=[
+                ImageBlock(
+                    path=str(image),
+                    media_type="image/png",
+                    filename=image.name,
+                    size_bytes=99,
+                )
+            ],
+        )
+    ]
+    preparer = RequestPreparer(
+        provider=StubProvider([CompletionResponse(content=[], stop_reason="end_turn")]),
+        model="kimi-k2.6",
+        system=None,
+        tools=[],
+        max_tokens=1024,
+    )
+
+    prepared = asyncio.run(preparer.aprepare(messages))
+
+    projected_block = prepared.request.messages[0].content[0]
+    assert isinstance(projected_block, TextBlock)
+    assert "attached file is no longer available" in projected_block.text
+    assert messages[0].content[0].type == "image"
+
+
 def test_prepare_context_estimate_uses_projected_text_only_messages(
     tmp_path: Path,
 ) -> None:

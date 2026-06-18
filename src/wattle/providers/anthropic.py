@@ -47,14 +47,13 @@ Anthropic prompt caching is enabled for every request:
 
 from __future__ import annotations
 
-import base64
 import inspect
 from collections.abc import AsyncIterator
-from pathlib import Path
 from typing import Any
 
 import anthropic
 
+from wattle.attachments import image_base64
 from wattle.provider_errors import raise_normalized_provider_error
 
 from .base import (
@@ -237,7 +236,7 @@ def _block_to_api(block: ContentBlock) -> dict[str, Any]:
             "source": {
                 "type": "base64",
                 "media_type": block.media_type,
-                "data": base64.b64encode(Path(block.path).read_bytes()).decode("ascii"),
+                "data": image_base64(block),
             },
         }
     if isinstance(block, ToolUseBlock):

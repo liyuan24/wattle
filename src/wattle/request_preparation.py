@@ -14,6 +14,7 @@ from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from typing import Literal
 
+from wattle.attachments import image_unavailable_reason, unavailable_image_text
 from wattle.compaction import (
     RuntimeCompaction,
     amaybe_compact_messages,
@@ -29,14 +30,15 @@ from wattle.provider_errors import is_context_length_error
 from wattle.providers import (
     CompletionRequest,
     CompletionResponse,
+    ContentBlock,
     ImageBlock,
     IncompleteStreamError,
     Message,
     Provider,
     StreamEvent,
     TextBlock,
-    TransientProviderError,
     ToolResultBlock,
+    TransientProviderError,
 )
 from wattle.providers.base import stream_idle_timeout_seconds_from_env
 from wattle.session import message_to_dict
@@ -251,7 +253,7 @@ def project_messages_for_model_modalities(
     """Return the provider request projection allowed by model input modalities."""
 
     if model_supports_modality(model, "image"):
-        return messages
+        return _replace_unavailable_images_with_text(messages)
     return [_replace_images_with_text(message, model=model) for message in messages]
 
 
@@ -319,8 +321,35 @@ def _latest_provider_context_tokens(messages: list[Message]) -> int | None:
     )
 
 
+def _replace_unavailable_images_with_text(messages: list[Message]) -> list[Message]:
+    projected = [_replace_unavailable_images_in_message(message) for message in messages]
+    return messages if projected == messages else projected
+
+
+def _replace_unavailable_images_in_message(message: Message) -> Message:
+    content: list[ContentBlock] = []
+    changed = False
+    for block in message.content:
+        if isinstance(block, ImageBlock):
+            reason = image_unavailable_reason(block)
+            if reason is not None:
+                content.append(TextBlock(text=unavailable_image_text(block, reason=reason)))
+                changed = True
+                continue
+        content.append(block)
+    if not changed:
+        return message
+    return Message(
+        role=message.role,
+        content=content,
+        input_tokens=message.input_tokens,
+        output_tokens=message.output_tokens,
+        cached_tokens=message.cached_tokens,
+    )
+
+
 def _replace_images_with_text(message: Message, *, model: str) -> Message:
-    content = [
+    content: list[ContentBlock] = [
         (
             TextBlock(text=_unsupported_image_text(block, model=model))
             if isinstance(block, ImageBlock)

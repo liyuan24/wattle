@@ -18,11 +18,12 @@ from unittest.mock import MagicMock
 import anyio
 import pytest
 
+from wattle.attachments import AttachmentUnavailableError
 from wattle.providers import (
     CompletionRequest,
     ImageBlock,
-    Message,
     MalformedToolCallError,
+    Message,
     OpenAICompletionsProvider,
     ProviderQuotaError,
     StreamComplete,
@@ -214,6 +215,38 @@ def test_user_image_block_translates_to_chat_image_part(tmp_path) -> None:
             ],
         }
     ]
+
+
+def test_missing_user_image_raises_attachment_unavailable_error(tmp_path) -> None:
+    image = tmp_path / "missing.png"
+    client = _make_client(_fake_response(content="ok"))
+    provider = OpenAICompletionsProvider(async_client=client)
+
+    with pytest.raises(AttachmentUnavailableError) as exc_info:
+        _complete(
+            provider,
+            CompletionRequest(
+                model="gpt-4o-mini",
+                max_tokens=64,
+                messages=[
+                    Message(
+                        role="user",
+                        content=[
+                            ImageBlock(
+                                path=str(image),
+                                media_type="image/png",
+                                filename="missing.png",
+                                size_bytes=11,
+                            )
+                        ],
+                    )
+                ],
+            ),
+        )
+
+    assert str(image) in str(exc_info.value)
+    assert "filename=missing.png" in str(exc_info.value)
+    client.chat.completions.create.assert_not_called()
 
 
 def test_user_text_blocks_are_separated_when_flattened() -> None:

@@ -12,6 +12,7 @@ from unittest.mock import MagicMock
 import anyio
 import pytest
 
+from wattle.attachments import AttachmentUnavailableError
 from wattle.providers import (
     AnthropicProvider,
     CompletionRequest,
@@ -201,6 +202,35 @@ def test_user_image_block_translates_to_anthropic_image(tmp_path) -> None:
             ],
         }
     ]
+
+
+def test_missing_user_image_raises_attachment_unavailable_error(tmp_path) -> None:
+    image = tmp_path / "missing.png"
+    request = CompletionRequest(
+        model="claude-opus-4-7",
+        max_tokens=512,
+        messages=[
+            Message(
+                role="user",
+                content=[
+                    ImageBlock(
+                        path=str(image),
+                        media_type="image/png",
+                        filename="missing.png",
+                        size_bytes=11,
+                    ),
+                ],
+            )
+        ],
+    )
+    provider, client = _make_provider(_canned_response())
+
+    with pytest.raises(AttachmentUnavailableError) as exc_info:
+        _complete(provider, request)
+
+    assert str(image) in str(exc_info.value)
+    assert "filename=missing.png" in str(exc_info.value)
+    client.messages.create.assert_not_called()
 
 
 def test_system_none_is_omitted_from_kwargs() -> None:
