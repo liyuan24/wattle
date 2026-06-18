@@ -36,6 +36,7 @@ wattle -p "summarize this repository"
 
 - [Quickstart](quickstart.md) - install, authenticate, and run a first useful session.
 - [Using Wattle](usage.md) - TUI, headless mode, slash commands, and model switching.
+- [Voice Dictation](voice.md) - dictate instructions into the live TUI input box with OpenAI speech-to-text.
 - [Providers and Models](providers.md) - built-in providers, auth file shape, and model catalog.
 - [Settings](settings.md) - user defaults in `~/.wattle/settings.json`.
 - [Permissions](permissions.md) - `yolo` tool execution mode.

@@ -33,6 +33,7 @@ nav:
   - Overview: index.md
   - Quickstart: quickstart.md
   - Using Wattle: usage.md
+  - Voice Dictation: voice.md
   - Providers and Models: providers.md
   - Settings: settings.md
   - Permissions: permissions.md

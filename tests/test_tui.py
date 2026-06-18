@@ -2991,6 +2991,91 @@ def test_live_input_hint_enter_executes_selected_command() -> None:
     assert app.messages == []
 
 
+def test_live_voice_command_toggles_dictation(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(tui, "resolve_voice_dictation_config", lambda: object())
+    out = _TTYBuffer()
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+
+    app._handle_slash("/voice")
+
+    assert app._voice_dictation_enabled is True
+    assert "Voice dictation enabled" in out.getvalue()
+
+    app._handle_slash("/voice off")
+
+    assert app._voice_dictation_enabled is False
+    assert "Voice dictation disabled" in out.getvalue()
+
+
+def test_live_voice_space_tap_preserves_normal_space() -> None:
+    out = _TTYBuffer()
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._voice_dictation_enabled = True
+    live = tui._LiveTerminal(app)
+    live.buffer = "hello"
+    live.cursor = len(live.buffer)
+
+    live._handle_voice_space_key()
+    live._finalize_voice_space_before_non_space_key()
+    live._insert_text("world")
+
+    assert live.buffer == "hello world"
+    assert live.cursor == len(live.buffer)
+
+
+def test_live_voice_hold_transcribes_into_input(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    timestamps = iter([0.0, 0.3, 0.6])
+    monkeypatch.setattr(tui.time, "monotonic", lambda: next(timestamps))
+    monkeypatch.setattr(tui, "resolve_voice_dictation_config", lambda: object())
+    audio_path = tmp_path / "voice.wav"
+    audio_path.write_bytes(b"wav")
+
+    class FakeRecorder:
+        def start(self) -> None:
+            pass
+
+        def stop_to_wav(self) -> Path:
+            return audio_path
+
+        def discard(self) -> None:
+            pass
+
+    class ImmediateThread:
+        def __init__(self, *, target: Any, args: tuple[Any, ...], daemon: bool) -> None:
+            self.target = target
+            self.args = args
+            self.daemon = daemon
+
+        def start(self) -> None:
+            self.target(*self.args)
+
+    monkeypatch.setattr(tui, "MicrophoneRecorder", FakeRecorder)
+    monkeypatch.setattr(tui, "transcribe_audio_file", lambda _path: "dictated text")
+    monkeypatch.setattr(tui.threading, "Thread", ImmediateThread)
+    out = _TTYBuffer()
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._voice_dictation_enabled = True
+    live = tui._LiveTerminal(app)
+    live.buffer = "prefix"
+    live.cursor = len(live.buffer)
+
+    live._handle_voice_space_key()
+    live._handle_voice_space_key()
+    assert live._voice_recording is True
+
+    live._update_voice_hold_state()
+    live._drain_events()
+
+    assert live._voice_recording is False
+    assert live._voice_transcribing is False
+    assert live.buffer == "prefix dictated text"
+    assert live.cursor == len(live.buffer)
+    assert not audio_path.exists()
+
+
 def test_live_prompt_shows_model_picker_for_model_command(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

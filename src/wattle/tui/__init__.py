@@ -131,6 +131,12 @@ from wattle.tui import terminal as terminal_rendering
 from wattle.tui_flowers import Flower, flower_for_elapsed
 from wattle.turns import append_turn_step, build_turn_step
 from wattle.version import get_wattle_version
+from wattle.voice import (
+    MicrophoneRecorder,
+    VoiceDictationError,
+    resolve_voice_dictation_config,
+    transcribe_audio_file,
+)
 
 _active_tool_terminal_line = terminal_rendering.active_tool_terminal_line
 _default_terminal_line = terminal_rendering.default_terminal_line
@@ -166,6 +172,7 @@ SLASH_COMMAND_HINTS: tuple[tuple[str, str], ...] = (
     ("/status", "show session and status details"),
     ("/statusline", "choose fields in status line at bottom"),
     ("/stop", "stop all running background tasks"),
+    ("/voice", "toggle voice dictation; hold Space to talk"),
 )
 
 DEFAULT_LOGIN_CALLBACK_TIMEOUT_SECONDS = 300.0
@@ -205,6 +212,9 @@ SUPPORTED_IMAGE_MEDIA_TYPES = frozenset(
     {"image/png", "image/jpeg", "image/webp", "image/gif"}
 )
 ESCAPE_SEQUENCE_TIMEOUT_SECONDS = 0.05
+VOICE_HOLD_START_SECONDS = 0.25
+VOICE_RELEASE_SECONDS = 0.25
+VOICE_CANDIDATE_EXPIRE_SECONDS = 1.0
 KEYBOARD_ENHANCEMENT_ENABLE = "\x1b[>1u\x1b[>4;2m"
 KEYBOARD_ENHANCEMENT_DISABLE = "\x1b[<u\x1b[>4m"
 CTRL_V_KEY_SEQUENCES = (
@@ -2933,6 +2943,7 @@ class WattleApp:
         self._cleared_empty_screen_active = False
         self._clear_screen_notice: str | None = None
         self._research_run_seen: set[CommandSummary] = set()
+        self._voice_dictation_enabled = False
         self._active_agent_id = MAIN_AGENT_ID
         self._active_focus_id = INPUT_FOCUS_ID
         self._subagent_parent_prefixes: dict[str, list[Message]] = {}
@@ -3996,6 +4007,9 @@ class WattleApp:
         if cmd == "/compact":
             self._handle_compact(rest)
             return False
+        if cmd == "/voice":
+            self._handle_voice(rest)
+            return False
         self._write_panel("error", f"Unknown command: {cmd}", ERROR_STYLE)
         return False
 
@@ -4236,6 +4250,29 @@ class WattleApp:
         if command in BUILTIN_SLASH_COMMANDS:
             return None
         return expand_skill_invocation(text, Path.cwd())
+
+    def _handle_voice(self, rest: str) -> None:
+        mode = rest.strip().casefold()
+        if mode not in {"", "on", "off"}:
+            self._write_panel("error", "Usage: /voice [on|off]", ERROR_STYLE)
+            return
+        enable = not self._voice_dictation_enabled if not mode else mode == "on"
+        if enable:
+            try:
+                resolve_voice_dictation_config()
+            except VoiceDictationError as exc:
+                self._write_panel("voice", str(exc), ERROR_STYLE)
+                return
+        self._voice_dictation_enabled = enable
+        if enable:
+            self._write_panel(
+                "voice",
+                "Voice dictation enabled. Hold Space while talking; release Space "
+                "to transcribe into the input box.",
+                STATUS_STYLE,
+            )
+        else:
+            self._write_panel("voice", "Voice dictation disabled.", STATUS_STYLE)
 
     def _handle_statusline(self, rest: str) -> None:
         if rest:
@@ -4506,6 +4543,7 @@ class WattleApp:
         self._write_line("  /resume <session-id> Switch to a saved session.")
         self._write_line("  /session, /status  Show persistence and session status.")
         self._write_line("  /statusline       Choose fields in status line at bottom.")
+        self._write_line("  /voice [on|off]   Toggle voice dictation; hold Space to talk.")
         self._write_line("")
         self._write_line("Settings:")
         self._write_line(f"  provider:      {self._display_provider_name()}")
@@ -4521,6 +4559,9 @@ class WattleApp:
         self._write_line(f"  message count: {len(self.messages)}")
         self._write_line(f"  persistence:   {self._session_persistence_text()}")
         self._write_line(f"  session:       {self._session_path_text()}")
+        self._write_line(
+            f"  voice:         {'on' if self._voice_dictation_enabled else 'off'}"
+        )
 
     def _write_session_status(self) -> None:
         lines = [
@@ -5150,6 +5191,13 @@ class _LiveTerminal:
         self.input_history_index: int | None = None
         self.input_history_draft = ""
         self._last_visible_subagent_ids: tuple[str, ...] = ()
+        self._voice_space_started_at: float | None = None
+        self._voice_space_last_at: float | None = None
+        self._voice_space_count = 0
+        self._voice_space_candidate_index: int | None = None
+        self._voice_recording = False
+        self._voice_transcribing = False
+        self._voice_recorder: MicrophoneRecorder | None = None
 
     def _reset_prompt_state(self) -> None:
         self.prompt_lines = 0
@@ -5181,6 +5229,7 @@ class _LiveTerminal:
             try:
                 while self.running:
                     self._read_available_input()
+                    self._update_voice_hold_state()
                     self._drain_events()
                     should_animate = (
                         self.compacting
@@ -5215,6 +5264,7 @@ class _LiveTerminal:
             except KeyboardInterrupt:
                 self.running = False
         self._clear_prompt()
+        self._discard_voice_recording()
         self._unsubscribe_monitor_events()
         self.app._write_line("Goodbye.")
         return 0
@@ -5253,6 +5303,7 @@ class _LiveTerminal:
         readable, _, _ = select.select([self.fd], [], [], 0.03)
         if not readable:
             self._flush_pending_escape_if_expired()
+            self._flush_voice_space_if_expired()
             return
         data = os.read(self.fd, 4096).decode(errors="ignore")
         if self.pending_escape_sequence is not None:
@@ -5284,28 +5335,38 @@ class _LiveTerminal:
                 continue
             ch = data[index]
             index += 1
-            if ch in ("\r", "\n"):
+            if ch == " " and self._voice_dictation_available():
+                self._handle_voice_space_key()
+                self._draw_prompt()
+            elif ch in ("\r", "\n"):
+                self._finalize_voice_space_before_non_space_key()
                 self._submit_buffer()
             elif ch == "\t":
+                self._finalize_voice_space_before_non_space_key()
                 if self.streaming:
                     self._queue_buffer_for_end_of_turn()
                 elif not self._complete_selected_hint():
                     self._insert_text(ch)
                 self._draw_prompt()
             elif ch == "\x03" or (ch == "\x04" and not self.buffer):
+                self._discard_voice_recording()
                 self.running = False
             elif ch == "\x16":
+                self._finalize_voice_space_before_non_space_key()
                 self._paste_clipboard_image_or_insert_literal(ch)
                 self._draw_prompt()
             elif ch in ("x", "X") and self._statusline_picker_active():
+                self._finalize_voice_space_before_non_space_key()
                 self._toggle_statusline_picker_selection()
                 self._draw_prompt()
             elif ch == "\x15":
+                self._discard_voice_recording()
                 self.buffer = ""
                 self.cursor = 0
                 self.pasted_ranges = []
                 self._draw_prompt()
             elif ch in ("\x7f", "\b"):
+                self._finalize_voice_space_before_non_space_key()
                 if self.cursor > 0:
                     delete_start = self.cursor - 1
                     self.buffer = self.buffer[:delete_start] + self.buffer[self.cursor :]
@@ -5317,6 +5378,7 @@ class _LiveTerminal:
                     self.cursor = delete_start
                 self._draw_prompt()
             elif ch == "\x1b":
+                self._finalize_voice_space_before_non_space_key()
                 candidate = data[index - 1 :]
                 if _is_incomplete_escape_sequence(candidate):
                     self.pending_escape_sequence = candidate
@@ -5409,8 +5471,11 @@ class _LiveTerminal:
                     if index < len(data):
                         index += 1
             elif ch.isprintable():
+                self._finalize_voice_space_before_non_space_key()
                 end = index
                 while end < len(data) and data[end].isprintable():
+                    if data[end] == " " and self._voice_dictation_available():
+                        break
                     end += 1
                 self._insert_text(ch + data[index:end])
                 index = end
@@ -5426,6 +5491,148 @@ class _LiveTerminal:
         self.pending_escape_sequence = None
         if pending == "\x1b" and self.streaming:
             self._interrupt_with_buffer_if_possible()
+
+    def _voice_dictation_available(self) -> bool:
+        return (
+            self.app._voice_dictation_enabled
+            and self.app._active_focus_id == INPUT_FOCUS_ID
+            and not self._model_picker_active()
+            and not self._login_picker_active()
+            and not self._statusline_picker_active()
+        )
+
+    def _handle_voice_space_key(self) -> None:
+        now = time.monotonic()
+        if self._voice_recording or self._voice_transcribing:
+            self._voice_space_last_at = now
+            return
+        if self._voice_space_started_at is None:
+            self._voice_space_started_at = now
+            self._voice_space_count = 0
+            self._voice_space_candidate_index = self.cursor
+            self._insert_text(" ")
+        self._voice_space_last_at = now
+        self._voice_space_count += 1
+        self._update_voice_hold_state()
+
+    def _update_voice_hold_state(self) -> None:
+        if self._voice_recording:
+            last_at = self._voice_space_last_at
+            if last_at is not None and time.monotonic() - last_at >= VOICE_RELEASE_SECONDS:
+                self._finish_voice_recording()
+            return
+        started_at = self._voice_space_started_at
+        last_at = self._voice_space_last_at
+        if started_at is None or last_at is None:
+            return
+        elapsed = last_at - started_at
+        if self._voice_space_count >= 2 and elapsed >= VOICE_HOLD_START_SECONDS:
+            self._start_voice_recording()
+
+    def _flush_voice_space_if_expired(self) -> None:
+        if self._voice_recording or self._voice_transcribing:
+            return
+        started_at = self._voice_space_started_at
+        last_at = self._voice_space_last_at
+        if started_at is None or last_at is None:
+            return
+        if time.monotonic() - last_at < VOICE_CANDIDATE_EXPIRE_SECONDS:
+            return
+        self._reset_voice_space_candidate()
+        self._draw_prompt()
+
+    def _finalize_voice_space_before_non_space_key(self) -> None:
+        if self._voice_recording or self._voice_transcribing:
+            return
+        if self._voice_space_started_at is None:
+            return
+        self._reset_voice_space_candidate()
+
+    def _reset_voice_space_candidate(self) -> None:
+        self._voice_space_started_at = None
+        self._voice_space_last_at = None
+        self._voice_space_count = 0
+        self._voice_space_candidate_index = None
+
+    def _remove_voice_space_candidate(self) -> None:
+        candidate = self._voice_space_candidate_index
+        if candidate is None:
+            return
+        if candidate < len(self.buffer) and self.buffer[candidate] == " ":
+            self.buffer = self.buffer[:candidate] + self.buffer[candidate + 1 :]
+            self.pasted_ranges = _delete_pasted_ranges(
+                self.pasted_ranges,
+                start=candidate,
+                deleted_length=1,
+            )
+            if self.cursor > candidate:
+                self.cursor -= 1
+        self._voice_space_candidate_index = None
+
+    def _start_voice_recording(self) -> None:
+        if self._voice_recording or self._voice_transcribing:
+            return
+        last_space_at = self._voice_space_last_at
+        self._remove_voice_space_candidate()
+        self._reset_voice_space_candidate()
+        self._voice_space_last_at = last_space_at
+        try:
+            resolve_voice_dictation_config()
+            recorder = MicrophoneRecorder()
+            recorder.start()
+        except VoiceDictationError as exc:
+            self.app._write_panel("voice", str(exc), ERROR_STYLE)
+            return
+        self._voice_recorder = recorder
+        self._voice_recording = True
+
+    def _finish_voice_recording(self) -> None:
+        recorder = self._voice_recorder
+        self._voice_recorder = None
+        self._voice_recording = False
+        self._reset_voice_space_candidate()
+        if recorder is None:
+            return
+        try:
+            audio_path = recorder.stop_to_wav()
+        except VoiceDictationError as exc:
+            self.app._write_panel("voice", str(exc), ERROR_STYLE)
+            return
+        self._voice_transcribing = True
+        worker = threading.Thread(
+            target=self._voice_transcription_worker,
+            args=(audio_path,),
+            daemon=True,
+        )
+        worker.start()
+
+    def _voice_transcription_worker(self, audio_path: Path) -> None:
+        try:
+            text = transcribe_audio_file(audio_path)
+            self.events.put((-1, "voice_text", text))
+        except Exception as exc:  # noqa: BLE001
+            self.events.put((-1, "voice_error", exc))
+        finally:
+            audio_path.unlink(missing_ok=True)
+
+    def _discard_voice_recording(self) -> None:
+        self._reset_voice_space_candidate()
+        recorder = self._voice_recorder
+        self._voice_recorder = None
+        self._voice_recording = False
+        if recorder is not None:
+            recorder.discard()
+
+    def _insert_voice_text(self, text: str) -> None:
+        cleaned = text.strip()
+        if not cleaned:
+            return
+        insertion = cleaned
+        if self.cursor > 0 and not self.buffer[self.cursor - 1].isspace():
+            insertion = f" {insertion}"
+        if self.cursor < len(self.buffer) and not self.buffer[self.cursor].isspace():
+            insertion = f"{insertion} "
+        self._insert_text(insertion)
 
     def _insert_text(self, text: str) -> None:
         self.buffer = self.buffer[: self.cursor] + text + self.buffer[self.cursor :]
@@ -6200,9 +6407,15 @@ class _LiveTerminal:
             if kind == "monitor_event":
                 self._queue_monitor_event(cast(dict[str, object], payload))
                 continue
-            if turn_id != self.active_turn_id:
+            if kind == "voice_text":
+                self._voice_transcribing = False
+                self._insert_voice_text(cast(str, payload))
+            elif kind == "voice_error":
+                self._voice_transcribing = False
+                self.app._write_panel("voice", str(payload), ERROR_STYLE)
+            elif turn_id != self.active_turn_id:
                 continue
-            if kind == "stream":
+            elif kind == "stream":
                 self._render_stream_event(payload)
             elif kind == "complete":
                 self._clear_prompt()
@@ -6647,6 +6860,24 @@ class _LiveTerminal:
             rows.append(_default_terminal_line("", width))
             rows.append(self._running_status_line(width))
             rows.append(_default_terminal_line("", width))
+        if self._voice_recording:
+            rows.append(
+                _styled_terminal_line(
+                    " Voice · recording; release Space to transcribe",
+                    STATUS_STYLE,
+                    width,
+                )
+            )
+        elif self._voice_transcribing:
+            rows.append(_styled_terminal_line(" Voice · transcribing...", STATUS_STYLE, width))
+        elif self.app._voice_dictation_enabled:
+            rows.append(
+                _styled_terminal_line(
+                    " Voice · hold Space to dictate",
+                    STATUS_STYLE,
+                    width,
+                )
+            )
         if running_background_tasks:
             noun = "task" if running_background_tasks == 1 else "tasks"
             background_text = (
