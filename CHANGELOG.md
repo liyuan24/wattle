@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.8.0
+
+### Added
+
+- Added Intel macOS binary builds to the release workflow.
+- Added live TUI shell mode for running commands directly from the interactive interface.
+- Added vertical cursor movement in multiline TUI input.
+
+### Changed
+
+- Show full shell-mode command output in the live TUI instead of truncating command results.
+- Added a final artifact hygiene reminder in request preparation.
+- Clarified the final cleanup reminder in request preparation.
+
+### Fixed
+
+- Fixed subagent selector TUI navigation and documented the updated navigation keys.
+- Fixed typed input to an already selected subagent so running subagents reject input instead of silently switching focus.
+
 ## 0.7.0
 
 ### Added
