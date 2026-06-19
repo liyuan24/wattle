@@ -17,6 +17,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, cast
 
+from wattle.goal import GoalState, GoalStatus
 from wattle.providers import (
     ContentBlock,
     ImageBlock,
@@ -29,8 +30,8 @@ from wattle.providers import (
     ToolUseBlock,
 )
 
-SCHEMA_VERSION = 2
-SUPPORTED_SCHEMA_VERSIONS = {1, SCHEMA_VERSION}
+SCHEMA_VERSION = 3
+SUPPORTED_SCHEMA_VERSIONS = {1, 2, SCHEMA_VERSION}
 SESSION_DIR_ENV = "WATTLE_SESSION_DIR"
 
 _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
@@ -95,6 +96,7 @@ class SessionRecord:
     messages: list[Message] = field(default_factory=list)
     compactions: list[SessionCompaction] = field(default_factory=list)
     events: list[SessionEvent] = field(default_factory=list)
+    goal: GoalState | None = None
     schema_version: int = SCHEMA_VERSION
 
 
@@ -271,7 +273,9 @@ def save_session(record: SessionRecord, path: str | Path | None = None) -> Path:
     target = Path(path) if path is not None else default_session_path(record.metadata.id)
     target.parent.mkdir(parents=True, exist_ok=True)
 
-    updated_schema_version = SCHEMA_VERSION if record.events else record.schema_version
+    updated_schema_version = (
+        SCHEMA_VERSION if record.events or record.goal else record.schema_version
+    )
     updated = replace(
         record,
         schema_version=updated_schema_version,
@@ -306,6 +310,8 @@ def session_to_jsonl_lines(record: SessionRecord) -> list[str]:
         "metadata": metadata_to_dict(record.metadata),
         "settings": settings_to_dict(record.settings),
     }
+    if record.goal is not None:
+        header["goal"] = goal_to_dict(record.goal)
     lines = [json.dumps(header, ensure_ascii=False, separators=(",", ":"))]
     compactions_by_message_index: dict[int, list[SessionCompaction]] = {}
     for compaction in record.compactions:
@@ -369,6 +375,7 @@ def session_from_jsonl_lines(lines: list[str]) -> SessionRecord:
         messages=messages,
         compactions=compactions,
         events=events,
+        goal=goal_from_dict(header["goal"]) if isinstance(header.get("goal"), dict) else None,
     )
 
 
@@ -383,6 +390,7 @@ def session_to_dict(record: SessionRecord) -> dict[str, Any]:
             compaction_to_dict(compaction) for compaction in record.compactions
         ],
         "events": [event_to_dict(event) for event in record.events],
+        "goal": goal_to_dict(record.goal) if record.goal is not None else None,
     }
 
 
@@ -410,6 +418,28 @@ def session_from_dict(data: dict[str, Any]) -> SessionRecord:
             for item in cast(list[dict[str, Any]], compactions_data)
         ],
         events=[event_from_dict(item) for item in cast(list[dict[str, Any]], events_data)],
+        goal=goal_from_dict(data["goal"]) if isinstance(data.get("goal"), dict) else None,
+    )
+
+
+def goal_to_dict(goal: GoalState) -> dict[str, Any]:
+    return {
+        "objective": goal.objective,
+        "status": goal.status,
+        "created_at": goal.created_at,
+        "updated_at": goal.updated_at,
+    }
+
+
+def goal_from_dict(data: dict[str, Any]) -> GoalState:
+    status = _require_str(data, "status")
+    if status not in {"active", "paused", "blocked", "complete"}:
+        raise ValueError(f"unsupported goal status: {status!r}")
+    return GoalState(
+        objective=_require_str(data, "objective"),
+        status=cast(GoalStatus, status),
+        created_at=_optional_str(data, "created_at") or _utc_now_iso(),
+        updated_at=_optional_str(data, "updated_at") or _utc_now_iso(),
     )
 
 

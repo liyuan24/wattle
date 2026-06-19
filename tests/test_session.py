@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from wattle import session
+from wattle.goal import GoalState
 from wattle.providers import (
     ImageBlock,
     Message,
@@ -200,6 +201,34 @@ def test_session_record_round_trips_through_jsonl_file(tmp_path: Path) -> None:
         "tokens_after": 300,
         "created_at": "2026-05-08T10:05:00Z",
     }
+
+
+def test_session_goal_round_trips_through_jsonl_file_and_dict(tmp_path: Path) -> None:
+    goal = GoalState(
+        objective="Finish the Wattle-native goal hook",
+        status="active",
+        created_at="2026-05-08T10:01:00Z",
+        updated_at="2026-05-08T10:02:00Z",
+    )
+    record = replace(_sample_record(), schema_version=1, events=[], goal=goal)
+    path = tmp_path / "goal-session.jsonl"
+
+    session.save_session(record, path)
+
+    loaded = session.load_session(path)
+    assert loaded.schema_version == session.SCHEMA_VERSION
+    assert loaded.goal == goal
+    lines = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    assert lines[0]["schema_version"] == session.SCHEMA_VERSION
+    assert lines[0]["goal"] == {
+        "objective": "Finish the Wattle-native goal hook",
+        "status": "active",
+        "created_at": "2026-05-08T10:01:00Z",
+        "updated_at": "2026-05-08T10:02:00Z",
+    }
+
+    data = session.session_to_dict(loaded)
+    assert session.session_from_dict(data).goal == goal
 
 
 def test_runtime_event_round_trips_separately_from_messages() -> None:

@@ -49,6 +49,16 @@ from wattle.command_summary import (
     summarize_tool_call,
 )
 from wattle.compaction import RuntimeCompaction
+from wattle.goal import (
+    GOAL_USAGE,
+    GoalState,
+    GoalTurnStopHook,
+    create_goal,
+    edit_goal,
+    goal_summary,
+    set_goal_status,
+)
+from wattle.hooks import HookContinuation, TurnStopContext, TurnStopHook
 from wattle.loop import dispatch_tool_blocks_async
 from wattle.message_history import (
     active_task_guidance_text_blocks,
@@ -127,6 +137,7 @@ from wattle.tool_events import ToolRunEvent
 from wattle.tools import DEFAULT_RUNTIME, TOOLS_BY_NAME
 from wattle.tools.base import Tool
 from wattle.tools.bash import BashTool
+from wattle.tools.goal import UpdateGoalTool
 from wattle.tools.plan import PlanUpdate, parse_plan_update_input
 from wattle.tui import terminal as terminal_rendering
 from wattle.tui_flowers import Flower, flower_for_elapsed
@@ -163,6 +174,7 @@ SLASH_COMMAND_HINTS: tuple[tuple[str, str], ...] = (
     ("/compact", "compact conversation history now"),
     ("/effort", "choose reasoning effort"),
     ("/exit", "exit the TUI"),
+    ("/goal", "set or view the goal for a long-running task"),
     ("/help", "show commands and settings"),
     ("/login", "authenticate a provider"),
     ("/model", "choose what model to use"),
@@ -196,6 +208,8 @@ def _login_callback_timeout_seconds() -> float:
 
 
 BUILTIN_SLASH_COMMANDS = frozenset(command for command, _description in SLASH_COMMAND_HINTS)
+MAX_GOAL_CONTINUATIONS_PER_TURN = 20
+HIDDEN_TUI_TOOL_NAMES = frozenset({"update_goal"})
 LOGIN_PROVIDER_CHOICES: tuple[tuple[str, str], ...] = (
     ("openai-codex", "ChatGPT Plus/Pro Codex OAuth"),
     (XIAOMI_TOKEN_PLAN_SGP_PROVIDER, "Xiaomi Token Plan SGP API key"),
@@ -831,6 +845,10 @@ def _tool_result_subagent_snapshots(
         for snapshot in snapshots
         if snapshot.get("status") in SUBAGENT_TOOL_RESULT_STATUSES
     ]
+
+
+def _tool_hidden_in_tui(block: ToolUseBlock) -> bool:
+    return block.name in HIDDEN_TUI_TOOL_NAMES
 
 
 def _tool_action_title(block: ToolUseBlock, *, is_error: bool = False) -> str:
@@ -3050,6 +3068,11 @@ class WattleApp:
             getattr(args, "compaction_keep_recent_tokens", 20_000)
         )
         self.messages: list[Message] = []
+        self.goal: GoalState | None = None
+        self._turn_stop_hooks: list[TurnStopHook] = [
+            GoalTurnStopHook(lambda: self.goal)
+        ]
+        self._goal_start_requested = False
         self.runtime = DEFAULT_RUNTIME
         self.tool_specs = [tool.spec() for tool in self._available_tools().values()]
         self.permission_mode = PermissionMode.YOLO
@@ -3098,6 +3121,7 @@ class WattleApp:
             if resume_record is not None:
                 self._session_record = resume_record
                 self._session_path = resume_path or default_session_path(resume_record.metadata.id)
+                self.goal = resume_record.goal
                 self._resume_history_pending = bool(resume_record.messages)
                 self._compaction_state = _runtime_compaction_from_session(resume_record)
             elif self._auth_ready():
@@ -3280,9 +3304,14 @@ class WattleApp:
         )[0].content
 
     def _available_tools(self) -> dict[str, Tool]:
+        tools = dict(TOOLS_BY_NAME)
+        tools[UpdateGoalTool.name] = UpdateGoalTool(
+            get_goal=lambda: self.goal,
+            set_goal=self._set_goal_state,
+        )
         if self._current_model_supports_images():
-            return dict(TOOLS_BY_NAME)
-        return {name: tool for name, tool in TOOLS_BY_NAME.items() if name != "view_image"}
+            return tools
+        return {name: tool for name, tool in tools.items() if name != "view_image"}
 
     def _refresh_model_dependent_context(self) -> None:
         tools_by_name = self._available_tools()
@@ -3387,6 +3416,7 @@ class WattleApp:
             "permission_mode": self.permission_mode,
             "compaction_keep_recent_tokens": self.compaction_keep_recent_tokens,
             "messages": list(self.messages),
+            "goal": self.goal,
             "compaction_state": self._compaction_state,
             "statusline_enabled": self._statusline_enabled,
             "statusline_fields": self._statusline_fields,
@@ -3428,6 +3458,7 @@ class WattleApp:
         )
         self.permission_gate = PermissionGate()
         self.messages = list(cast(list[Message], state.get("messages", self.messages)))
+        self.goal = cast(GoalState | None, state.get("goal", self.goal))
         self._compaction_state = cast(
             RuntimeCompaction | None,
             state.get("compaction_state"),
@@ -3465,7 +3496,7 @@ class WattleApp:
     def _run_turn(self, *, started_at: float | None = None) -> None:
         asyncio.run(self._arun_turn(started_at=started_at))
 
-    async def _arun_turn(self, *, started_at: float | None = None) -> None:
+    async def _arun_turn(self, *, started_at: float | None = None) -> CompletionResponse | None:
         if started_at is None:
             started_at = time.monotonic()
         self._configure_subagents()
@@ -3475,8 +3506,13 @@ class WattleApp:
             self._record_usage(response)
 
             has_tool_uses = any(isinstance(block, ToolUseBlock) for block in response.content)
+            has_visible_tool_uses = any(
+                isinstance(block, ToolUseBlock) and not _tool_hidden_in_tui(block)
+                for block in response.content
+            )
             if has_tool_uses:
-                self._write_separator()
+                if has_visible_tool_uses:
+                    self._write_separator()
                 self._append_assistant_response(response)
                 tool_results = (
                     await self._adispatch_tools(response)
@@ -3486,12 +3522,12 @@ class WattleApp:
                 monitor_events = _non_subagent_events(self.runtime.events.drain())
                 pending_monitor = monitor_event_text_blocks(monitor_events)
                 if self._append_followup_user([*tool_results, *pending_monitor]):
-                    if tool_results:
+                    if has_visible_tool_uses and tool_results:
                         self._write_separator()
                     continue
                 self._write_status_snapshot()
                 self._write_worked_duration(started_at)
-                return
+                return response
 
             monitor_events = _non_subagent_events(self.runtime.events.drain())
             pending_monitor = monitor_event_text_blocks(monitor_events)
@@ -3504,7 +3540,7 @@ class WattleApp:
             if not step.continue_running:
                 self._write_status_snapshot()
                 self._write_worked_duration(started_at)
-                return
+                return response
 
     def _run_turn_recovering(self) -> None:
         asyncio.run(self._arun_turn_recovering())
@@ -3512,10 +3548,34 @@ class WattleApp:
     async def _arun_turn_recovering(self) -> None:
         started_at = time.monotonic()
         try:
-            await self._arun_turn(started_at=started_at)
+            last_response = await self._arun_turn(started_at=started_at)
+            await self._arun_turn_stop_continuations(last_response=last_response)
         except Exception as exc:  # noqa: BLE001
             self._write_turn_error(exc)
             self._write_worked_duration(started_at)
+
+    async def _arun_turn_stop_continuations(
+        self,
+        *,
+        last_response: CompletionResponse | None,
+    ) -> None:
+        for _ in range(MAX_GOAL_CONTINUATIONS_PER_TURN):
+            continuation = self._turn_stop_continuation(
+                has_pending_user_input=False,
+                last_response=last_response,
+            )
+            if continuation is None:
+                return
+            self._append_hook_continuation(continuation)
+            last_response = await self._arun_turn(started_at=time.monotonic())
+        self._write_panel(
+            "goal",
+            "Stopped automatic goal continuation after too many consecutive turns. "
+            "Use /goal resume to continue.",
+            STATUS_STYLE,
+        )
+        if self.goal is not None:
+            self._set_goal_state(set_goal_status(self.goal, "paused").goal)
 
     def _write_turn_error(self, error: BaseException) -> None:
         self._write_panel("error", _turn_error_text(error), ERROR_STYLE)
@@ -3530,6 +3590,56 @@ class WattleApp:
             return False
         self.messages.append(Message(role="user", content=content))
         self._persist_session()
+        return True
+
+    def _append_hook_continuation(self, continuation: HookContinuation) -> None:
+        self.messages.append(Message(role="user", content=list(continuation.content)))
+        self._persist_session()
+
+    def _turn_stop_continuation(
+        self,
+        *,
+        has_pending_user_input: bool,
+        last_response: CompletionResponse | None,
+    ) -> HookContinuation | None:
+        context = TurnStopContext(
+            messages=tuple(self.messages),
+            last_response=last_response,
+            has_pending_user_input=has_pending_user_input,
+        )
+        for hook in self._turn_stop_hooks:
+            continuation = hook.on_turn_stop(context)
+            if continuation is not None:
+                return continuation
+        return None
+
+    def _set_goal_state(self, goal: GoalState) -> None:
+        self.goal = goal
+        self._persist_session()
+
+    def _clear_goal_state(self) -> None:
+        self.goal = None
+        self._goal_start_requested = False
+        self._persist_session()
+
+    def _request_goal_start(self) -> None:
+        self._goal_start_requested = True
+
+    def _take_goal_start_requested(self) -> bool:
+        requested = self._goal_start_requested
+        self._goal_start_requested = False
+        return requested
+
+    def _append_requested_goal_start(self) -> bool:
+        if not self._take_goal_start_requested():
+            return False
+        continuation = self._turn_stop_continuation(
+            has_pending_user_input=False,
+            last_response=None,
+        )
+        if continuation is None:
+            return False
+        self._append_hook_continuation(continuation)
         return True
 
     def _request_preparer(
@@ -3699,6 +3809,9 @@ class WattleApp:
                 runtime_event_callback=self._record_runtime_event,
             )
             result = _first_tool_result(block, blocks)
+            if _tool_hidden_in_tui(block):
+                results.extend(blocks)
+                continue
             edit_item = _edit_render_item(block, result)
             summary = _research_summary_for_success(block, result)
             if edit_item is not None:
@@ -3788,6 +3901,8 @@ class WattleApp:
         block: ToolUseBlock,
         result: ToolResultBlock,
     ) -> None:
+        if _tool_hidden_in_tui(block):
+            return
         self._research_run_seen.clear()
         self._last_transcript_was_separator = False
         if result.is_error:
@@ -4122,6 +4237,9 @@ class WattleApp:
         if cmd == "/help":
             self._print_help()
             return False
+        if cmd == "/goal":
+            self._handle_goal(rest)
+            return False
         if cmd == "/login":
             self._handle_login(rest)
             return False
@@ -4166,7 +4284,67 @@ class WattleApp:
         if cmd == "/compact":
             await self._ahandle_compact(rest)
             return False
-        return self._handle_slash(text)
+        should_exit = self._handle_slash(text)
+        if not should_exit and self._append_requested_goal_start():
+            await self._arun_turn_recovering()
+        return should_exit
+
+    def _handle_goal(self, rest: str) -> None:
+        if not rest:
+            if self.goal is None:
+                self._write_panel("goal", "No goal is currently set.\n" + GOAL_USAGE, STATUS_STYLE)
+                return
+            self._write_panel("goal", goal_summary(self.goal), STATUS_STYLE)
+            return
+
+        command, _, argument = rest.partition(" ")
+        command_lower = command.lower()
+        if command_lower == "clear":
+            if self.goal is None:
+                self._write_panel("goal", "No goal to clear.", STATUS_STYLE)
+                return
+            self._clear_goal_state()
+            self._write_panel("goal", "Goal cleared.", STATUS_STYLE)
+            return
+        if command_lower == "pause":
+            if self.goal is None:
+                self._write_panel("error", "No goal is currently set.\n" + GOAL_USAGE, ERROR_STYLE)
+                return
+            self._set_goal_state(set_goal_status(self.goal, "paused").goal)
+            self._write_panel("goal", "Goal paused.\n" + goal_summary(self.goal), STATUS_STYLE)
+            return
+        if command_lower == "resume":
+            if self.goal is None:
+                self._write_panel("error", "No goal is currently set.\n" + GOAL_USAGE, ERROR_STYLE)
+                return
+            self._set_goal_state(set_goal_status(self.goal, "active").goal)
+            if self._auth_ready():
+                self._request_goal_start()
+            self._write_panel("goal", "Goal active.\n" + goal_summary(self.goal), STATUS_STYLE)
+            return
+        if command_lower == "edit":
+            if self.goal is None:
+                self._write_panel("error", "No goal is currently set.\n" + GOAL_USAGE, ERROR_STYLE)
+                return
+            if not argument.strip():
+                self._write_panel("error", GOAL_USAGE, ERROR_STYLE)
+                return
+            try:
+                self._set_goal_state(edit_goal(self.goal, argument))
+            except ValueError as exc:
+                self._write_panel("error", str(exc), ERROR_STYLE)
+                return
+            self._write_panel("goal", "Goal edited.\n" + goal_summary(self.goal), STATUS_STYLE)
+            return
+
+        try:
+            self._set_goal_state(create_goal(rest))
+        except ValueError as exc:
+            self._write_panel("error", str(exc), ERROR_STYLE)
+            return
+        if self._auth_ready():
+            self._request_goal_start()
+        self._write_panel("goal", "Goal active.\n" + goal_summary(self.goal), STATUS_STYLE)
 
     def _handle_stop_background_tasks(self) -> None:
         stopped, lost = self.runtime.tasks.stop_all_running()
@@ -4679,6 +4857,11 @@ class WattleApp:
         self._write_line("  /effort [level]   Set reasoning effort.")
         self._write_line("  /exit, /quit       Exit Wattle.")
         self._write_line("  /clear             Reset conversation history.")
+        self._write_line("  /goal [objective]  Set/view a long-running goal.")
+        self._write_line("  /goal edit <text>  Edit and resume the active goal.")
+        self._write_line("  /goal pause        Pause automatic goal continuation.")
+        self._write_line("  /goal resume       Resume automatic goal continuation.")
+        self._write_line("  /goal clear        Clear the active goal.")
         self._write_line("  /help              Show this message.")
         self._write_line("  /login            Authenticate a provider.")
         self._write_line("  /model [name]      List or switch models.")
@@ -4881,7 +5064,7 @@ class WattleApp:
                 "Continuing from saved tool result.",
                 STATUS_STYLE,
             )
-            self._run_turn()
+            self._run_turn_recovering()
 
     async def _acontinue_resumed_turn_if_needed(self) -> None:
         if _history_ends_with_tool_results(self.messages):
@@ -4890,7 +5073,7 @@ class WattleApp:
                 "Continuing from saved tool result.",
                 STATUS_STYLE,
             )
-            await self._arun_turn()
+            await self._arun_turn_recovering()
 
     def _write_history_transcript(self) -> None:
         self._write_active_agent_transcript(with_separators=True)
@@ -4997,6 +5180,9 @@ class WattleApp:
 
         for block in tool_uses:
             result = _matching_tool_result(next_message, block.id)
+            if _tool_hidden_in_tui(block):
+                suppressed_ids.add(block.id)
+                continue
             if result is None:
                 flush_semantic_groups()
                 self._write_panel("tool use", _tool_call_summary(block), TOOL_TITLE_STYLE)
@@ -5146,6 +5332,7 @@ class WattleApp:
             messages=list(self.messages),
             compactions=list(self._session_record.compactions),
             events=list(self._session_record.events),
+            goal=self.goal,
         )
         self._session_path = save_session(self._session_record, self._session_path)
 
@@ -5322,6 +5509,7 @@ class _LiveTerminal:
         self._tool_event_queue: queue.Queue[ToolRunEvent] = queue.Queue()
         self.active_turn_cancel_event: threading.Event | None = None
         self.active_turn_id = 0
+        self.goal_continuations_started = 0
         self.model_picker_choices: list[ModelChoice] | None = None
         self.model_picker_selected = 0
         self.login_picker_selected = 0
@@ -6184,6 +6372,8 @@ class _LiveTerminal:
                 self.input_history = _input_history_from_messages(self.app.messages)
                 self.input_history_index = None
                 self.input_history_draft = ""
+            if not self.streaming and self.app._append_requested_goal_start():
+                self._start_worker()
             self._draw_prompt()
             return
         if self.streaming:
@@ -6195,6 +6385,7 @@ class _LiveTerminal:
             self._draw_prompt()
             return
 
+        self.goal_continuations_started = 0
         message_text = expanded_text or text
         try:
             message_content = self.app._user_content_blocks(message_text)
@@ -6453,6 +6644,7 @@ class _LiveTerminal:
         self.active_turn_cancel_event = None
         self.working_started_at = None
         self.turn_started_at = None
+        self.goal_continuations_started = 0
         self.app._write_panel(
             "status",
             "Interrupted current turn; it will be sent again with your next message.",
@@ -6506,6 +6698,7 @@ class _LiveTerminal:
         self.active_turn_id += 1
         self._clear_stream_buffers()
         self._clear_prompt()
+        self.goal_continuations_started = 0
         self.app._write_panel(
             "status",
             "Interrupted current turn; sending queued input now.",
@@ -6805,7 +6998,8 @@ class _LiveTerminal:
             and event.name is not None
         ):
             self.seen_tools.add(event.id)
-            self.stream_tool_names.append(event.name)
+            if event.name not in HIDDEN_TUI_TOOL_NAMES:
+                self.stream_tool_names.append(event.name)
 
     def _finish_response(self, response: CompletionResponse) -> None:
         self._flush_stream_buffer()
@@ -6813,8 +7007,13 @@ class _LiveTerminal:
         self.in_thinking = False
         self.app._record_usage(response)
         has_tool_uses = any(isinstance(block, ToolUseBlock) for block in response.content)
+        has_visible_tool_uses = any(
+            isinstance(block, ToolUseBlock) and not _tool_hidden_in_tui(block)
+            for block in response.content
+        )
         if has_tool_uses:
-            self.app._write_separator()
+            if has_visible_tool_uses:
+                self.app._write_separator()
             self.app._append_assistant_response(response)
         self.inflight_tool_results = []
         tool_results = (
@@ -6875,7 +7074,7 @@ class _LiveTerminal:
             continue_running = step.continue_running
         if continue_running:
             self.inflight_tool_results = []
-            if tool_results:
+            if has_visible_tool_uses and tool_results:
                 self.app._write_separator()
             self._start_worker()
         else:
@@ -6887,6 +7086,40 @@ class _LiveTerminal:
             self.working_started_at = None
             self.app._write_status_snapshot()
             self._remember_worked_duration()
+            if self._append_turn_stop_continuation_if_allowed(response):
+                self._start_worker()
+
+    def _append_turn_stop_continuation_if_allowed(
+        self,
+        response: CompletionResponse,
+    ) -> bool:
+        continuation = self.app._turn_stop_continuation(
+            has_pending_user_input=bool(
+                self.pending_user_inputs
+                or self.turn_followup_user_inputs
+                or self.pending_monitor_inputs
+                or self.interrupted_user_inputs
+            ),
+            last_response=response,
+        )
+        if continuation is None:
+            self.goal_continuations_started = 0
+            return False
+        if continuation.reason == "goal_continuation":
+            if self.goal_continuations_started >= MAX_GOAL_CONTINUATIONS_PER_TURN:
+                if self.app.goal is not None and self.app.goal.status == "active":
+                    self.app._set_goal_state(set_goal_status(self.app.goal, "paused").goal)
+                self.app._write_panel(
+                    "goal",
+                    "Stopped automatic goal continuation after too many consecutive turns. "
+                    "Use /goal resume to continue.",
+                    ERROR_STYLE,
+                )
+                self.goal_continuations_started = 0
+                return False
+            self.goal_continuations_started += 1
+        self.app._append_hook_continuation(continuation)
+        return True
 
     def _remember_worked_duration(self) -> None:
         if self.turn_started_at is None:
@@ -6919,6 +7152,9 @@ class _LiveTerminal:
             blocks = self._dispatch_tool_with_animated_prompt(block)
             result = _first_tool_result(block, blocks)
             self.inflight_tool_results.append(result)
+            if _tool_hidden_in_tui(block):
+                results.extend(blocks)
+                continue
             edit_item = _edit_render_item(block, result)
             summary = _research_summary_for_success(block, result)
             if edit_item is not None:
@@ -6971,6 +7207,8 @@ class _LiveTerminal:
 
         result_box: list[list[ContentBlock]] = []
         cancel_event = self.active_turn_cancel_event
+        if _tool_hidden_in_tui(block):
+            return self._run_tool_without_permission(block, tool, cancel_event)
 
         def run_tool() -> None:
             result_box.append(self._run_tool_without_permission(block, tool, cancel_event))

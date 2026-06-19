@@ -58,6 +58,7 @@ Use slash commands in the TUI:
 /help
 /model
 /effort low|medium|high|xhigh|max|off
+/goal [<objective>|clear|edit <objective>|pause|resume]
 /compact
 /session
 /branch
@@ -73,6 +74,7 @@ Available commands:
 - `/login` - authenticate a provider.
 - `/model [name]` - list or select models.
 - `/effort [level]` - show or set reasoning effort. Use `off` to disable.
+- `/goal [<objective>|clear|edit <objective>|pause|resume]` - set, view, edit, pause, resume, or clear a long-running goal. An active goal continues automatically after assistant turns until the model calls `update_goal` with `complete` or `blocked`, or until you pause or clear it.
 - `/session` or `/status` - show persistence and session status.
 - `/branch` - copy the current conversation into a new session branch.
 - `/resume <session-id>` - switch to a saved session id or JSONL path.

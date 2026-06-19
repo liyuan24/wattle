@@ -22,6 +22,7 @@ import pytest
 
 from wattle import auth, cli, request_preparation, session, settings, tui
 from wattle.command_summary import CommandSummary, CommandSummaryKind
+from wattle.goal import create_goal
 from wattle.models import ModelChoice
 from wattle.providers import (
     CompletionRequest,
@@ -422,6 +423,120 @@ def test_basic_tui_provider_error_returns_to_prompt() -> None:
     assert "[error] Codex error: policy warning" in out
     assert "RuntimeError(" not in out
     assert "Goodbye." in out
+
+
+def test_basic_tui_goal_starts_continuation_and_update_goal_completes() -> None:
+    tool_use_response = CompletionResponse(
+        content=[ToolUseBlock(id="goal_1", name="update_goal", input={"status": "complete"})],
+        stop_reason="tool_use",
+    )
+    final_response = CompletionResponse(
+        content=[TextBlock(text="Goal complete.")],
+        stop_reason="end_turn",
+    )
+    provider = _ScriptedStreamProvider(
+        [
+            [StreamComplete(response=tool_use_response)],
+            [TextDelta(text="Goal complete."), StreamComplete(response=final_response)],
+        ]
+    )
+
+    out, app = _drive(provider, ["/goal Finish the hook", "/exit"])
+
+    assert len(provider.requests) == 2
+    assert "Continue working toward the active Wattle goal." in _message_text(
+        provider.requests[0].messages[0]
+    )
+    assert "Finish the hook" in _message_text(provider.requests[0].messages[0])
+    assert app.goal is not None
+    assert app.goal.status == "complete"
+    assert isinstance(app.messages[1].content[0], ToolUseBlock)
+    assert app.messages[1].content[0].name == "update_goal"
+    assert isinstance(app.messages[2].content[0], ToolResultBlock)
+    assert app.messages[2].content[0].tool_use_id == "goal_1"
+    assert "Goal active." in out
+    assert "Goal complete." in out
+    assert "update_goal" not in out
+    assert "Status: complete" not in out
+
+
+def test_goal_clear_clears_state_and_disables_pending_goal_start() -> None:
+    out = io.StringIO()
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+
+    app._handle_goal("Finish the hook")
+    assert app.goal is not None
+    assert app._goal_start_requested is True
+
+    app._handle_goal("clear")
+
+    assert app.goal is None
+    assert app._append_requested_goal_start() is False
+    assert "Goal cleared." in out.getvalue()
+
+
+def test_update_goal_tool_result_is_hidden_in_history_rendering() -> None:
+    out = io.StringIO()
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    messages = [
+        Message(
+            role="assistant",
+            content=[
+                ToolUseBlock(
+                    id="goal_1",
+                    name="update_goal",
+                    input={"status": "complete"},
+                )
+            ],
+        ),
+        Message(
+            role="user",
+            content=[ToolResultBlock(tool_use_id="goal_1", content="Goal complete.")],
+        ),
+    ]
+
+    app._write_history_messages(messages, with_separators=True)
+
+    assert out.getvalue() == ""
+
+
+def test_live_update_goal_tool_runs_without_visible_status_or_output() -> None:
+    out = io.StringIO()
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app.goal = create_goal("Finish silently")
+    live = tui._LiveTerminal(app)
+    block = ToolUseBlock(id="goal_1", name="update_goal", input={"status": "complete"})
+
+    try:
+        blocks = live._dispatch_tool_with_animated_prompt(block)
+    finally:
+        live._unsubscribe_monitor_events()
+
+    assert app.goal is not None
+    assert app.goal.status == "complete"
+    assert isinstance(blocks[0], ToolResultBlock)
+    assert blocks[0].tool_use_id == "goal_1"
+    assert live.active_tool_status is None
+    assert out.getvalue() == ""
+
+
+def test_live_goal_continuation_cap_pauses_goal() -> None:
+    out = io.StringIO()
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app.goal = create_goal("Never stop")
+    live = tui._LiveTerminal(app)
+    response = CompletionResponse(content=[TextBlock(text="still working")], stop_reason="end_turn")
+
+    try:
+        for _ in range(tui.MAX_GOAL_CONTINUATIONS_PER_TURN):
+            assert live._append_turn_stop_continuation_if_allowed(response) is True
+        assert live._append_turn_stop_continuation_if_allowed(response) is False
+    finally:
+        live._unsubscribe_monitor_events()
+
+    assert app.goal is not None
+    assert app.goal.status == "paused"
+    assert "Stopped automatic goal continuation after too many consecutive turns" in out.getvalue()
 
 
 def test_basic_tui_retries_incomplete_stream_and_reports_reconnect(
