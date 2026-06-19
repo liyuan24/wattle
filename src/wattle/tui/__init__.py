@@ -126,6 +126,7 @@ from wattle.system_prompt import build_system_prompt
 from wattle.tool_events import ToolRunEvent
 from wattle.tools import DEFAULT_RUNTIME, TOOLS_BY_NAME
 from wattle.tools.base import Tool
+from wattle.tools.bash import BashTool
 from wattle.tools.plan import PlanUpdate, parse_plan_update_input
 from wattle.tui import terminal as terminal_rendering
 from wattle.tui_flowers import Flower, flower_for_elapsed
@@ -5896,6 +5897,7 @@ class _LiveTerminal:
     def _input_hints_active(self) -> bool:
         return (
             not self.streaming
+            and not self._shell_mode_active()
             and not self._model_picker_active()
             and not self._login_picker_active()
             and not self._statusline_picker_active()
@@ -6126,6 +6128,9 @@ class _LiveTerminal:
         if use_selected_hint and self._submit_input_hint_selection():
             return
         text = self.buffer.strip()
+        if self._shell_mode_active() and not self._shell_command_text(self.buffer):
+            self._draw_prompt()
+            return
         self._reset_preferred_cursor_column()
         self.buffer = ""
         self.cursor = 0
@@ -6135,6 +6140,8 @@ class _LiveTerminal:
             self._draw_prompt()
             return
         self._record_input_history(text)
+        if self._submit_shell_command_if_needed(text):
+            return
         if self.app._active_agent_id != MAIN_AGENT_ID:
             self._submit_subagent_input(text)
             return
@@ -6202,6 +6209,40 @@ class _LiveTerminal:
         self.app._persist_session()
         self._start_worker()
         self._draw_prompt()
+
+    def _shell_mode_active(self) -> bool:
+        return self.buffer.startswith("!")
+
+    @staticmethod
+    def _shell_command_text(text: str) -> str:
+        if not text.startswith("!"):
+            return ""
+        return text[1:].strip()
+
+    def _submit_shell_command_if_needed(self, text: str) -> bool:
+        if not text.startswith("!"):
+            return False
+        command = self._shell_command_text(text)
+        if not command:
+            self._draw_prompt()
+            return True
+        block = ToolUseBlock(
+            id=f"shell_{self.active_turn_id}_{int(time.monotonic() * 1000)}",
+            name="bash",
+            input={"command": command},
+        )
+        try:
+            output = BashTool(runtime=self.app.runtime).run_execution_result(command=command)
+            result = ToolResultBlock(tool_use_id=block.id, content=str(output.content))
+        except Exception as exc:  # noqa: BLE001 - match tool dispatch behavior in shell mode
+            result = ToolResultBlock(
+                tool_use_id=block.id,
+                content=f"{type(exc).__name__}: {exc}",
+                is_error=True,
+            )
+        self.app._write_bash_exec_result(block, result)
+        self._draw_prompt()
+        return True
 
     def _submit_subagent_input(self, text: str) -> None:
         snapshot = self.app._snapshot_for_subagent(self.app._active_agent_id)
@@ -7025,8 +7066,19 @@ class _LiveTerminal:
         width = self.app._terminal_width()
         line_width = _terminal_line_width(width)
         status = self.app._status_text()
+        prompt_buffer = self.buffer
+        prompt_cursor = self.cursor
+        prompt_pasted_ranges = self.pasted_ranges
+        if self._shell_mode_active():
+            prompt_buffer = self.buffer[1:]
+            prompt_cursor = max(0, self.cursor - 1)
+            prompt_pasted_ranges = [
+                (max(0, start - 1), end - 1)
+                for start, end in self.pasted_ranges
+                if end > 1
+            ]
         rendered_input = _image_placeholder_prompt_render(
-            _render_prompt_input(self.buffer, self.pasted_ranges, self.cursor)
+            _render_prompt_input(prompt_buffer, prompt_pasted_ranges, prompt_cursor)
         )
         preview = rendered_input.text
         cursor = min(len(preview), rendered_input.cursor)
@@ -7111,7 +7163,7 @@ class _LiveTerminal:
                 rows.append(f"{WORKED_DURATION_STYLE}{text}{RESET}")
             else:
                 rows.append(text)
-        prefix = " > "
+        prefix = " ! " if self._shell_mode_active() else " > "
         continuation_prefix = " " * len(prefix)
         first_input_width = max(1, line_width - len(prefix))
         continuation_width = max(1, line_width - len(continuation_prefix))
@@ -7170,13 +7222,15 @@ class _LiveTerminal:
                     styles_enabled=self.app._styles_enabled(),
                 )
                 rows.extend(_filled_terminal_line(row, STATUS_STYLE, width) for row in hint_rows)
-            elif self.app._statusline_enabled:
+            elif self.app._statusline_enabled or self._shell_mode_active():
                 status_text = (
                     "press Enter to queue after next tool call; Tab for next turn"
                     if self.streaming and preview.strip()
                     else status
                 )
-                if self._voice_recording:
+                if self._shell_mode_active():
+                    status_text = "! shell mode"
+                elif self._voice_recording:
                     status_text = "Voice · recording; release Space to transcribe"
                 elif self._voice_transcribing:
                     status_text = "Voice · transcribing..."

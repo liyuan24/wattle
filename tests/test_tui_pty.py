@@ -167,6 +167,45 @@ def _echo_prompt_child_code() -> str:
     )
 
 
+def _shell_mode_child_code() -> str:
+    return textwrap.dedent(
+        """
+        import argparse
+
+        from wattle.permissions import PermissionMode
+        from wattle.providers import CompletionResponse, Provider, TextBlock
+        from wattle.tui import WattleApp
+
+
+        class UnusedProvider(Provider):
+            async def acomplete(self, request):
+                return CompletionResponse(
+                    content=[TextBlock(text="provider should not be called")],
+                    stop_reason="end_turn",
+                    usage={},
+                )
+
+            async def astream(self, request):
+                raise RuntimeError("provider should not be called for shell mode")
+                yield
+
+
+        args = argparse.Namespace(
+            provider="openai_responses",
+            model="gpt-5.5",
+            max_tokens=4096,
+            thinking=False,
+            effort=None,
+            prompt=None,
+            persist_session=False,
+            permission_mode=PermissionMode.YOLO,
+            statusline_fields=("model", "thinking", "cwd"),
+        )
+        raise SystemExit(WattleApp(args, UnusedProvider()).run())
+        """
+    )
+
+
 def _update_prompt_child_code() -> str:
     return textwrap.dedent(
         """
@@ -1397,6 +1436,32 @@ def test_pty_up_arrow_moves_cursor_to_previous_wrapped_input_row(tmp_path: Path)
         session.read_until("hijkl", timeout=3)
         session.write("\x1b[AX\n")
         session.read_until("abcdeXfghijkl", timeout=3)
+        session.write("/exit\n")
+
+
+def test_pty_shell_mode_uses_bang_prompt_status_and_runs_command(tmp_path: Path) -> None:
+    with PtySession.spawn_python(
+        _shell_mode_child_code(),
+        cwd=tmp_path,
+        cols=100,
+        rows=30,
+    ) as session:
+        session.read_until("gpt-5.5 | thinking: off", timeout=3)
+        session.write("!")
+        session.read_until("! shell mode", timeout=3)
+        assert " ! !" not in session.screen.text()
+
+        session.write("\n")
+        session.read_for(0.2)
+        screen_text = session.screen.text()
+        assert "! shell mode" in screen_text
+        assert "Ran" not in screen_text
+        assert "provider should not be called" not in screen_text
+
+        session.write("printf shell-mode\n")
+        session.read_until("Ran printf shell-mode", timeout=4)
+        session.read_until("shell-mode", timeout=4)
+        assert "provider should not be called" not in session.screen.text()
         session.write("/exit\n")
 
 

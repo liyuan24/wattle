@@ -5469,6 +5469,39 @@ def test_terminal_bash_live_events_update_prompt_frame() -> None:
     assert " > " in plain
 
 
+def test_live_shell_mode_prompt_noops_bare_bang_and_runs_without_provider() -> None:
+    out = _TTYBuffer()
+    provider = _ScriptedStreamProvider([])
+    app = tui.WattleApp(_make_args(), provider, out=out)
+    app._force_plain = True
+    live = tui._LiveTerminal(app)
+
+    live.buffer = "!echo shell-mode"
+    live.cursor = len(live.buffer)
+    frame = live._build_prompt_frame()
+    plain_frame = _strip_ansi("\n".join(frame.rows))
+    assert " ! echo shell-mode" in plain_frame
+    assert " ! !echo shell-mode" not in plain_frame
+    assert "! shell mode" in plain_frame
+
+    live.buffer = "!"
+    live.cursor = 1
+    live._submit_buffer()
+    assert live.buffer == "!"
+    assert app.messages == []
+    assert provider.requests == []
+    assert "Ran" not in _strip_ansi(out.getvalue())
+
+    live.buffer = "!printf shell-mode"
+    live.cursor = len(live.buffer)
+    live._submit_buffer()
+    rendered = _strip_ansi(out.getvalue())
+    assert "Ran printf shell-mode" in rendered
+    assert "shell-mode" in rendered
+    assert app.messages == []
+    assert provider.requests == []
+
+
 def test_live_tool_execution_keeps_working_prompt_visible(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
