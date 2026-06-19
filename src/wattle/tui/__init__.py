@@ -513,6 +513,7 @@ def _bash_exec_output_rows(
     *,
     width: int,
     running: bool,
+    compact: bool = True,
 ) -> list[str]:
     content = _bash_preview_content(output).rstrip("\n")
     if not content:
@@ -520,13 +521,18 @@ def _bash_exec_output_rows(
     rows = _plain_terminal_rows(content, width=width)
     if running:
         return rows[-5:]
-    if len(rows) <= 4:
+    if not compact or len(rows) <= 4:
         return rows
     omitted = len(rows) - 4
     return [*rows[:2], f"... +{omitted} lines", *rows[-2:]]
 
 
-def _bash_exec_cell_plain_rows(cell: _BashExecCell, *, width: int) -> list[str]:
+def _bash_exec_cell_plain_rows(
+    cell: _BashExecCell,
+    *,
+    width: int,
+    compact_output: bool = True,
+) -> list[str]:
     status = "Running" if cell.running else "Ran"
     title_prefix = f"{TOOL_MARKER} {status} "
     continuation_prefix = "  │ "
@@ -544,7 +550,12 @@ def _bash_exec_cell_plain_rows(cell: _BashExecCell, *, width: int) -> list[str]:
     rows.extend(f"{continuation_prefix}{line}" for line in command_rows[1:])
     output_width = max(1, line_width - 4)
     for index, line in enumerate(
-        _bash_exec_output_rows(cell.output, width=output_width, running=cell.running)
+        _bash_exec_output_rows(
+            cell.output,
+            width=output_width,
+            running=cell.running,
+            compact=compact_output,
+        )
     ):
         prefix = "  └ " if index == 0 else "    "
         rows.append(f"{prefix}{line}")
@@ -557,8 +568,9 @@ def _bash_exec_cell_prompt_rows(
     width: int,
     styles_enabled: bool,
     frame: int = 0,
+    compact_output: bool = True,
 ) -> list[str]:
-    rows = _bash_exec_cell_plain_rows(cell, width=width)
+    rows = _bash_exec_cell_plain_rows(cell, width=width, compact_output=compact_output)
     if not styles_enabled:
         return [_default_terminal_line(row, width) for row in rows]
     rendered: list[str] = []
@@ -3829,6 +3841,8 @@ class WattleApp:
         self,
         block: ToolUseBlock,
         result: ToolResultBlock,
+        *,
+        compact_output: bool = True,
     ) -> None:
         cell = _BashExecCell(
             tool_use_id=block.id,
@@ -3838,7 +3852,11 @@ class WattleApp:
             is_error=result.is_error,
         )
         width = self._terminal_width()
-        rows = _bash_exec_cell_plain_rows(cell, width=width)
+        rows = _bash_exec_cell_plain_rows(
+            cell,
+            width=width,
+            compact_output=compact_output,
+        )
         if not self._styles_enabled():
             for row in rows:
                 self._write_line(row)
@@ -6232,7 +6250,10 @@ class _LiveTerminal:
             input={"command": command},
         )
         try:
-            output = BashTool(runtime=self.app.runtime).run_execution_result(command=command)
+            output = BashTool(runtime=self.app.runtime).run_execution_result(
+                command=command,
+                max_output_chars=sys.maxsize,
+            )
             result = ToolResultBlock(tool_use_id=block.id, content=str(output.content))
         except Exception as exc:  # noqa: BLE001 - match tool dispatch behavior in shell mode
             result = ToolResultBlock(
@@ -6240,7 +6261,7 @@ class _LiveTerminal:
                 content=f"{type(exc).__name__}: {exc}",
                 is_error=True,
             )
-        self.app._write_bash_exec_result(block, result)
+        self.app._write_bash_exec_result(block, result, compact_output=False)
         self._draw_prompt()
         return True
 

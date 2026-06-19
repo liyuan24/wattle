@@ -9,6 +9,8 @@ import io
 import json
 import os
 import re
+import shlex
+import sys
 import threading
 import time
 from collections import deque
@@ -5500,6 +5502,26 @@ def test_live_shell_mode_prompt_noops_bare_bang_and_runs_without_provider() -> N
     assert "shell-mode" in rendered
     assert app.messages == []
     assert provider.requests == []
+
+    live.buffer = "!seq 1 6"
+    live.cursor = len(live.buffer)
+    live._submit_buffer()
+    rendered = _strip_ansi(out.getvalue())
+    assert "Ran seq 1 6" in rendered
+    for line in range(1, 7):
+        assert f"    {line}" in rendered or f"  └ {line}" in rendered
+    assert "... +" not in rendered
+
+    large_output = "z" * 25_050
+    live.buffer = (
+        f"!{shlex.quote(sys.executable)} -c "
+        f"{shlex.quote('import sys; sys.stdout.write(chr(122) * 25050)')}"
+    )
+    live.cursor = len(live.buffer)
+    live._submit_buffer()
+    rendered = _strip_ansi(out.getvalue())
+    assert "[output truncated:" not in rendered
+    assert rendered.count("z") >= len(large_output)
 
 
 def test_live_tool_execution_keeps_working_prompt_visible(

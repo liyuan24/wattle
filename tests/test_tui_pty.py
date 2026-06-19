@@ -1462,6 +1462,15 @@ def test_pty_shell_mode_uses_bang_prompt_status_and_runs_command(tmp_path: Path)
         session.read_until("Ran printf shell-mode", timeout=4)
         session.read_until("shell-mode", timeout=4)
         assert "provider should not be called" not in session.screen.text()
+
+        session.write("!seq 1 6\n")
+        session.read_until("Ran seq 1 6", timeout=4)
+        session.read_until("    6", timeout=4)
+        screen_text = session.screen.text()
+        assert "  └ 1" in screen_text
+        for line in range(2, 7):
+            assert f"    {line}" in screen_text
+        assert "... +" not in screen_text
         session.write("/exit\n")
 
 
