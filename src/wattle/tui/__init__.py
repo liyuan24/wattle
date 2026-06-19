@@ -768,7 +768,9 @@ def _agent_view_ids(visible_subagents: Sequence[Mapping[str, object]]) -> list[s
 
 
 def _agent_selector_ids(visible_subagents: Sequence[Mapping[str, object]]) -> list[str]:
-    return [INPUT_FOCUS_ID, *_agent_view_ids(visible_subagents)]
+    if not visible_subagents:
+        return [INPUT_FOCUS_ID]
+    return _agent_view_ids(visible_subagents)
 
 
 def _normalize_active_agent_id(
@@ -786,7 +788,7 @@ def _normalize_active_focus_id(
 ) -> str:
     if active_focus_id in _agent_selector_ids(visible_subagents):
         return active_focus_id
-    return INPUT_FOCUS_ID
+    return MAIN_AGENT_ID if visible_subagents else INPUT_FOCUS_ID
 
 
 def _agent_selector_row_texts(
@@ -799,10 +801,7 @@ def _agent_selector_row_texts(
         return []
     normalized_focus = _normalize_active_focus_id(active_focus_id, visible_subagents)
     max_width = max(1, width)
-    rows = [
-        f"{'▸' if normalized_focus == INPUT_FOCUS_ID else '○'} {INPUT_FOCUS_ID}",
-        f"{'▸' if normalized_focus == MAIN_AGENT_ID else '○'} {MAIN_AGENT_ID}",
-    ]
+    rows = [f"{'▸' if normalized_focus == MAIN_AGENT_ID else '○'} {MAIN_AGENT_ID}"]
     for snapshot in visible_subagents:
         subagent_id = str(snapshot.get("subagent_id"))
         marker = "▸" if normalized_focus == subagent_id else "○"
@@ -1702,6 +1701,15 @@ def _optional_percent(value: object) -> int | None:
         return max(0, min(100, int(value)))
     except (TypeError, ValueError):
         return None
+
+
+def _right_align_statusline_hint(line: str, hint: str, width: int) -> str:
+    visible_width = max(1, width)
+    hint = hint[:visible_width]
+    prefix_width = max(0, visible_width - len(hint))
+    prefix = line[:prefix_width].rstrip()
+    gap = " " * max(0, visible_width - len(prefix) - len(hint))
+    return f"{prefix}{gap}{hint}"[:visible_width]
 
 
 def _style_statusline_text(text: str) -> str:
@@ -5636,7 +5644,6 @@ class _LiveTerminal:
     def _voice_dictation_available(self) -> bool:
         return (
             self.app._voice_dictation_enabled
-            and self.app._active_focus_id == INPUT_FOCUS_ID
             and not self._model_picker_active()
             and not self._login_picker_active()
             and not self._statusline_picker_active()
@@ -6052,9 +6059,6 @@ class _LiveTerminal:
             current_index = 0
         next_focus_id = ids[(current_index + delta) % len(ids)]
         self.app._active_focus_id = next_focus_id
-        if next_focus_id != INPUT_FOCUS_ID:
-            self.app._active_agent_id = next_focus_id
-            self._redraw_visible_screen_after_resize()
         return True
 
     def _move_input_history(self, delta: int) -> None:
@@ -6146,6 +6150,9 @@ class _LiveTerminal:
         if use_selected_hint and self._submit_input_hint_selection():
             return
         text = self.buffer.strip()
+        if self._commit_active_agent_selection_if_needed():
+            self._draw_prompt()
+            return
         if self._shell_mode_active() and not self._shell_command_text(self.buffer):
             self._draw_prompt()
             return
@@ -6227,6 +6234,18 @@ class _LiveTerminal:
         self.app._persist_session()
         self._start_worker()
         self._draw_prompt()
+
+    def _commit_active_agent_selection_if_needed(self) -> bool:
+        visible_subagents = self._visible_subagent_snapshots()
+        selected_agent_id = _normalize_active_agent_id(
+            self.app._active_focus_id,
+            visible_subagents,
+        )
+        if selected_agent_id == self.app._active_agent_id:
+            return False
+        self.app._active_agent_id = selected_agent_id
+        self._redraw_visible_screen_after_resize()
+        return True
 
     def _shell_mode_active(self) -> bool:
         return self.buffer.startswith("!")
@@ -6732,7 +6751,6 @@ class _LiveTerminal:
     def _queue_monitor_event(self, event: dict[str, object]) -> None:
         if event.get("event_type") == "subagent":
             active_before = self.app._active_agent_id
-            focus_before = self.app._active_focus_id
             visible_subagents = self._visible_subagent_snapshots()
             view_ids = _agent_view_ids(visible_subagents)
             selector_ids = _agent_selector_ids(visible_subagents)
@@ -6740,7 +6758,7 @@ class _LiveTerminal:
                 self.app._active_agent_id = MAIN_AGENT_ID
             if self.app._active_focus_id not in selector_ids:
                 self.app._active_focus_id = (
-                    INPUT_FOCUS_ID if focus_before == INPUT_FOCUS_ID else MAIN_AGENT_ID
+                    MAIN_AGENT_ID if visible_subagents else INPUT_FOCUS_ID
                 )
             terminal_event = event.get("event") in {"completed", "failed", "closed"} or event.get(
                 "status"
@@ -7260,6 +7278,8 @@ class _LiveTerminal:
                 if running_background_tasks and not preview.strip():
                     status_text = f"{status_text} · /stop stops background tasks"
                 line = f" {status_text}"[:line_width].ljust(line_width)
+                if visible_subagents:
+                    line = _right_align_statusline_hint(line, "↑↓", line_width)
                 statusline = f"{STATUSLINE_STYLE}{_style_statusline_text(line)}{RESET}"
                 rows.append(_filled_terminal_line(statusline, STATUSLINE_STYLE, width))
                 selector_rows = _agent_selector_row_texts(
