@@ -6150,7 +6150,7 @@ class _LiveTerminal:
         if use_selected_hint and self._submit_input_hint_selection():
             return
         text = self.buffer.strip()
-        if self._commit_active_agent_selection_if_needed():
+        if not text and self._commit_active_agent_selection_if_needed():
             self._draw_prompt()
             return
         if self._shell_mode_active() and not self._shell_command_text(self.buffer):
