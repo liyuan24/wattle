@@ -1987,6 +1987,14 @@ class _PromptInputLines:
     lines: list[str]
     cursor_line: int
     cursor_column: int
+    cursor_positions: list[tuple[int, int] | None]
+
+
+@dataclass(frozen=True)
+class _PromptInputMappedRender:
+    text: str
+    cursor: int
+    source_by_cursor: list[int]
 
 
 @dataclass(frozen=True)
@@ -2111,6 +2119,56 @@ def _render_prompt_input(
     return _PromptInputRender(text="".join(display_parts), cursor=display_cursor)
 
 
+def _render_prompt_input_mapped(
+    buffer: str,
+    pasted_ranges: list[tuple[int, int]],
+    cursor: int,
+) -> _PromptInputMappedRender:
+    display_parts: list[str] = []
+    source_by_cursor: list[int] = [0]
+    display_cursor: int | None = None
+    position = 0
+    buffer_length = len(buffer)
+
+    def display_length() -> int:
+        return len("".join(display_parts))
+
+    def append_source_segment(start: int, end: int) -> None:
+        for source_index, ch in enumerate(buffer[start:end], start=start):
+            rendered = _strip_prompt_control(ch)
+            display_parts.append(rendered)
+            for _ in rendered:
+                source_by_cursor.append(source_index + 1)
+
+    def append_placeholder(text: str, source_cursor: int) -> None:
+        display_parts.append(text)
+        for _ in text:
+            source_by_cursor.append(source_cursor)
+
+    for start, end in _merge_pasted_ranges(pasted_ranges):
+        start = max(0, min(start, buffer_length))
+        end = max(start, min(end, buffer_length))
+        if end <= position:
+            continue
+        if cursor <= start and display_cursor is None:
+            display_cursor = display_length() + len(_strip_prompt_control(buffer[position:cursor]))
+        append_source_segment(position, start)
+        placeholder = f"[Pasted Content {end - start} chars]"
+        if start < cursor <= end and display_cursor is None:
+            display_cursor = display_length() + len(placeholder)
+        append_placeholder(placeholder, end)
+        position = end
+
+    if display_cursor is None:
+        display_cursor = display_length() + len(_strip_prompt_control(buffer[position:cursor]))
+    append_source_segment(position, buffer_length)
+    return _PromptInputMappedRender(
+        text="".join(display_parts),
+        cursor=max(0, min(display_cursor, len(source_by_cursor) - 1)),
+        source_by_cursor=source_by_cursor,
+    )
+
+
 def _wrap_prompt_input(
     preview: str,
     cursor: int,
@@ -2142,6 +2200,7 @@ def _wrap_prompt_input(
         lines=lines,
         cursor_line=cursor_position[0],
         cursor_column=cursor_position[1],
+        cursor_positions=positions,
     )
 
 
@@ -2771,6 +2830,62 @@ def _image_placeholder_prompt_render(
         display_cursor = len("".join(chunks)) + (cursor - source_cursor)
     chunks.append(text[source_cursor:])
     return _PromptInputRender(text="".join(chunks), cursor=display_cursor)
+
+
+def _image_placeholder_prompt_mapped_render(
+    render: _PromptInputMappedRender,
+    *,
+    image_index_start: int = 1,
+) -> _PromptInputMappedRender:
+    text = render.text
+    cursor = max(0, min(render.cursor, len(text)))
+    replacements: list[tuple[int, int, str]] = []
+    image_index = image_index_start
+    for reference in _path_references_from_text(text):
+        media_type, _encoding = mimetypes.guess_type(reference.path.name)
+        if media_type not in SUPPORTED_IMAGE_MEDIA_TYPES:
+            continue
+        replacements.append((reference.start, reference.end, f"[image#{image_index}]"))
+        image_index += 1
+    if not replacements:
+        return render
+
+    chunks: list[str] = []
+    source_by_cursor: list[int] = [render.source_by_cursor[0]]
+    display_cursor: int | None = None
+    source_cursor = 0
+
+    def display_length() -> int:
+        return len("".join(chunks))
+
+    def append_segment(start: int, end: int) -> None:
+        chunks.append(text[start:end])
+        source_by_cursor.extend(render.source_by_cursor[start + 1 : end + 1])
+
+    def append_replacement(replacement: str, old_end: int) -> None:
+        chunks.append(replacement)
+        replacement_source = render.source_by_cursor[old_end]
+        for _ in replacement:
+            source_by_cursor.append(replacement_source)
+
+    for start, end, replacement in sorted(replacements):
+        if start < source_cursor:
+            continue
+        if display_cursor is None and cursor <= start:
+            display_cursor = display_length() + (cursor - source_cursor)
+        append_segment(source_cursor, start)
+        if display_cursor is None and start < cursor <= end:
+            display_cursor = display_length() + len(replacement)
+        append_replacement(replacement, end)
+        source_cursor = end
+    if display_cursor is None:
+        display_cursor = display_length() + (cursor - source_cursor)
+    append_segment(source_cursor, len(text))
+    return _PromptInputMappedRender(
+        text="".join(chunks),
+        cursor=max(0, min(display_cursor, len(source_by_cursor) - 1)),
+        source_by_cursor=source_by_cursor,
+    )
 
 
 def _first_text_block_text(
@@ -5142,6 +5257,7 @@ class _LiveTerminal:
         )
         self.buffer = ""
         self.cursor = 0
+        self.preferred_cursor_column: int | None = None
         self.running = True
         self.streaming = False
         self.worker: threading.Thread | None = None
@@ -5361,6 +5477,7 @@ class _LiveTerminal:
                 self._draw_prompt()
             elif ch == "\x15":
                 self._discard_voice_recording()
+                self._reset_preferred_cursor_column()
                 self.buffer = ""
                 self.cursor = 0
                 self.pasted_ranges = []
@@ -5368,6 +5485,7 @@ class _LiveTerminal:
             elif ch in ("\x7f", "\b"):
                 self._finalize_voice_space_before_non_space_key()
                 if self.cursor > 0:
+                    self._reset_preferred_cursor_column()
                     delete_start = self.cursor - 1
                     self.buffer = self.buffer[:delete_start] + self.buffer[self.cursor :]
                     self.pasted_ranges = _delete_pasted_ranges(
@@ -5447,18 +5565,22 @@ class _LiveTerminal:
                     index += 2
                     self._draw_prompt()
                 elif data.startswith("[D", index):
+                    self._reset_preferred_cursor_column()
                     self.cursor = max(0, self.cursor - 1)
                     index += 2
                     self._draw_prompt()
                 elif data.startswith("[C", index):
+                    self._reset_preferred_cursor_column()
                     self.cursor = min(len(self.buffer), self.cursor + 1)
                     index += 2
                     self._draw_prompt()
                 elif data.startswith("[H", index) or data.startswith("[1~", index):
+                    self._reset_preferred_cursor_column()
                     self.cursor = 0
                     index += 2 if data.startswith("[H", index) else 3
                     self._draw_prompt()
                 elif data.startswith("[F", index) or data.startswith("[4~", index):
+                    self._reset_preferred_cursor_column()
                     self.cursor = len(self.buffer)
                     index += 2 if data.startswith("[F", index) else 3
                     self._draw_prompt()
@@ -5559,6 +5681,7 @@ class _LiveTerminal:
         if candidate is None:
             return
         if candidate < len(self.buffer) and self.buffer[candidate] == " ":
+            self._reset_preferred_cursor_column()
             self.buffer = self.buffer[:candidate] + self.buffer[candidate + 1 :]
             self.pasted_ranges = _delete_pasted_ranges(
                 self.pasted_ranges,
@@ -5635,6 +5758,7 @@ class _LiveTerminal:
         self._insert_text(insertion)
 
     def _insert_text(self, text: str) -> None:
+        self._reset_preferred_cursor_column()
         self.buffer = self.buffer[: self.cursor] + text + self.buffer[self.cursor :]
         self.pasted_ranges = _shift_pasted_ranges(
             self.pasted_ranges,
@@ -5668,7 +5792,11 @@ class _LiveTerminal:
             text = f"{text} "
         self._insert_text(text)
 
+    def _reset_preferred_cursor_column(self) -> None:
+        self.preferred_cursor_column = None
+
     def _move_cursor_word_left(self) -> None:
+        self._reset_preferred_cursor_column()
         cursor = self.cursor
         while cursor > 0 and self.buffer[cursor - 1].isspace():
             cursor -= 1
@@ -5677,6 +5805,7 @@ class _LiveTerminal:
         self.cursor = cursor
 
     def _move_cursor_word_right(self) -> None:
+        self._reset_preferred_cursor_column()
         cursor = self.cursor
         length = len(self.buffer)
         while cursor < length and self.buffer[cursor].isspace():
@@ -5810,6 +5939,59 @@ class _LiveTerminal:
         else:
             self._move_input_hint_selection(delta)
 
+    def _move_cursor_visual_line(self, delta: int) -> str:
+        if not self.buffer:
+            return "single"
+        width = self.app._terminal_width()
+        line_width = _terminal_line_width(width)
+        prefix = " > "
+        continuation_prefix = " " * len(prefix)
+        first_input_width = max(1, line_width - len(prefix))
+        continuation_width = max(1, line_width - len(continuation_prefix))
+        rendered_input = _image_placeholder_prompt_mapped_render(
+            _render_prompt_input_mapped(self.buffer, self.pasted_ranges, self.cursor)
+        )
+        wrapped_input = _wrap_prompt_input(
+            rendered_input.text,
+            rendered_input.cursor,
+            first_width=first_input_width,
+            continuation_width=continuation_width,
+        )
+        if len(wrapped_input.lines) <= 1:
+            return "single"
+        target_line = wrapped_input.cursor_line + delta
+        if target_line < 0:
+            self._reset_preferred_cursor_column()
+            return "top"
+        if target_line >= len(wrapped_input.lines):
+            return "bottom"
+
+        preferred_column = self.preferred_cursor_column
+        if preferred_column is None:
+            preferred_column = wrapped_input.cursor_column
+            self.preferred_cursor_column = preferred_column
+
+        candidates = [
+            (column, index)
+            for index, position in enumerate(wrapped_input.cursor_positions)
+            if position is not None
+            for line, column in [position]
+            if line == target_line
+        ]
+        if not candidates:
+            return "bottom" if delta > 0 else "top"
+        target_column, target_display_cursor = min(
+            candidates,
+            key=lambda item: (abs(item[0] - preferred_column), item[0] > preferred_column),
+        )
+        if target_column > preferred_column:
+            lower_or_equal = [item for item in candidates if item[0] <= preferred_column]
+            if lower_or_equal:
+                target_column, target_display_cursor = max(lower_or_equal, key=lambda item: item[0])
+        del target_column
+        self.cursor = rendered_input.source_by_cursor[target_display_cursor]
+        return "moved"
+
     def _move_picker_or_history(self, delta: int) -> None:
         if (
             self._model_picker_active()
@@ -5824,6 +6006,13 @@ class _LiveTerminal:
 
         if self._ensure_input_hints():
             self._move_input_hint_selection(delta)
+            return
+
+        line_move = self._move_cursor_visual_line(delta)
+        if line_move == "moved" or line_move == "bottom":
+            return
+        if line_move == "top":
+            self._move_input_history(delta)
             return
 
         self._move_input_history(delta)
@@ -5870,6 +6059,7 @@ class _LiveTerminal:
         self._replace_input_buffer(self.input_history[next_index])
 
     def _replace_input_buffer(self, text: str) -> None:
+        self._reset_preferred_cursor_column()
         self.buffer = text
         self.cursor = len(text)
         self.pasted_ranges = []
@@ -5889,6 +6079,7 @@ class _LiveTerminal:
             if not choices:
                 return False
             selected = choices[self.model_picker_selected]
+            self._reset_preferred_cursor_column()
             self.buffer = f"/model {selected.model}"
             self.cursor = len(self.buffer)
             self.pasted_ranges = []
@@ -5898,6 +6089,7 @@ class _LiveTerminal:
 
         if self._login_picker_active():
             provider, _description = LOGIN_PROVIDER_CHOICES[self.login_picker_selected]
+            self._reset_preferred_cursor_column()
             self.buffer = f"/login {provider}"
             self.cursor = len(self.buffer)
             self.pasted_ranges = []
@@ -5908,6 +6100,7 @@ class _LiveTerminal:
         if not rows:
             return False
         selected = rows[self.input_hint_selected]
+        self._reset_preferred_cursor_column()
         self.buffer = _apply_hint_to_input(
             self.buffer,
             selected,
@@ -5933,6 +6126,7 @@ class _LiveTerminal:
         if use_selected_hint and self._submit_input_hint_selection():
             return
         text = self.buffer.strip()
+        self._reset_preferred_cursor_column()
         self.buffer = ""
         self.cursor = 0
         self.pasted_ranges = []
@@ -6046,6 +6240,7 @@ class _LiveTerminal:
 
     def _queue_buffer_for_end_of_turn(self) -> None:
         text = self.buffer.strip()
+        self._reset_preferred_cursor_column()
         self.buffer = ""
         self.cursor = 0
         self.pasted_ranges = []
@@ -6066,6 +6261,7 @@ class _LiveTerminal:
         selected = rows[self.input_hint_selected]
         selected_command = _hint_command(selected)
         if selected_command.startswith("@"):
+            self._reset_preferred_cursor_column()
             self.buffer = _apply_hint_to_input(
                 self.buffer,
                 selected,
@@ -6080,6 +6276,7 @@ class _LiveTerminal:
             return True
         text = _apply_hint_to_input(self.buffer, selected)
         if text.strip() in {"/login", "/model", "/statusline"}:
+            self._reset_preferred_cursor_column()
             self.buffer = text.strip()
             self.cursor = len(self.buffer)
             self.pasted_ranges = []
@@ -6088,6 +6285,7 @@ class _LiveTerminal:
             self.input_hint_selected = 0
             self._draw_prompt()
             return True
+        self._reset_preferred_cursor_column()
         self.buffer = text
         self.cursor = len(self.buffer)
         self.pasted_ranges = []
@@ -6100,6 +6298,7 @@ class _LiveTerminal:
     def _submit_model_picker_selection(self) -> None:
         choices = self._ensure_model_picker()
         selected_index = self.model_picker_selected
+        self._reset_preferred_cursor_column()
         self.buffer = ""
         self.cursor = 0
         self.pasted_ranges = []
@@ -6120,6 +6319,7 @@ class _LiveTerminal:
 
     def _submit_login_picker_selection(self) -> None:
         provider, _description = LOGIN_PROVIDER_CHOICES[self.login_picker_selected]
+        self._reset_preferred_cursor_column()
         self.buffer = ""
         self.cursor = 0
         self.pasted_ranges = []
@@ -6130,6 +6330,7 @@ class _LiveTerminal:
 
     def _submit_statusline_picker_selection(self) -> None:
         selected_fields = self._ensure_statusline_picker_fields()
+        self._reset_preferred_cursor_column()
         self.buffer = ""
         self.cursor = 0
         self.pasted_ranges = []

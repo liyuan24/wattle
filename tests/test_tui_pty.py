@@ -114,6 +114,59 @@ def _statusline_picker_child_code(settings_path: Path) -> str:
     )
 
 
+def _echo_prompt_child_code() -> str:
+    return textwrap.dedent(
+        """
+        import argparse
+
+        from wattle.permissions import PermissionMode
+        from wattle.providers import (
+            CompletionResponse,
+            Provider,
+            StreamComplete,
+            TextBlock,
+            TextDelta,
+        )
+        from wattle.tui import WattleApp
+
+
+        class EchoProvider(Provider):
+            async def acomplete(self, request):
+                text = request.messages[-1].content[0].text
+                return CompletionResponse(
+                    content=[TextBlock(text=text)],
+                    stop_reason="end_turn",
+                    usage={},
+                )
+
+            async def astream(self, request):
+                text = request.messages[-1].content[0].text
+                yield TextDelta(text=text)
+                yield StreamComplete(
+                    CompletionResponse(
+                        content=[TextBlock(text=text)],
+                        stop_reason="end_turn",
+                        usage={},
+                    )
+                )
+
+
+        args = argparse.Namespace(
+            provider="openai_responses",
+            model="gpt-5.5",
+            max_tokens=4096,
+            thinking=False,
+            effort=None,
+            prompt=None,
+            persist_session=False,
+            permission_mode=PermissionMode.YOLO,
+            statusline_fields=(),
+        )
+        raise SystemExit(WattleApp(args, EchoProvider()).run())
+        """
+    )
+
+
 def _update_prompt_child_code() -> str:
     return textwrap.dedent(
         """
@@ -1330,6 +1383,21 @@ def test_pty_statusline_picker_toggles_and_persists_fields(tmp_path: Path) -> No
 
     saved = json.loads(settings_path.read_text(encoding="utf-8"))
     assert saved["tui"]["statusline"] == ["thinking", "context_remaining", "cwd"]
+
+
+def test_pty_up_arrow_moves_cursor_to_previous_wrapped_input_row(tmp_path: Path) -> None:
+    with PtySession.spawn_python(
+        _echo_prompt_child_code(),
+        cwd=tmp_path,
+        cols=10,
+        rows=20,
+    ) as session:
+        session.read_until(">", timeout=3)
+        session.write("abcdefghijkl")
+        session.read_until("hijkl", timeout=3)
+        session.write("\x1b[AX\n")
+        session.read_until("abcdeXfghijkl", timeout=3)
+        session.write("/exit\n")
 
 
 def test_pty_queue_command_renders_end_turn_followup_panel(tmp_path: Path) -> None:

@@ -4456,6 +4456,82 @@ def test_live_up_and_down_arrows_navigate_input_history() -> None:
         os.close(write_fd)
 
 
+def test_live_up_and_down_arrows_move_cursor_across_wrapped_input_rows() -> None:
+    out = _TTYBuffer()
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+    app._terminal_width = lambda: 10  # type: ignore[method-assign]
+    live = tui._LiveTerminal(app)
+    live.buffer = "abcdefghijkl"
+    live.cursor = len(live.buffer)
+
+    live._move_picker_or_history(-1)
+
+    assert live.buffer == "abcdefghijkl"
+    assert live.cursor == len("abcde")
+
+    live._move_picker_or_history(1)
+
+    assert live.buffer == "abcdefghijkl"
+    assert live.cursor == len("abcdefghijkl")
+
+
+def test_live_up_and_down_arrows_preserve_column_across_shorter_input_rows() -> None:
+    out = _TTYBuffer()
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+    app._terminal_width = lambda: 80  # type: ignore[method-assign]
+    live = tui._LiveTerminal(app)
+    live.buffer = "abcdef\nxy\n123456"
+    live.cursor = len("abcdef")
+
+    live._move_picker_or_history(1)
+
+    assert live.cursor == len("abcdef\nxy")
+
+    live._move_picker_or_history(1)
+
+    assert live.cursor == len("abcdef\nxy\n123456")
+
+
+def test_live_down_arrow_on_last_input_row_does_not_restore_history_draft() -> None:
+    out = _TTYBuffer()
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+    app._terminal_width = lambda: 10  # type: ignore[method-assign]
+    live = tui._LiveTerminal(app)
+    live.input_history = ["old prompt"]
+    live.input_history_index = 0
+    live.input_history_draft = "draft"
+    live.buffer = "abcdefghijkl"
+    live.cursor = len(live.buffer)
+
+    live._move_picker_or_history(1)
+
+    assert live.buffer == "abcdefghijkl"
+    assert live.cursor == len("abcdefghijkl")
+    assert live.input_history_index == 0
+
+
+def test_live_up_arrow_on_first_input_row_still_navigates_history() -> None:
+    out = _TTYBuffer()
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+    app._terminal_width = lambda: 10  # type: ignore[method-assign]
+    live = tui._LiveTerminal(app)
+    live.input_history = ["old prompt"]
+    live.buffer = "abcdefghijkl"
+    live.cursor = len(live.buffer)
+
+    live._move_picker_or_history(-1)
+    assert live.cursor == len("abcde")
+
+    live._move_picker_or_history(-1)
+
+    assert live.buffer == "old prompt"
+    assert live.cursor == len("old prompt")
+
+
 def test_live_split_arrow_escape_navigates_input_history() -> None:
     out = _TTYBuffer()
     app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
