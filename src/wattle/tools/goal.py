@@ -19,11 +19,6 @@ class UpdateGoalTool(Tool):
                 "Every call must include `evidence`: a concise current-state "
                 "summary explaining why the complete or blocked status is justified."
             ),
-            (
-                "When marking a goal complete, also include `requirements_evidence`, "
-                "`interface_evidence`, `semantic_evidence`, and `remaining_risk`. "
-                "A generic completion claim is not enough."
-            ),
             "Set status to `complete` only when the objective has actually been ",
             "achieved and no required work remains.",
             (
@@ -67,39 +62,6 @@ class UpdateGoalTool(Tool):
                     "and why no meaningful progress is possible."
                 ),
             },
-            "requirements_evidence": {
-                "type": "string",
-                "description": (
-                    "Required when status is complete. Summarize the explicit requirements "
-                    "derived from the objective and how each one was checked against current "
-                    "state."
-                ),
-            },
-            "interface_evidence": {
-                "type": "string",
-                "description": (
-                    "Required when status is complete. Summarize evidence that the exact "
-                    "user- or verifier-facing interface was exercised: paths, CLI flags, "
-                    "input files, output locations, parser/consumer behavior, and literal "
-                    "representation details that affect downstream consumers."
-                ),
-            },
-            "semantic_evidence": {
-                "type": "string",
-                "description": (
-                    "Required when status is complete. Summarize evidence that the result "
-                    "is semantically correct according to authoritative source data, domain "
-                    "rules, measurements, or independent oracle checks. Include relevant "
-                    "alternate interpretations or counterevidence checked."
-                ),
-            },
-            "remaining_risk": {
-                "type": "string",
-                "description": (
-                    "Required when status is complete. State any remaining unverified risk. "
-                    "If material risk remains, do not mark the goal complete."
-                ),
-            },
         },
         "required": ["status", "evidence"],
         "additionalProperties": False,
@@ -124,42 +86,13 @@ class UpdateGoalTool(Tool):
                 "update_goal requires non-empty evidence explaining why the goal is "
                 f"{status}. Keep the goal active and gather stronger evidence if needed."
             )
-        if status == "complete":
-            missing_fields = [
-                field
-                for field in (
-                    "requirements_evidence",
-                    "interface_evidence",
-                    "semantic_evidence",
-                    "remaining_risk",
-                )
-                if not isinstance(kwargs.get(field), str) or not kwargs[field].strip()
-            ]
-            if missing_fields:
-                return (
-                    "update_goal complete requires structured completion evidence: "
-                    + ", ".join(missing_fields)
-                    + ". Keep the goal active and verify the exact requirements, "
-                    "downstream interface, semantic correctness, and remaining risk."
-                )
         goal = self._get_goal()
         if goal is None:
             return "No goal is currently set."
         result = set_goal_status(goal, cast(GoalStatus, status))
         self._set_goal(result.goal)
-        output = (
+        return (
             f"Goal {result.goal.status}.\n"
             f"Evidence: {evidence.strip()}\n"
             f"{goal_summary(result.goal)}"
         )
-        if status == "complete":
-            output = "\n".join(
-                [
-                    output,
-                    f"Requirements evidence: {kwargs['requirements_evidence'].strip()}",
-                    f"Interface evidence: {kwargs['interface_evidence'].strip()}",
-                    f"Semantic evidence: {kwargs['semantic_evidence'].strip()}",
-                    f"Remaining risk: {kwargs['remaining_risk'].strip()}",
-                ]
-            )
-        return output

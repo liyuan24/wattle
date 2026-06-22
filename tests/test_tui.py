@@ -56,10 +56,6 @@ def _complete_goal_input(evidence: str = "All requested checks passed.") -> dict
     return {
         "status": "complete",
         "evidence": evidence,
-        "requirements_evidence": "Explicit requirements were checked against current state.",
-        "interface_evidence": "The exact user-facing interface was exercised.",
-        "semantic_evidence": "The result was compared against an independent oracle.",
-        "remaining_risk": "No material risk remains.",
     }
 
 

@@ -24,9 +24,8 @@ def test_goal_continuation_prompt_includes_objective_without_budget_language() -
     assert "Do not treat file existence" in prompt
     assert "verify the representation" in prompt
     assert "exact types, names, ordering" in prompt
-    assert "\"complete\" and include concise evidence plus the structured fields" in prompt
-    assert "`interface_evidence`" in prompt
-    assert "exact downstream" in prompt
+    assert "\"complete\" and include concise evidence" in prompt
+    assert "include concise evidence explaining the authoritative" in prompt
     assert "call update_goal with status \"blocked\"" in prompt
     assert "Token budget" not in prompt
 
@@ -69,25 +68,13 @@ def test_update_goal_tool_only_marks_existing_goal_complete_or_blocked() -> None
         set_goal=lambda goal: state.__setitem__("goal", goal),
     )
 
-    output = tool.run(
-        status="complete",
-        evidence="Focused tests passed and artifact exists.",
-        requirements_evidence="All requested files and commands were checked.",
-        interface_evidence="Ran the requested CLI with the exact input and output paths.",
-        semantic_evidence="Compared output against an independent oracle from source data.",
-        remaining_risk="No material risk remains.",
-    )
+    output = tool.run(status="complete", evidence="Focused tests passed and artifact exists.")
 
     assert state["goal"].status == "complete"
     assert "Goal complete." in output
     assert "Evidence: Focused tests passed and artifact exists." in output
-    assert "Requirements evidence: All requested files and commands were checked." in output
-    assert "Interface evidence: Ran the requested CLI" in output
-    assert "Semantic evidence: Compared output" in output
-    assert "Remaining risk: No material risk remains." in output
     assert "Objective: Ship it" in output
     assert "Every call must include `evidence`" in tool.description
-    assert "`interface_evidence`" in tool.description
     assert "independent evidence from authoritative sources" in tool.description
     assert "schema shape" in tool.description
     assert "downstream representation contract" in tool.description
@@ -106,20 +93,3 @@ def test_update_goal_tool_rejects_missing_evidence_without_closing_goal() -> Non
 
     assert state["goal"].status == "active"
     assert "requires non-empty evidence" in output
-
-
-def test_update_goal_tool_rejects_complete_without_structured_evidence() -> None:
-    state = {"goal": create_goal("Verify it")}
-    tool = UpdateGoalTool(
-        get_goal=lambda: state["goal"],
-        set_goal=lambda goal: state.__setitem__("goal", goal),
-    )
-
-    output = tool.run(status="complete", evidence="The file exists and parses.")
-
-    assert state["goal"].status == "active"
-    assert "complete requires structured completion evidence" in output
-    assert "requirements_evidence" in output
-    assert "interface_evidence" in output
-    assert "semantic_evidence" in output
-    assert "remaining_risk" in output
