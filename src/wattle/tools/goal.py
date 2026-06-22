@@ -23,6 +23,12 @@ class UpdateGoalTool(Tool):
                 "on file existence, schema shape, finite values, or values matching "
                 "what was already written."
             ),
+            (
+                "When the deliverable is serialized or generated, complete also "
+                "requires evidence that the downstream representation contract is "
+                "satisfied, including exact parsed types and literal details that "
+                "affect consumers."
+            ),
             "Set status to `blocked` only when the same blocking condition has ",
             "repeated for at least three consecutive goal turns and the agent cannot ",
             "make meaningful progress without user input or an external-state change.",

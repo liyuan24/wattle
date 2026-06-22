@@ -38,7 +38,13 @@ VALIDATION_DISCIPLINE_PROMPT = (
     "- When public tests, validation scripts, examples, or specifications are "
     "available, inspect what they actually assert and run them when practical. "
     "If exact hidden tests are unavailable, build the closest faithful check from "
-    "the task contract instead of validating only a simplified proxy."
+    "the task contract instead of validating only a simplified proxy.\n"
+    "- For serialized outputs such as JSON, CSV, YAML, FASTA, SQL, or generated "
+    "scripts, validate the representation contract as a downstream consumer "
+    "would parse it. Confirm exact scalar types, container types, field names, "
+    "ordering, delimiters, quoting, escaping, units, coordinate conventions, and "
+    "other literal details when they can affect correctness; visual similarity "
+    "or a permissive parse is not enough."
 )
 
 DEFAULT_AGENTS_MD_FILENAME = "AGENTS.md"
