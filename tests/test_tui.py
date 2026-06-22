@@ -52,6 +52,17 @@ def _strip_ansi(text: str) -> str:
     return ANSI_RE.sub("", text).replace("\r", "")
 
 
+def _complete_goal_input(evidence: str = "All requested checks passed.") -> dict[str, str]:
+    return {
+        "status": "complete",
+        "evidence": evidence,
+        "requirements_evidence": "Explicit requirements were checked against current state.",
+        "interface_evidence": "The exact user-facing interface was exercised.",
+        "semantic_evidence": "The result was compared against an independent oracle.",
+        "remaining_risk": "No material risk remains.",
+    }
+
+
 class _ScriptedStreamProvider(Provider):
     def __init__(self, scripts: list[list[Any]]) -> None:
         self._scripts: deque[list[Any]] = deque(scripts)
@@ -431,7 +442,7 @@ def test_basic_tui_goal_starts_continuation_and_update_goal_completes() -> None:
             ToolUseBlock(
                 id="goal_1",
                 name="update_goal",
-                input={"status": "complete", "evidence": "All requested checks passed."},
+                input=_complete_goal_input("All requested checks passed."),
             )
         ],
         stop_reason="tool_use",
@@ -473,7 +484,7 @@ def test_tui_goal_continues_with_template_after_incomplete_turn() -> None:
             ToolUseBlock(
                 id="goal_1",
                 name="update_goal",
-                input={"status": "complete", "evidence": "The hook behavior was verified."},
+                input=_complete_goal_input("The hook behavior was verified."),
             )
         ],
         stop_reason="tool_use",
@@ -557,7 +568,7 @@ def test_update_goal_tool_result_is_hidden_in_history_rendering() -> None:
                 ToolUseBlock(
                     id="goal_1",
                     name="update_goal",
-                    input={"status": "complete", "evidence": "Done."},
+                    input=_complete_goal_input("Done."),
                 )
             ],
         ),
@@ -580,7 +591,7 @@ def test_live_update_goal_tool_runs_without_visible_status_or_output() -> None:
     block = ToolUseBlock(
         id="goal_1",
         name="update_goal",
-        input={"status": "complete", "evidence": "Verified."},
+        input=_complete_goal_input("Verified."),
     )
 
     try:
