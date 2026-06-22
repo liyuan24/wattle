@@ -8,6 +8,54 @@ from typing import Any, Literal, cast
 from wattle.goal import GoalState, GoalStatus, goal_summary, set_goal_status
 from wattle.tools.base import Tool
 
+_INCOMPLETE_VALIDATION_PHRASES = (
+    "could not run",
+    "couldn't run",
+    "unable to run",
+    "could not execute",
+    "couldn't execute",
+    "unable to execute",
+    "not possible",
+    "not installed",
+    "not available",
+    "missing dependency",
+    "runtime execution was not possible",
+    "full runtime execution was not possible",
+)
+
+_SURFACE_ONLY_EVIDENCE_PHRASES = (
+    "schema/type",
+    "schema and type",
+    "schema assertions",
+    "type assertions",
+    "syntax validation",
+    "syntax check",
+    "py_compile",
+    "parses as json",
+    "parsed with json.loads",
+    "file exists",
+    "inspected after writing",
+)
+
+_SEMANTIC_EVIDENCE_MARKERS = (
+    "compared",
+    "matches",
+    "matched",
+    "equals",
+    "reconstructs",
+    "consumer",
+    "ran ",
+    "executed ",
+    "source data",
+    "oracle",
+    "ground truth",
+    "expected",
+    "test passed",
+    "tests passed",
+    "oligotm",
+    "cosine",
+)
+
 
 class UpdateGoalTool(Tool):
     name = "update_goal"
@@ -32,6 +80,12 @@ class UpdateGoalTool(Tool):
                 "requires evidence that the downstream representation contract is "
                 "satisfied, including exact parsed types and literal details that "
                 "affect consumers."
+            ),
+            (
+                "Do not mark complete when the evidence admits required validation "
+                "could not run, dependencies were unavailable, or only surface checks "
+                "such as syntax, schema, type, finite-value, or file-existence checks "
+                "were performed."
             ),
             "Set status to `blocked` only when the same blocking condition has ",
             "repeated for at least three consecutive goal turns and the agent cannot ",
@@ -86,6 +140,15 @@ class UpdateGoalTool(Tool):
                 "update_goal requires non-empty evidence explaining why the goal is "
                 f"{status}. Keep the goal active and gather stronger evidence if needed."
             )
+        if status == "complete":
+            problem = _completion_evidence_problem(evidence)
+            if problem is not None:
+                return (
+                    "update_goal complete needs stronger current-state evidence: "
+                    f"{problem} Keep the goal active and validate the result with the "
+                    "actual consumer, source data, domain oracle, or closest faithful "
+                    "runtime check before marking it complete."
+                )
         goal = self._get_goal()
         if goal is None:
             return "No goal is currently set."
@@ -96,3 +159,20 @@ class UpdateGoalTool(Tool):
             f"Evidence: {evidence.strip()}\n"
             f"{goal_summary(result.goal)}"
         )
+
+
+def _completion_evidence_problem(evidence: str) -> str | None:
+    normalized = " ".join(evidence.casefold().split())
+    if any(phrase in normalized for phrase in _INCOMPLETE_VALIDATION_PHRASES):
+        return (
+            "the evidence says required validation could not run or a dependency "
+            "was unavailable."
+        )
+    if any(phrase in normalized for phrase in _SURFACE_ONLY_EVIDENCE_PHRASES) and not any(
+        marker in normalized for marker in _SEMANTIC_EVIDENCE_MARKERS
+    ):
+        return (
+            "the evidence cites only surface validation such as syntax, schema, "
+            "type, parse, or file-existence checks."
+        )
+    return None

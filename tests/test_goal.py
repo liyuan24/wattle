@@ -79,6 +79,7 @@ def test_update_goal_tool_only_marks_existing_goal_complete_or_blocked() -> None
     assert "schema shape" in tool.description
     assert "downstream representation contract" in tool.description
     assert "exact parsed types" in tool.description
+    assert "only surface checks" in tool.description
     assert "either 'complete' or 'blocked'" in tool.run(status="paused")
 
 
@@ -93,3 +94,59 @@ def test_update_goal_tool_rejects_missing_evidence_without_closing_goal() -> Non
 
     assert state["goal"].status == "active"
     assert "requires non-empty evidence" in output
+
+
+def test_update_goal_tool_rejects_complete_when_validation_could_not_run() -> None:
+    state = {"goal": create_goal("Verify it")}
+    tool = UpdateGoalTool(
+        get_goal=lambda: state["goal"],
+        set_goal=lambda goal: state.__setitem__("goal", goal),
+    )
+
+    output = tool.run(
+        status="complete",
+        evidence=(
+            "The script exists and python -m py_compile passed. Full runtime "
+            "execution was not possible because pandas was not installed."
+        ),
+    )
+
+    assert state["goal"].status == "active"
+    assert "required validation could not run" in output
+    assert "Keep the goal active" in output
+
+
+def test_update_goal_tool_rejects_complete_with_only_surface_evidence() -> None:
+    state = {"goal": create_goal("Fit the data")}
+    tool = UpdateGoalTool(
+        get_goal=lambda: state["goal"],
+        set_goal=lambda goal: state.__setitem__("goal", goal),
+    )
+
+    output = tool.run(
+        status="complete",
+        evidence="The output parsed with json.loads and schema/type assertions passed.",
+    )
+
+    assert state["goal"].status == "active"
+    assert "only surface validation" in output
+
+
+def test_update_goal_tool_allows_surface_checks_with_semantic_evidence() -> None:
+    state = {"goal": create_goal("Build and verify it")}
+    tool = UpdateGoalTool(
+        get_goal=lambda: state["goal"],
+        set_goal=lambda goal: state.__setitem__("goal", goal),
+    )
+
+    output = tool.run(
+        status="complete",
+        evidence=(
+            "Ran the delivered CLI on the provided fixture, parsed the JSON with "
+            "json.loads, and compared the values against an independent oracle "
+            "derived from the source data."
+        ),
+    )
+
+    assert state["goal"].status == "complete"
+    assert "Goal complete." in output
