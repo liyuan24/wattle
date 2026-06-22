@@ -3072,7 +3072,7 @@ class WattleApp:
         self._turn_stop_hooks: list[TurnStopHook] = [
             GoalTurnStopHook(lambda: self.goal)
         ]
-        self._goal_start_requested = False
+        self._goal_start_content: tuple[ContentBlock, ...] | None = None
         self.runtime = DEFAULT_RUNTIME
         self.tool_specs = [tool.spec() for tool in self._available_tools().values()]
         self.permission_mode = PermissionMode.YOLO
@@ -3619,27 +3619,23 @@ class WattleApp:
 
     def _clear_goal_state(self) -> None:
         self.goal = None
-        self._goal_start_requested = False
+        self._goal_start_content = None
         self._persist_session()
 
-    def _request_goal_start(self) -> None:
-        self._goal_start_requested = True
+    def _request_goal_start(self, content: Sequence[ContentBlock]) -> None:
+        self._goal_start_content = tuple(content)
 
-    def _take_goal_start_requested(self) -> bool:
-        requested = self._goal_start_requested
-        self._goal_start_requested = False
-        return requested
+    def _take_goal_start_content(self) -> tuple[ContentBlock, ...] | None:
+        content = self._goal_start_content
+        self._goal_start_content = None
+        return content
 
     def _append_requested_goal_start(self) -> bool:
-        if not self._take_goal_start_requested():
+        content = self._take_goal_start_content()
+        if content is None:
             return False
-        continuation = self._turn_stop_continuation(
-            has_pending_user_input=False,
-            last_response=None,
-        )
-        if continuation is None:
-            return False
-        self._append_hook_continuation(continuation)
+        self.messages.append(Message(role="user", content=list(content)))
+        self._persist_session()
         return True
 
     def _request_preparer(
@@ -4319,7 +4315,12 @@ class WattleApp:
                 return
             self._set_goal_state(set_goal_status(self.goal, "active").goal)
             if self._auth_ready():
-                self._request_goal_start()
+                continuation = self._turn_stop_continuation(
+                    has_pending_user_input=False,
+                    last_response=None,
+                )
+                if continuation is not None:
+                    self._request_goal_start(continuation.content)
             self._write_panel("goal", "Goal active.\n" + goal_summary(self.goal), STATUS_STYLE)
             return
         if command_lower == "edit":
@@ -4343,7 +4344,7 @@ class WattleApp:
             self._write_panel("error", str(exc), ERROR_STYLE)
             return
         if self._auth_ready():
-            self._request_goal_start()
+            self._request_goal_start((TextBlock(text=rest),))
         self._write_panel("goal", "Goal active.\n" + goal_summary(self.goal), STATUS_STYLE)
 
     def _handle_stop_background_tasks(self) -> None:

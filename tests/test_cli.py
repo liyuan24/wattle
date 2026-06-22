@@ -640,8 +640,7 @@ def test_headless_goal_prompt_runs_goal_mode(
     assert len(calls) == 1
     call_args, call_kwargs = calls[0]
     assert call_args[:2] == ("anthropic", "claude-sonnet-4-6")
-    assert "Continue working toward the active Wattle goal." in call_args[2]
-    assert "<objective>\nfinish the task\n</objective>" in call_args[2]
+    assert call_args[2] == "finish the task"
     assert call_kwargs["goal"].objective == "finish the task"
     assert call_kwargs["goal"].status == "active"
 

@@ -368,10 +368,10 @@ def _run_headless(args: argparse.Namespace) -> int:
             sys.stderr.write("[error] Usage: /goal <objective>\n")
             sys.stderr.flush()
             return 1
-        from wattle.goal import build_goal_continuation_prompt, create_goal
+        from wattle.goal import create_goal
 
         goal = create_goal(goal_objective)
-        print_prompt = build_goal_continuation_prompt(goal)
+        print_prompt = goal_objective
 
     try:
         if bool(getattr(args, "persist", False)):

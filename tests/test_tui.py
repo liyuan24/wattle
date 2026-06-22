@@ -22,7 +22,7 @@ import pytest
 
 from wattle import auth, cli, request_preparation, session, settings, tui
 from wattle.command_summary import CommandSummary, CommandSummaryKind
-from wattle.goal import create_goal
+from wattle.goal import create_goal, set_goal_status
 from wattle.models import ModelChoice
 from wattle.providers import (
     CompletionRequest,
@@ -444,10 +444,7 @@ def test_basic_tui_goal_starts_continuation_and_update_goal_completes() -> None:
     out, app = _drive(provider, ["/goal Finish the hook", "/exit"])
 
     assert len(provider.requests) == 2
-    assert "Continue working toward the active Wattle goal." in _message_text(
-        provider.requests[0].messages[0]
-    )
-    assert "Finish the hook" in _message_text(provider.requests[0].messages[0])
+    assert _message_text(provider.requests[0].messages[0]) == "Finish the hook"
     assert app.goal is not None
     assert app.goal.status == "complete"
     assert isinstance(app.messages[1].content[0], ToolUseBlock)
@@ -460,19 +457,82 @@ def test_basic_tui_goal_starts_continuation_and_update_goal_completes() -> None:
     assert "Status: complete" not in out
 
 
+def test_tui_goal_continues_with_template_after_incomplete_turn() -> None:
+    first_response = CompletionResponse(
+        content=[TextBlock(text="Need another turn.")],
+        stop_reason="end_turn",
+    )
+    tool_use_response = CompletionResponse(
+        content=[ToolUseBlock(id="goal_1", name="update_goal", input={"status": "complete"})],
+        stop_reason="tool_use",
+    )
+    final_response = CompletionResponse(
+        content=[TextBlock(text="Goal complete.")],
+        stop_reason="end_turn",
+    )
+    provider = _ScriptedStreamProvider(
+        [
+            [TextDelta(text="Need another turn."), StreamComplete(response=first_response)],
+            [StreamComplete(response=tool_use_response)],
+            [TextDelta(text="Goal complete."), StreamComplete(response=final_response)],
+        ]
+    )
+
+    _out, app = _drive(provider, ["/goal Finish the hook", "/exit"])
+
+    assert len(provider.requests) == 3
+    assert _message_text(provider.requests[0].messages[0]) == "Finish the hook"
+    continuation_text = _message_text(provider.requests[1].messages[-1])
+    assert "Continue working toward the active Wattle goal." in continuation_text
+    assert "<objective>\nFinish the hook\n</objective>" in continuation_text
+    assert app.goal is not None
+    assert app.goal.status == "complete"
+
+
 def test_goal_clear_clears_state_and_disables_pending_goal_start() -> None:
     out = io.StringIO()
     app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
 
     app._handle_goal("Finish the hook")
     assert app.goal is not None
-    assert app._goal_start_requested is True
+    assert app._goal_start_content is not None
 
     app._handle_goal("clear")
 
     assert app.goal is None
+    assert app._goal_start_content is None
     assert app._append_requested_goal_start() is False
     assert "Goal cleared." in out.getvalue()
+
+
+def test_goal_resume_requests_continuation_template() -> None:
+    out = io.StringIO()
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app.goal = set_goal_status(create_goal("Finish the hook"), "paused").goal
+
+    app._handle_goal("resume")
+
+    assert app.goal is not None
+    assert app.goal.status == "active"
+    assert app._append_requested_goal_start() is True
+    assert len(app.messages) == 1
+    text = _message_text(app.messages[0])
+    assert "Continue working toward the active Wattle goal." in text
+    assert "<objective>\nFinish the hook\n</objective>" in text
+
+
+def test_new_goal_replaces_previous_goal_and_pending_start() -> None:
+    out = io.StringIO()
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+
+    app._handle_goal("Old objective")
+    app._handle_goal("New objective")
+
+    assert app.goal is not None
+    assert app.goal.objective == "New objective"
+    assert app._append_requested_goal_start() is True
+    assert len(app.messages) == 1
+    assert _message_text(app.messages[0]) == "New objective"
 
 
 def test_update_goal_tool_result_is_hidden_in_history_rendering() -> None:
