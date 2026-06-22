@@ -6,9 +6,18 @@ import json
 import textwrap
 from pathlib import Path
 
+import pytest
+
 from pty_harness import PtySession
 
 from wattle import tui
+
+IMAGE_FIXTURES = (
+    ("png", b"\x89PNG\r\n\x1a\nfake-png"),
+    ("jpeg", b"\xff\xd8\xff\xe0fake-jpeg"),
+    ("gif", b"GIF89afake-gif"),
+    ("webp", b"RIFF\x04\x00\x00\x00WEBPfake-webp"),
+)
 
 
 def _slow_wattle_child_code(
@@ -1727,6 +1736,56 @@ def test_pty_dragged_image_uses_anchor_in_active_input(tmp_path: Path) -> None:
         screen_text = session.screen.text()
         assert "check [image#1]" in screen_text
         assert "dragged\\ image.png" not in screen_text
+        assert str(image) not in screen_text
+
+
+def test_pty_unescaped_dragged_image_uses_anchor_in_active_input(tmp_path: Path) -> None:
+    image = tmp_path / "dragged image.png"
+    image.write_bytes(b"fake-png")
+
+    with PtySession.spawn_python(
+        _slow_wattle_child_code(first_delay=2.0, later_delay=0.1),
+        cwd=tmp_path,
+        cols=60,
+        rows=30,
+    ) as session:
+        session.read_until("press esc to interrupt", timeout=3)
+        session.write(f"check {image}")
+        session.read_until("check [image#1]", timeout=3)
+
+        screen_text = session.screen.text()
+        assert "check [image#1]" in screen_text
+        assert "dragged image.png" not in screen_text
+        assert str(image) not in screen_text
+
+
+@pytest.mark.parametrize(
+    ("image_name", "data"),
+    IMAGE_FIXTURES,
+    ids=[fixture[0] for fixture in IMAGE_FIXTURES],
+)
+def test_pty_extensionless_dragged_screenshot_uses_anchor_in_active_input(
+    tmp_path: Path,
+    image_name: str,
+    data: bytes,
+) -> None:
+    image = tmp_path / "TemporaryItems" / f"NSIRD_screencaptureui_{image_name}" / "Screenshot"
+    image.parent.mkdir(parents=True)
+    image.write_bytes(data)
+
+    with PtySession.spawn_python(
+        _slow_wattle_child_code(first_delay=2.0, later_delay=0.1),
+        cwd=tmp_path,
+        cols=90,
+        rows=30,
+    ) as session:
+        session.read_until("press esc to interrupt", timeout=3)
+        session.write(f"check {image}")
+        session.read_until("check [image#1]", timeout=3)
+
+        screen_text = session.screen.text()
+        assert "check [image#1]" in screen_text
+        assert f"NSIRD_screencaptureui_{image_name}" not in screen_text
         assert str(image) not in screen_text
 
 

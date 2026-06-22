@@ -46,6 +46,16 @@ from wattle.tools.base import Tool
 from wattle.version import get_wattle_version
 
 ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+PNG_BYTES = b"\x89PNG\r\n\x1a\nfake-png"
+JPEG_BYTES = b"\xff\xd8\xff\xe0fake-jpeg"
+GIF_BYTES = b"GIF89afake-gif"
+WEBP_BYTES = b"RIFF\x04\x00\x00\x00WEBPfake-webp"
+IMAGE_FIXTURES = (
+    ("png", "image/png", ".png", PNG_BYTES),
+    ("jpeg", "image/jpeg", ".jpg", JPEG_BYTES),
+    ("gif", "image/gif", ".gif", GIF_BYTES),
+    ("webp", "image/webp", ".webp", WEBP_BYTES),
+)
 
 
 def _strip_ansi(text: str) -> str:
@@ -363,6 +373,25 @@ def _make_args(**overrides: Any) -> argparse.Namespace:
     )
     defaults.update(overrides)
     return argparse.Namespace(**defaults)
+
+
+def _extensionless_screenshot_path(tmp_path: Path) -> Path:
+    image = tmp_path / "TemporaryItems" / "NSIRD_screencaptureui_BRymlQ" / "Screenshot"
+    image.parent.mkdir(parents=True)
+    image.write_bytes(PNG_BYTES)
+    return image
+
+
+def _extensionless_temp_image_path(tmp_path: Path, image_name: str, data: bytes) -> Path:
+    image = (
+        tmp_path
+        / "TemporaryItems"
+        / f"NSIRD_screencaptureui_{image_name}"
+        / "Screenshot"
+    )
+    image.parent.mkdir(parents=True)
+    image.write_bytes(data)
+    return image
 
 
 def _assert_interrupted_retry_content(
@@ -1918,6 +1947,175 @@ def test_absolute_dragged_image_path_is_not_treated_as_slash_command(
         for block in message.content
     )
     assert app.messages[0].content == message.content
+
+
+def test_unescaped_dragged_image_path_with_spaces_uses_anchor(tmp_path: Path) -> None:
+    image = tmp_path / "Screenshot 2026-05-18.png"
+    image.write_bytes(b"fake-png")
+    dragged_path = str(image)
+    response = CompletionResponse(content=[TextBlock(text="ok")], stop_reason="end_turn")
+    provider = _ScriptedStreamProvider([[StreamComplete(response=response)]])
+
+    out, app = _drive(provider, [dragged_path, "/exit"])
+
+    assert str(image) not in out
+    assert len(provider.requests) == 1
+    message = provider.requests[0].messages[0]
+    assert message.role == "user"
+    assert message.content[0] == TextBlock(text="[image#1]")
+    assert any(
+        isinstance(block, ImageBlock) and block.filename == image.name
+        for block in message.content
+    )
+    assert app.messages[0].content == message.content
+
+
+@pytest.mark.parametrize(
+    "format_path",
+    [
+        pytest.param(lambda path: str(path).replace(" ", "\\ "), id="escaped-spaces"),
+        pytest.param(lambda path: str(path), id="unescaped-spaces"),
+        pytest.param(lambda path: shlex.quote(str(path)), id="single-quoted"),
+        pytest.param(lambda path: path.as_uri(), id="file-uri"),
+    ],
+)
+def test_dragged_extensionless_screenshot_path_variants_use_anchor(
+    tmp_path: Path,
+    format_path: Any,
+) -> None:
+    image = tmp_path / "TemporaryItems" / "NSIRD_screencaptureui_BRymlQ" / "Screenshot 1"
+    image.parent.mkdir(parents=True)
+    image.write_bytes(PNG_BYTES)
+    text = f"check {format_path(image)}"
+    out = _TTYBuffer()
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+
+    prompt = tui._image_placeholder_prompt_render(
+        tui._PromptInputRender(text=text, cursor=len(text))
+    )
+    content = app._user_content_blocks(text)
+
+    assert prompt.text == "check [image#1]"
+    assert content[0] == TextBlock(text="check [image#1]")
+    image_blocks = [block for block in content if isinstance(block, ImageBlock)]
+    assert len(image_blocks) == 1
+    assert image_blocks[0].filename == image.name
+    assert image_blocks[0].media_type == "image/png"
+
+
+@pytest.mark.parametrize(
+    ("image_name", "media_type", "extension", "data"),
+    IMAGE_FIXTURES,
+    ids=[fixture[0] for fixture in IMAGE_FIXTURES],
+)
+def test_extensionless_dragged_supported_image_types_use_anchor(
+    tmp_path: Path,
+    image_name: str,
+    media_type: str,
+    extension: str,
+    data: bytes,
+) -> None:
+    del extension
+    image = _extensionless_temp_image_path(tmp_path, image_name, data)
+    out = _TTYBuffer()
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+
+    prompt = tui._image_placeholder_prompt_render(
+        tui._PromptInputRender(text=str(image), cursor=len(str(image)))
+    )
+    content = app._user_content_blocks(str(image))
+
+    assert prompt.text == "[image#1]"
+    assert content[0] == TextBlock(text="[image#1]")
+    image_blocks = [block for block in content if isinstance(block, ImageBlock)]
+    assert len(image_blocks) == 1
+    assert image_blocks[0].filename == "Screenshot"
+    assert image_blocks[0].media_type == media_type
+
+
+@pytest.mark.parametrize(
+    ("image_name", "media_type", "extension", "data"),
+    IMAGE_FIXTURES,
+    ids=[fixture[0] for fixture in IMAGE_FIXTURES],
+)
+def test_dragged_supported_image_extensions_use_anchor_without_sniffing(
+    tmp_path: Path,
+    image_name: str,
+    media_type: str,
+    extension: str,
+    data: bytes,
+) -> None:
+    image = tmp_path / f"dragged {image_name}{extension}"
+    image.write_bytes(data)
+    text = str(image).replace(" ", "\\ ")
+    out = _TTYBuffer()
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+
+    prompt = tui._image_placeholder_prompt_render(
+        tui._PromptInputRender(text=text, cursor=len(text))
+    )
+    content = app._user_content_blocks(text)
+
+    assert prompt.text == "[image#1]"
+    assert content[0] == TextBlock(text="[image#1]")
+    image_blocks = [block for block in content if isinstance(block, ImageBlock)]
+    assert len(image_blocks) == 1
+    assert image_blocks[0].filename == image.name
+    assert image_blocks[0].media_type == media_type
+
+
+def test_extensionless_dragged_screenshot_uses_anchor(tmp_path: Path) -> None:
+    image = _extensionless_screenshot_path(tmp_path)
+    response = CompletionResponse(content=[TextBlock(text="ok")], stop_reason="end_turn")
+    provider = _ScriptedStreamProvider([[StreamComplete(response=response)]])
+
+    out, app = _drive(provider, [str(image), "/exit"])
+
+    assert str(image) not in out
+    assert len(provider.requests) == 1
+    message = provider.requests[0].messages[0]
+    assert message.role == "user"
+    assert message.content[0] == TextBlock(text="[image#1]")
+    image_blocks = [block for block in message.content if isinstance(block, ImageBlock)]
+    assert len(image_blocks) == 1
+    assert image_blocks[0].filename == "Screenshot"
+    assert image_blocks[0].media_type == "image/png"
+    assert app.messages[0].content == message.content
+
+
+@pytest.mark.parametrize(
+    ("image_name", "media_type", "extension", "data"),
+    IMAGE_FIXTURES,
+    ids=[fixture[0] for fixture in IMAGE_FIXTURES],
+)
+def test_persisted_extensionless_screenshot_asset_gets_image_suffix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    image_name: str,
+    media_type: str,
+    extension: str,
+    data: bytes,
+) -> None:
+    image = _extensionless_temp_image_path(tmp_path, image_name, data)
+    monkeypatch.setenv(session.SESSION_DIR_ENV, str(tmp_path / "sessions"))
+    out = _TTYBuffer()
+    app = tui.WattleApp(
+        _make_args(persist_session=True),
+        _ScriptedStreamProvider([]),
+        out=out,
+    )
+
+    assert app._submit_user_text(str(image), render=True)
+
+    message = app.messages[-1]
+    image_blocks = [block for block in message.content if isinstance(block, ImageBlock)]
+    assert len(image_blocks) == 1
+    stored_path = Path(image_blocks[0].path)
+    assert stored_path.exists()
+    assert image_blocks[0].media_type == media_type
+    assert stored_path.suffix == extension
+    assert stored_path.read_bytes() == data
+    assert stored_path != image
 
 
 def test_tui_ignores_pasted_plan_prose_when_scanning_file_references() -> None:
@@ -4096,6 +4294,25 @@ def test_live_prompt_shows_queued_image_messages_as_anchors(tmp_path: Path) -> N
 
     rendered = out.getvalue()
     assert "↳ check [image#1]" in rendered
+    assert str(image) not in rendered
+
+
+def test_live_prompt_shows_queued_extensionless_screenshot_as_anchor(
+    tmp_path: Path,
+) -> None:
+    image = _extensionless_screenshot_path(tmp_path)
+    out = _TTYBuffer()
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+    live = tui._LiveTerminal(app)
+    live.streaming = True
+    live.pending_user_inputs = [f"check {image}"]
+
+    live._draw_prompt()
+
+    rendered = out.getvalue()
+    assert "↳ check [image#1]" in rendered
+    assert "NSIRD_screencaptureui_BRymlQ" not in rendered
     assert str(image) not in rendered
 
 

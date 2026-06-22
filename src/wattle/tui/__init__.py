@@ -226,6 +226,12 @@ MAX_IMAGE_ATTACHMENT_BYTES = 20 * 1024 * 1024
 SUPPORTED_IMAGE_MEDIA_TYPES = frozenset(
     {"image/png", "image/jpeg", "image/webp", "image/gif"}
 )
+IMAGE_MEDIA_TYPE_EXTENSIONS = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+}
 ESCAPE_SEQUENCE_TIMEOUT_SECONDS = 0.05
 VOICE_HOLD_START_SECONDS = 0.25
 VOICE_RELEASE_SECONDS = 0.25
@@ -2792,6 +2798,30 @@ def _format_bytes(size: int) -> str:
     return f"{size} B"
 
 
+def _image_media_type(path: Path) -> str | None:
+    media_type, _encoding = mimetypes.guess_type(path.name)
+    if media_type in SUPPORTED_IMAGE_MEDIA_TYPES:
+        return media_type
+    return _sniff_image_media_type(path)
+
+
+def _sniff_image_media_type(path: Path) -> str | None:
+    try:
+        with path.open("rb") as handle:
+            header = handle.read(12)
+    except (OSError, ValueError):
+        return None
+    if header.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if header.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if header.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    if len(header) >= 12 and header[:4] == b"RIFF" and header[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
 def _candidate_file_paths(text: str, *, cwd: Path | None = None) -> list[Path]:
     candidates: list[Path] = []
     seen: set[Path] = set()
@@ -2822,7 +2852,58 @@ def _path_references_from_text(
                 start -= 1
                 end += 1
             references.append(_PathReference(path=path, start=start, end=end))
+    references.extend(_unescaped_absolute_path_references(text, references))
+    return sorted(references, key=lambda reference: (reference.start, reference.end))
+
+
+def _unescaped_absolute_path_references(
+    text: str,
+    existing_references: list[_PathReference],
+) -> list[_PathReference]:
+    references: list[_PathReference] = []
+    index = 0
+    while index < len(text):
+        if text[index] != "/" or (index > 0 and not text[index - 1].isspace()):
+            index += 1
+            continue
+        if any(reference.start <= index < reference.end for reference in existing_references):
+            index += 1
+            continue
+        line_end = text.find("\n", index)
+        if line_end == -1:
+            line_end = len(text)
+        reference = _longest_existing_absolute_path_reference(text, index, line_end)
+        if reference is None:
+            index += 1
+            continue
+        if not any(_path_references_overlap(reference, other) for other in existing_references):
+            references.append(reference)
+        index = reference.end
     return references
+
+
+def _longest_existing_absolute_path_reference(
+    text: str,
+    start: int,
+    line_end: int,
+) -> _PathReference | None:
+    for end in range(line_end, start, -1):
+        while end > start and text[end - 1] in ".,;:)":
+            end -= 1
+        if end <= start:
+            break
+        candidate = Path(text[start:end]).expanduser()
+        try:
+            path = candidate.resolve()
+        except (OSError, RuntimeError, ValueError):
+            continue
+        if _path_is_file(path):
+            return _PathReference(path=path, start=start, end=end)
+    return None
+
+
+def _path_references_overlap(first: _PathReference, second: _PathReference) -> bool:
+    return first.start < second.end and second.start < first.end
 
 
 def _path_is_file(path: Path) -> bool:
@@ -2858,8 +2939,7 @@ def _image_placeholder_text(
     replacements: list[tuple[int, int, str]] = []
     image_index = image_index_start
     for reference in _path_references_from_text(text):
-        media_type, _encoding = mimetypes.guess_type(reference.path.name)
-        if media_type not in SUPPORTED_IMAGE_MEDIA_TYPES:
+        if _image_media_type(reference.path) is None:
             continue
         replacements.append((reference.start, reference.end, f"[image#{image_index}]"))
         image_index += 1
@@ -2876,8 +2956,7 @@ def _image_placeholder_prompt_render(
     replacements: list[tuple[int, int, str]] = []
     image_index = image_index_start
     for reference in _path_references_from_text(text):
-        media_type, _encoding = mimetypes.guess_type(reference.path.name)
-        if media_type not in SUPPORTED_IMAGE_MEDIA_TYPES:
+        if _image_media_type(reference.path) is None:
             continue
         replacements.append((reference.start, reference.end, f"[image#{image_index}]"))
         image_index += 1
@@ -2913,8 +2992,7 @@ def _image_placeholder_prompt_mapped_render(
     replacements: list[tuple[int, int, str]] = []
     image_index = image_index_start
     for reference in _path_references_from_text(text):
-        media_type, _encoding = mimetypes.guess_type(reference.path.name)
-        if media_type not in SUPPORTED_IMAGE_MEDIA_TYPES:
+        if _image_media_type(reference.path) is None:
             continue
         replacements.append((reference.start, reference.end, f"[image#{image_index}]"))
         image_index += 1
@@ -3367,15 +3445,19 @@ class WattleApp:
         )
         for reference in _path_references_from_text(text):
             size = reference.path.stat().st_size
-            media_type, _encoding = mimetypes.guess_type(reference.path.name)
-            if media_type not in SUPPORTED_IMAGE_MEDIA_TYPES:
+            media_type = _image_media_type(reference.path)
+            if media_type is None:
                 continue
             if size > MAX_IMAGE_ATTACHMENT_BYTES:
                 raise ValueError(
                     f"Image is too large: {reference.path} ({_format_bytes(size)}; "
                     f"max {_format_bytes(MAX_IMAGE_ATTACHMENT_BYTES)})"
                 )
-            stored_path = self._copy_image_asset(reference.path)
+            stored_path = self._copy_image_asset(
+                reference.path,
+                suffix=reference.path.suffix
+                or IMAGE_MEDIA_TYPE_EXTENSIONS.get(media_type, ""),
+            )
             blocks.append(
                 ImageBlock(
                     path=str(stored_path),
@@ -3389,17 +3471,16 @@ class WattleApp:
     def _file_context_paths_from_text(self, text: str) -> list[Path]:
         paths: list[Path] = []
         for path in _candidate_file_paths(text):
-            media_type, _encoding = mimetypes.guess_type(path.name)
-            if media_type in SUPPORTED_IMAGE_MEDIA_TYPES:
+            if _image_media_type(path) is not None:
                 continue
             paths.append(path)
         return paths
 
-    def _copy_image_asset(self, path: Path) -> Path:
+    def _copy_image_asset(self, path: Path, *, suffix: str | None = None) -> Path:
         if self._session_record is None:
             return path
         data = path.read_bytes()
-        return self._write_image_asset(data, path.suffix.lower())
+        return self._write_image_asset(data, (suffix or path.suffix).lower())
 
     def _save_clipboard_image_asset(self, image: ClipboardImage) -> Path:
         if len(image.data) > MAX_IMAGE_ATTACHMENT_BYTES:
@@ -3411,7 +3492,7 @@ class WattleApp:
 
     def _write_image_asset(self, data: bytes, suffix: str) -> Path:
         digest = hashlib.sha256(data).hexdigest()[:16]
-        safe_suffix = suffix if suffix.startswith(".") else f".{suffix}"
+        safe_suffix = suffix if suffix.startswith(".") else (f".{suffix}" if suffix else "")
         if self._session_record is not None:
             asset_dir = default_session_dir() / "assets" / self._session_record.metadata.id
             target = asset_dir / f"{digest}{safe_suffix.lower()}"
