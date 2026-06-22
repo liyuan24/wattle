@@ -33,6 +33,7 @@ AUTH_REQUIRED_MESSAGE = (
 if TYPE_CHECKING:
     from wattle.agent import AgentRunResult as AgentRunResultType
     from wattle.agent import _ProviderSpec
+    from wattle.goal import GoalState
     from wattle.providers import CompletionResponse, Provider, TextBlock
     from wattle.settings import WattleSettings
 
@@ -286,8 +287,21 @@ def _is_text_block(block: object) -> TypeGuard[TextBlock]:
     return getattr(block, "type", None) == "text" and isinstance(getattr(block, "text", None), str)
 
 
+def _goal_objective_from_print_prompt(prompt: str) -> str | None:
+    stripped = prompt.strip()
+    if stripped == "/goal":
+        return ""
+    if stripped.startswith("/goal "):
+        return stripped[len("/goal ") :].strip()
+    return None
+
+
 class _HeadlessSessionWriter:
-    def __init__(self, args: argparse.Namespace) -> None:
+    def __init__(
+        self,
+        args: argparse.Namespace,
+        goal: GoalState | None = None,
+    ) -> None:
         from wattle.session import new_session, save_session
 
         self._save_session = save_session
@@ -299,6 +313,8 @@ class _HeadlessSessionWriter:
             thinking=bool(getattr(args, "thinking", False)),
             effort=getattr(args, "effort", None),
         )
+        if goal is not None:
+            self._record = replace(self._record, goal=goal)
         self.path = self._save_session(self._record)
 
     def update(self, snapshot: object) -> None:
@@ -316,6 +332,7 @@ class _HeadlessSessionWriter:
             ),
             messages=list(getattr(snapshot, "messages", [])),
             events=list(getattr(snapshot, "events", [])),
+            goal=getattr(snapshot, "goal", self._record.goal),
         )
         self.path = self._save_session(self._record, self.path)
 
@@ -334,6 +351,7 @@ class _HeadlessSessionWriter:
             ),
             messages=list(result.messages),
             events=list(result.events),
+            goal=result.goal,
         )
         self.path = self._save_session(self._record, self.path)
         return self.path
@@ -342,31 +360,53 @@ class _HeadlessSessionWriter:
 def _run_headless(args: argparse.Namespace) -> int:
     """Run one prompt and print only the final assistant text."""
     permission_mode = PermissionMode.YOLO
+    goal = None
+    print_prompt = args.print_prompt
+    goal_objective = _goal_objective_from_print_prompt(args.print_prompt)
+    if goal_objective is not None:
+        if not goal_objective:
+            sys.stderr.write("[error] Usage: /goal <objective>\n")
+            sys.stderr.flush()
+            return 1
+        from wattle.goal import build_goal_continuation_prompt, create_goal
+
+        goal = create_goal(goal_objective)
+        print_prompt = build_goal_continuation_prompt(goal)
 
     try:
         if bool(getattr(args, "persist", False)):
-            session_writer = _HeadlessSessionWriter(args)
+            session_writer = _HeadlessSessionWriter(args, goal=goal)
+            run_kwargs = {
+                "max_tokens": args.max_tokens,
+                "permission_mode": permission_mode,
+                "thinking": bool(getattr(args, "thinking", False)),
+                "effort": getattr(args, "effort", None),
+                "on_snapshot": session_writer.update,
+            }
+            if goal is not None:
+                run_kwargs["goal"] = goal
             result = run_agent_with_history(
                 args.provider,
                 args.model,
-                args.print_prompt,
-                max_tokens=args.max_tokens,
-                permission_mode=permission_mode,
-                thinking=bool(getattr(args, "thinking", False)),
-                effort=getattr(args, "effort", None),
-                on_snapshot=session_writer.update,
+                print_prompt,
+                **run_kwargs,
             )
             response = result.response
             session_path = session_writer.finish(result)
         else:
+            run_kwargs = {
+                "max_tokens": args.max_tokens,
+                "permission_mode": permission_mode,
+                "thinking": bool(getattr(args, "thinking", False)),
+                "effort": getattr(args, "effort", None),
+            }
+            if goal is not None:
+                run_kwargs["goal"] = goal
             response = run_agent(
                 args.provider,
                 args.model,
-                args.print_prompt,
-                max_tokens=args.max_tokens,
-                permission_mode=permission_mode,
-                thinking=bool(getattr(args, "thinking", False)),
-                effort=getattr(args, "effort", None),
+                print_prompt,
+                **run_kwargs,
             )
             session_path = None
     except RuntimeError as exc:

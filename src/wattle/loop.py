@@ -17,9 +17,10 @@ from __future__ import annotations
 import asyncio
 import itertools
 import threading
-from collections.abc import Callable, Mapping, MutableSequence
+from collections.abc import Callable, Mapping, MutableSequence, Sequence
 from typing import Any, Literal, cast
 
+from .hooks import HookContinuation, TurnStopContext, TurnStopHook
 from .message_history import monitor_event_text_blocks
 from .models import model_supports_modality
 from .permissions import PermissionGate
@@ -62,6 +63,8 @@ def run(
     runtime_events_out: MutableSequence[dict[str, Any]] | None = None,
     messages_callback: Callable[[list[Message]], None] | None = None,
     runtime_event_callback: Callable[[dict[str, Any]], None] | None = None,
+    turn_stop_hooks: Sequence[TurnStopHook] = (),
+    max_turn_stop_continuations: int = 0,
 ) -> CompletionResponse:
     """Run the agent loop until the model stops.
 
@@ -92,6 +95,8 @@ def run(
             runtime_events_out=runtime_events_out,
             messages_callback=messages_callback,
             runtime_event_callback=runtime_event_callback,
+            turn_stop_hooks=turn_stop_hooks,
+            max_turn_stop_continuations=max_turn_stop_continuations,
         )
     )
 
@@ -117,6 +122,8 @@ async def arun(
     runtime_events_out: MutableSequence[dict[str, Any]] | None = None,
     messages_callback: Callable[[list[Message]], None] | None = None,
     runtime_event_callback: Callable[[dict[str, Any]], None] | None = None,
+    turn_stop_hooks: Sequence[TurnStopHook] = (),
+    max_turn_stop_continuations: int = 0,
 ) -> CompletionResponse:
     """Async version of :func:`run`."""
 
@@ -166,6 +173,7 @@ async def arun(
     )
 
     malformed_tool_call_repairs = 0
+    turn_stop_continuations = 0
     publish_messages()
     for _ in itertools.count():
         try:
@@ -184,7 +192,21 @@ async def arun(
         if response.stop_reason != "tool_use":
             monitor_blocks = _drain_monitor_event_blocks(runtime)
             if not monitor_blocks:
-                return response
+                continuation = _turn_stop_continuation(
+                    turn_stop_hooks,
+                    messages=messages,
+                    last_response=response,
+                    has_pending_user_input=False,
+                )
+                if continuation is None:
+                    return response
+                if turn_stop_continuations >= max_turn_stop_continuations:
+                    return response
+                turn_stop_continuations += 1
+                messages.append(Message(role="user", content=list(continuation.content)))
+                publish_messages()
+                continue
+            turn_stop_continuations = 0
             messages.append(Message(role="user", content=monitor_blocks))
             publish_messages()
             continue
@@ -209,10 +231,32 @@ async def arun(
         if not followup_blocks:
             return response
 
+        turn_stop_continuations = 0
         messages.append(Message(role="user", content=followup_blocks))
         publish_messages()
 
     raise RuntimeError("unreachable agent loop exit")
+
+
+def _turn_stop_continuation(
+    hooks: Sequence[TurnStopHook],
+    *,
+    messages: Sequence[Message],
+    last_response: CompletionResponse | None,
+    has_pending_user_input: bool,
+) -> HookContinuation | None:
+    if not hooks:
+        return None
+    context = TurnStopContext(
+        messages=tuple(messages),
+        last_response=last_response,
+        has_pending_user_input=has_pending_user_input,
+    )
+    for hook in hooks:
+        continuation = hook.on_turn_stop(context)
+        if continuation is not None:
+            return continuation
+    return None
 
 
 def run_streaming(

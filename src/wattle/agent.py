@@ -27,6 +27,7 @@ from wattle.auth import (
     get_credential,
     get_openai_codex_credential,
 )
+from wattle.goal import GoalState, GoalTurnStopHook
 from wattle.permissions import PermissionMode
 from wattle.providers import (
     AnthropicProvider,
@@ -42,6 +43,7 @@ from wattle.skills import load_available_skills
 from wattle.system_prompt import build_system_prompt
 from wattle.tools import TOOLS_BY_NAME
 from wattle.tools.base import Tool
+from wattle.tools.goal import UpdateGoalTool
 
 # Public mapping: provider name -> vendor name in wattle.auth. Multiple
 # OpenAI-backed provider adapters can still use distinct vendor credentials.
@@ -58,6 +60,7 @@ PROVIDER_TO_VENDOR: dict[str, str] = {
 
 DEFAULT_PROVIDER_REQUEST_TIMEOUT_SECONDS = 300.0
 PROVIDER_REQUEST_TIMEOUT_ENV = "WATTLE_PROVIDER_REQUEST_TIMEOUT_SECONDS"
+MAX_HEADLESS_GOAL_CONTINUATIONS = 20
 
 
 def _provider_request_timeout_seconds() -> float:
@@ -204,6 +207,7 @@ class AgentRunResult:
     messages: list[Message]
     system: str | None
     events: list[SessionEvent] = field(default_factory=list)
+    goal: GoalState | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -213,6 +217,7 @@ class AgentRunSnapshot:
     system: str | None
     messages: list[Message] = field(default_factory=list)
     events: list[SessionEvent] = field(default_factory=list)
+    goal: GoalState | None = None
 
 
 def _build_provider_and_system(
@@ -220,6 +225,7 @@ def _build_provider_and_system(
     permission_mode: PermissionMode,
     *,
     model: str,
+    tools_by_name: Mapping[str, Tool] | None = None,
 ) -> tuple[Provider, str, Mapping[str, Tool]]:
     spec = _PROVIDER_DISPATCH.get(provider_name)
     if spec is None:
@@ -235,13 +241,23 @@ def _build_provider_and_system(
     else:
         credential = get_credential(spec.vendor)
     provider = spec.build(credential)
-    model_tools_by_name = loop._tools_for_model(TOOLS_BY_NAME, model)
+    available_tools = tools_by_name or TOOLS_BY_NAME
+    model_tools_by_name = loop._tools_for_model(available_tools, model)
     built_system = build_system_prompt(
         tools_by_name=model_tools_by_name,
         skills=load_available_skills(Path.cwd()),
         permission_mode=permission_mode,
     )
-    return provider, built_system, TOOLS_BY_NAME
+    return provider, built_system, available_tools
+
+
+def _tools_for_goal(goal_box: dict[str, GoalState | None]) -> dict[str, Tool]:
+    tools = dict(TOOLS_BY_NAME)
+    tools[UpdateGoalTool.name] = UpdateGoalTool(
+        get_goal=lambda: goal_box["goal"],
+        set_goal=lambda goal: goal_box.__setitem__("goal", goal),
+    )
+    return tools
 
 
 def run_agent(
@@ -253,6 +269,7 @@ def run_agent(
     permission_mode: PermissionMode = PermissionMode.YOLO,
     thinking: bool = False,
     effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None,
+    goal: GoalState | None = None,
 ) -> CompletionResponse:
     """Construct the right provider, wire its credential from ``wattle.auth``,
     and run the agent loop with all registered tools.
@@ -281,6 +298,7 @@ def run_agent(
             permission_mode=permission_mode,
             thinking=thinking,
             effort=effort,
+            goal=goal,
         )
     )
 
@@ -294,13 +312,25 @@ async def arun_agent(
     permission_mode: PermissionMode = PermissionMode.YOLO,
     thinking: bool = False,
     effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None,
+    goal: GoalState | None = None,
 ) -> CompletionResponse:
     """Async implementation of :func:`run_agent`."""
+    goal_box: dict[str, GoalState | None] = {"goal": goal}
+    goal_tools = _tools_for_goal(goal_box) if goal is not None else None
     provider, built_system, tools_by_name = _build_provider_and_system(
         provider_name,
         permission_mode,
         model=model,
+        tools_by_name=goal_tools,
     )
+    run_kwargs: dict[str, object] = {
+        "permission_gate": None,
+        "thinking": thinking,
+        "effort": effort,
+    }
+    if goal is not None:
+        run_kwargs["turn_stop_hooks"] = [GoalTurnStopHook(lambda: goal_box["goal"])]
+        run_kwargs["max_turn_stop_continuations"] = MAX_HEADLESS_GOAL_CONTINUATIONS
     return await loop.arun(
         provider,
         tools_by_name,
@@ -308,9 +338,7 @@ async def arun_agent(
         user_input,
         model,
         max_tokens,
-        permission_gate=None,
-        thinking=thinking,
-        effort=effort,
+        **run_kwargs,
     )
 
 
@@ -324,6 +352,7 @@ def run_agent_with_history(
     thinking: bool = False,
     effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None,
     on_snapshot: Callable[[AgentRunSnapshot], None] | None = None,
+    goal: GoalState | None = None,
 ) -> AgentRunResult:
     """Run the headless agent and return the full transcript for persistence."""
     return asyncio.run(
@@ -336,6 +365,7 @@ def run_agent_with_history(
             thinking=thinking,
             effort=effort,
             on_snapshot=on_snapshot,
+            goal=goal,
         )
     )
 
@@ -350,12 +380,16 @@ async def arun_agent_with_history(
     thinking: bool = False,
     effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None,
     on_snapshot: Callable[[AgentRunSnapshot], None] | None = None,
+    goal: GoalState | None = None,
 ) -> AgentRunResult:
     """Async headless agent runner returning the full transcript."""
+    goal_box: dict[str, GoalState | None] = {"goal": goal}
+    goal_tools = _tools_for_goal(goal_box) if goal is not None else None
     provider, built_system, tools_by_name = _build_provider_and_system(
         provider_name,
         permission_mode,
         model=model,
+        tools_by_name=goal_tools,
     )
     messages: list[Message] = []
     raw_events: list[dict[str, object]] = []
@@ -368,6 +402,7 @@ async def arun_agent_with_history(
                     system=built_system,
                     messages=list(messages),
                     events=list(events),
+                    goal=goal_box["goal"],
                 )
             )
 
@@ -381,6 +416,18 @@ async def arun_agent_with_history(
         publish_snapshot()
 
     publish_snapshot()
+    run_kwargs = {
+        "permission_gate": None,
+        "thinking": thinking,
+        "effort": effort,
+        "messages_out": messages,
+        "runtime_events_out": raw_events,
+        "messages_callback": on_messages,
+        "runtime_event_callback": on_runtime_event,
+    }
+    if goal is not None:
+        run_kwargs["turn_stop_hooks"] = [GoalTurnStopHook(lambda: goal_box["goal"])]
+        run_kwargs["max_turn_stop_continuations"] = MAX_HEADLESS_GOAL_CONTINUATIONS
     response = await loop.arun(
         provider,
         tools_by_name,
@@ -388,13 +435,7 @@ async def arun_agent_with_history(
         user_input,
         model,
         max_tokens,
-        permission_gate=None,
-        thinking=thinking,
-        effort=effort,
-        messages_out=messages,
-        runtime_events_out=raw_events,
-        messages_callback=on_messages,
-        runtime_event_callback=on_runtime_event,
+        **run_kwargs,
     )
     publish_snapshot()
     return AgentRunResult(
@@ -402,6 +443,7 @@ async def arun_agent_with_history(
         messages=messages,
         system=built_system,
         events=events,
+        goal=goal_box["goal"],
     )
 
 

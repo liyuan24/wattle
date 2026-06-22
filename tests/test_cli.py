@@ -606,6 +606,71 @@ def test_headless_calls_run_agent_and_prints_final_text(
     ]
 
 
+def test_headless_goal_prompt_runs_goal_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    response = CompletionResponse(
+        content=[TextBlock(text="goal response")],
+        stop_reason="end_turn",
+    )
+    calls: list[tuple[Any, ...]] = []
+
+    def fake_run_agent(*args: Any, **kwargs: Any) -> CompletionResponse:
+        calls.append((args, kwargs))
+        return response
+
+    stdout = io.StringIO()
+    monkeypatch.setattr(cli, "run_agent", fake_run_agent)
+    monkeypatch.setattr(sys, "stdout", stdout)
+
+    rc = cli._run_headless(
+        argparse.Namespace(
+            provider="anthropic",
+            model="claude-sonnet-4-6",
+            max_tokens=512,
+            permission_mode=cli.PermissionMode.YOLO,
+            print_prompt="/goal finish the task",
+            prompt=None,
+            persist=False,
+        )
+    )
+
+    assert rc == 0
+    assert stdout.getvalue() == "goal response\n"
+    assert len(calls) == 1
+    call_args, call_kwargs = calls[0]
+    assert call_args[:2] == ("anthropic", "claude-sonnet-4-6")
+    assert "Continue working toward the active Wattle goal." in call_args[2]
+    assert "<objective>\nfinish the task\n</objective>" in call_args[2]
+    assert call_kwargs["goal"].objective == "finish the task"
+    assert call_kwargs["goal"].status == "active"
+
+
+def test_headless_goal_prompt_requires_objective(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", stdout)
+    monkeypatch.setattr(sys, "stderr", stderr)
+
+    rc = cli._run_headless(
+        argparse.Namespace(
+            provider="anthropic",
+            model="claude-sonnet-4-6",
+            max_tokens=512,
+            permission_mode=cli.PermissionMode.YOLO,
+            print_prompt="/goal",
+            prompt=None,
+            persist=False,
+        )
+    )
+
+    assert rc == 1
+    assert stdout.getvalue() == ""
+    assert stderr.getvalue() == "[error] Usage: /goal <objective>\n"
+
+
 def test_headless_provider_error_returns_controlled_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
