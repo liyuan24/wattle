@@ -32,6 +32,7 @@ _SURFACE_ONLY_EVIDENCE_PHRASES = (
     "syntax check",
     "py_compile",
     "parses as json",
+    "parses as valid json",
     "parsed with json.loads",
     "file exists",
     "inspected after writing",
@@ -54,6 +55,79 @@ _SEMANTIC_EVIDENCE_MARKERS = (
     "tests passed",
     "oligotm",
     "cosine",
+)
+
+_AUTHORITATIVE_EVIDENCE_MARKERS = (
+    "authoritative",
+    "independent",
+    "oracle",
+    "source data",
+    "raw data",
+    "provided fixture",
+    "fixture",
+    "consumer",
+    "downstream",
+    "verifier",
+    "public test",
+    "integration test",
+    "end-to-end",
+    "e2e",
+    "expected",
+    "ground truth",
+    "task contract",
+    "specification",
+    "spec",
+    "cross-check",
+    "separate",
+    "recomputed",
+)
+
+_GENERIC_TEST_EVIDENCE_PHRASES = (
+    "focused tests passed",
+    "test passed",
+    "tests passed",
+)
+
+_TEST_SCOPE_MARKERS = (
+    "pytest",
+    "test_",
+    "unit test",
+    "integration test",
+    "end-to-end",
+    "e2e",
+    "verifier",
+    "public test",
+    "provided test",
+    "fixture",
+    "consumer",
+    "source data",
+    "task contract",
+    "requirements",
+)
+
+_SELF_REFERENTIAL_EVIDENCE_PHRASES = (
+    "artifact exists",
+    "values already written",
+    "what was already written",
+    "current output",
+    "current result",
+    "stored output",
+    "stored values",
+    "output file",
+    "result file",
+    "matches /app/",
+    "matched /app/",
+    "matches parsed /app/",
+    "matched parsed /app/",
+    "matches the parsed /app/",
+    "matched the parsed /app/",
+    "matches result.txt",
+    "matched result.txt",
+    "matches results.json",
+    "matched results.json",
+    "matches recovered.json",
+    "matched recovered.json",
+    "exactly that line",
 )
 
 
@@ -168,11 +242,27 @@ def _completion_evidence_problem(evidence: str) -> str | None:
             "the evidence says required validation could not run or a dependency "
             "was unavailable."
         )
+    if any(phrase in normalized for phrase in _GENERIC_TEST_EVIDENCE_PHRASES) and not any(
+        marker in normalized for marker in _TEST_SCOPE_MARKERS
+    ):
+        return (
+            "the evidence cites tests too generically; name the exercised test, "
+            "fixture, consumer, source data, or contract that makes the tests "
+            "authoritative."
+        )
     if any(phrase in normalized for phrase in _SURFACE_ONLY_EVIDENCE_PHRASES) and not any(
         marker in normalized for marker in _SEMANTIC_EVIDENCE_MARKERS
     ):
         return (
             "the evidence cites only surface validation such as syntax, schema, "
             "type, parse, or file-existence checks."
+        )
+    if any(phrase in normalized for phrase in _SELF_REFERENTIAL_EVIDENCE_PHRASES) and not any(
+        marker in normalized for marker in _AUTHORITATIVE_EVIDENCE_MARKERS
+    ):
+        return (
+            "the evidence is self-referential, such as checking that the produced "
+            "artifact exists or matches values already written, without tying it "
+            "to an authoritative source, consumer, fixture, verifier, or oracle."
         )
     return None

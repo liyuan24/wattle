@@ -33,6 +33,9 @@ def test_build_system_prompt_uses_wattle_default_without_pi_docs(tmp_path: Path)
     assert "independently derived oracle" in prompt
     assert "Checking only that a file exists" in prompt
     assert "closest faithful check from the task contract" in prompt
+    assert "verifier-minded contradiction pass" in prompt
+    assert "plausible alternate interpretations" in prompt
+    assert "indexing and ranking conventions" in prompt
     assert "validate the representation contract as a downstream consumer" in prompt
     assert "exact scalar types, container types" in prompt
     assert "visual similarity or a permissive parse is not enough" in prompt

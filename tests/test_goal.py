@@ -22,6 +22,8 @@ def test_goal_continuation_prompt_includes_objective_without_budget_language() -
     assert "Implement &lt;feature&gt; &amp; verify it" in prompt
     assert "derive an independent oracle" in prompt
     assert "Do not treat file existence" in prompt
+    assert "contradiction pass" in prompt
+    assert "plausible alternate interpretations" in prompt
     assert "verify the representation" in prompt
     assert "exact types, names, ordering" in prompt
     assert "\"complete\" and include concise evidence" in prompt
@@ -68,11 +70,17 @@ def test_update_goal_tool_only_marks_existing_goal_complete_or_blocked() -> None
         set_goal=lambda goal: state.__setitem__("goal", goal),
     )
 
-    output = tool.run(status="complete", evidence="Focused tests passed and artifact exists.")
+    output = tool.run(
+        status="complete",
+        evidence=(
+            "Ran pytest tests/test_ship.py::test_delivered_flow against the "
+            "provided fixture and compared the output to the expected source data."
+        ),
+    )
 
     assert state["goal"].status == "complete"
     assert "Goal complete." in output
-    assert "Evidence: Focused tests passed and artifact exists." in output
+    assert "Evidence: Ran pytest tests/test_ship.py::test_delivered_flow" in output
     assert "Objective: Ship it" in output
     assert "Every call must include `evidence`" in tool.description
     assert "independent evidence from authoritative sources" in tool.description
@@ -130,6 +138,41 @@ def test_update_goal_tool_rejects_complete_with_only_surface_evidence() -> None:
 
     assert state["goal"].status == "active"
     assert "only surface validation" in output
+
+
+def test_update_goal_tool_rejects_generic_tests_passed_evidence() -> None:
+    state = {"goal": create_goal("Ship it")}
+    tool = UpdateGoalTool(
+        get_goal=lambda: state["goal"],
+        set_goal=lambda goal: state.__setitem__("goal", goal),
+    )
+
+    output = tool.run(
+        status="complete",
+        evidence="Focused tests passed and artifact exists.",
+    )
+
+    assert state["goal"].status == "active"
+    assert "tests too generically" in output
+
+
+def test_update_goal_tool_rejects_self_referential_artifact_evidence() -> None:
+    state = {"goal": create_goal("Recover data")}
+    tool = UpdateGoalTool(
+        get_goal=lambda: state["goal"],
+        set_goal=lambda goal: state.__setitem__("goal", goal),
+    )
+
+    output = tool.run(
+        status="complete",
+        evidence=(
+            "A disposable copy returned rows that exactly matched the parsed "
+            "/app/recovered.json, and recovered.json parses as valid JSON."
+        ),
+    )
+
+    assert state["goal"].status == "active"
+    assert "self-referential" in output
 
 
 def test_update_goal_tool_allows_surface_checks_with_semantic_evidence() -> None:
