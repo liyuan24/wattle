@@ -2892,10 +2892,8 @@ def _longest_existing_absolute_path_reference(
             end -= 1
         if end <= start:
             break
-        candidate = Path(text[start:end]).expanduser()
-        try:
-            path = candidate.resolve()
-        except (OSError, RuntimeError, ValueError):
+        path = _resolve_path_candidate(Path(text[start:end]).expanduser())
+        if path is None:
             continue
         if _path_is_file(path):
             return _PathReference(path=path, start=start, end=end)
@@ -2941,7 +2939,7 @@ def _image_placeholder_text(
     for reference in _path_references_from_text(text):
         if _image_media_type(reference.path) is None:
             continue
-        replacements.append((reference.start, reference.end, f"[image#{image_index}]"))
+        replacements.append((reference.start, reference.end, f"[IMAGE #{image_index}]"))
         image_index += 1
     return _replace_text_ranges(text, replacements), image_index
 
@@ -2958,7 +2956,7 @@ def _image_placeholder_prompt_render(
     for reference in _path_references_from_text(text):
         if _image_media_type(reference.path) is None:
             continue
-        replacements.append((reference.start, reference.end, f"[image#{image_index}]"))
+        replacements.append((reference.start, reference.end, f"[IMAGE #{image_index}]"))
         image_index += 1
     if not replacements:
         return render
@@ -2994,7 +2992,7 @@ def _image_placeholder_prompt_mapped_render(
     for reference in _path_references_from_text(text):
         if _image_media_type(reference.path) is None:
             continue
-        replacements.append((reference.start, reference.end, f"[image#{image_index}]"))
+        replacements.append((reference.start, reference.end, f"[IMAGE #{image_index}]"))
         image_index += 1
     if not replacements:
         return render
@@ -3056,7 +3054,7 @@ def _shell_like_tokens_with_indexes(text: str) -> list[tuple[str, list[int]]]:
     index = 0
     length = len(text)
     while index < length:
-        while index < length and text[index].isspace():
+        while index < length and _is_shell_token_separator(text[index]):
             index += 1
         if index >= length:
             break
@@ -3066,7 +3064,7 @@ def _shell_like_tokens_with_indexes(text: str) -> list[tuple[str, list[int]]]:
         quote: str | None = None
         while index < length:
             char = text[index]
-            if quote is None and char.isspace():
+            if quote is None and _is_shell_token_separator(char):
                 break
             if quote is not None and char == quote:
                 quote = None
@@ -3088,6 +3086,10 @@ def _shell_like_tokens_with_indexes(text: str) -> list[tuple[str, list[int]]]:
         if value:
             tokens.append(("".join(value), raw_indexes))
     return tokens
+
+
+def _is_shell_token_separator(char: str) -> bool:
+    return char in " \t\r\n\v\f"
 
 
 def _token_to_path_span(
@@ -3141,10 +3143,40 @@ def _token_to_path(token: str, *, cwd: Path) -> Path | None:
         return None
     if not path.is_absolute():
         path = cwd / path
+    return _resolve_path_candidate(path)
+
+
+def _resolve_path_candidate(path: Path) -> Path | None:
     try:
-        return path.resolve()
+        resolved = path.resolve()
     except (OSError, RuntimeError, ValueError):
         return None
+    if _path_is_file(resolved):
+        return resolved
+    variant = _resolve_compact_unicode_space_variant(resolved)
+    return variant or resolved
+
+
+def _resolve_compact_unicode_space_variant(path: Path) -> Path | None:
+    compact_name = _compact_unicode_space(path.name)
+    try:
+        matches = [
+            candidate.resolve()
+            for candidate in path.parent.iterdir()
+            if _compact_unicode_space(candidate.name) == compact_name
+            and _path_is_file(candidate)
+        ]
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return matches[0] if len(matches) == 1 else None
+
+
+def _compact_unicode_space(text: str) -> str:
+    return "".join(
+        char
+        for char in text
+        if not (char.isspace() and not _is_shell_token_separator(char))
+    )
 
 
 class WattleApp:

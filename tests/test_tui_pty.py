@@ -1371,16 +1371,16 @@ def test_pty_dragged_image_uses_anchor_while_queued_and_after_finish(tmp_path: P
         session.read_until("press esc to interrupt", timeout=3)
         session.write(f"check {escaped_path}\n")
         session.read_until("Messages to be submitted after next tool call", timeout=3)
-        session.read_until("check [image#1]", timeout=3)
+        session.read_until("check [IMAGE #1]", timeout=3)
 
         screen_text = session.screen.text()
-        assert "check [image#1]" in screen_text
+        assert "check [IMAGE #1]" in screen_text
         assert "dragged\\ image.png" not in screen_text
         assert str(image) not in screen_text
 
         session.read_until("Worked for", timeout=5)
         screen_text = session.screen.text()
-        assert "check [image#1]" in screen_text
+        assert "check [IMAGE #1]" in screen_text
         assert str(image) not in screen_text
 
 
@@ -1397,14 +1397,14 @@ def test_pty_resize_keeps_user_image_history_as_anchor(tmp_path: Path) -> None:
     ) as session:
         session.read_until("gpt-5.5 |", timeout=3)
         session.write(f"check {escaped_path}\n")
-        session.read_until("check [image#1]", timeout=3)
+        session.read_until("check [IMAGE #1]", timeout=3)
         session.read_until("done 1", timeout=3)
 
         session.resize(cols=80, rows=36)
-        session.read_until("check [image#1]", timeout=3)
+        session.read_until("check [IMAGE #1]", timeout=3)
 
         screen_text = session.screen.text()
-        assert "check [image#1]" in screen_text
+        assert "check [IMAGE #1]" in screen_text
         assert "[image] dragged image.png" not in screen_text
         assert str(image) not in screen_text
 
@@ -1707,13 +1707,13 @@ def test_pty_ctrl_v_pastes_clipboard_image_as_anchor(tmp_path: Path) -> None:
     with PtySession.spawn_python(child_code, cwd=tmp_path, cols=60, rows=30) as session:
         session.read_until("gpt-5.5 |", timeout=3)
         session.write("\x16")
-        session.read_until("[image#1]", timeout=3)
+        session.read_until("[IMAGE #1]", timeout=3)
         session.write("\x1b[27;5;118~")
-        session.read_until("[image#2]", timeout=3)
+        session.read_until("[IMAGE #2]", timeout=3)
 
         screen_text = session.screen.text()
-        assert "[image#1]" in screen_text
-        assert "[image#2]" in screen_text
+        assert "[IMAGE #1]" in screen_text
+        assert "[IMAGE #2]" in screen_text
         assert "^V" not in screen_text
         assert "\x16" not in screen_text
 
@@ -1731,10 +1731,10 @@ def test_pty_dragged_image_uses_anchor_in_active_input(tmp_path: Path) -> None:
     ) as session:
         session.read_until("press esc to interrupt", timeout=3)
         session.write(f"check {escaped_path}")
-        session.read_until("check [image#1]", timeout=3)
+        session.read_until("check [IMAGE #1]", timeout=3)
 
         screen_text = session.screen.text()
-        assert "check [image#1]" in screen_text
+        assert "check [IMAGE #1]" in screen_text
         assert "dragged\\ image.png" not in screen_text
         assert str(image) not in screen_text
 
@@ -1751,10 +1751,10 @@ def test_pty_unescaped_dragged_image_uses_anchor_in_active_input(tmp_path: Path)
     ) as session:
         session.read_until("press esc to interrupt", timeout=3)
         session.write(f"check {image}")
-        session.read_until("check [image#1]", timeout=3)
+        session.read_until("check [IMAGE #1]", timeout=3)
 
         screen_text = session.screen.text()
-        assert "check [image#1]" in screen_text
+        assert "check [IMAGE #1]" in screen_text
         assert "dragged image.png" not in screen_text
         assert str(image) not in screen_text
 
@@ -1781,11 +1781,40 @@ def test_pty_extensionless_dragged_screenshot_uses_anchor_in_active_input(
     ) as session:
         session.read_until("press esc to interrupt", timeout=3)
         session.write(f"check {image}")
-        session.read_until("check [image#1]", timeout=3)
+        session.read_until("check [IMAGE #1]", timeout=3)
 
         screen_text = session.screen.text()
-        assert "check [image#1]" in screen_text
+        assert "check [IMAGE #1]" in screen_text
         assert f"NSIRD_screencaptureui_{image_name}" not in screen_text
+        assert str(image) not in screen_text
+
+
+def test_pty_dragged_macos_screenshot_with_narrow_no_break_space_uses_anchor(
+    tmp_path: Path,
+) -> None:
+    image = (
+        tmp_path
+        / "TemporaryItems"
+        / "NSIRD_screencaptureui_xwxUjd"
+        / "Screenshot 2026-06-22 at 9.55.18\u202fAM.png"
+    )
+    image.parent.mkdir(parents=True)
+    image.write_bytes(b"\x89PNG\r\n\x1a\nfake-png")
+    dragged_path = str(image).replace(" ", "\\ ")
+
+    with PtySession.spawn_python(
+        _slow_wattle_child_code(first_delay=2.0, later_delay=0.1),
+        cwd=tmp_path,
+        cols=120,
+        rows=30,
+    ) as session:
+        session.read_until("press esc to interrupt", timeout=3)
+        session.write(f"check {dragged_path}")
+        session.read_until("check [IMAGE #1]", timeout=3)
+
+        screen_text = session.screen.text()
+        assert "check [IMAGE #1]" in screen_text
+        assert "NSIRD_screencaptureui_xwxUjd" not in screen_text
         assert str(image) not in screen_text
 
 
