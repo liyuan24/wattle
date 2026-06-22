@@ -427,7 +427,13 @@ def test_basic_tui_provider_error_returns_to_prompt() -> None:
 
 def test_basic_tui_goal_starts_continuation_and_update_goal_completes() -> None:
     tool_use_response = CompletionResponse(
-        content=[ToolUseBlock(id="goal_1", name="update_goal", input={"status": "complete"})],
+        content=[
+            ToolUseBlock(
+                id="goal_1",
+                name="update_goal",
+                input={"status": "complete", "evidence": "All requested checks passed."},
+            )
+        ],
         stop_reason="tool_use",
     )
     final_response = CompletionResponse(
@@ -463,7 +469,13 @@ def test_tui_goal_continues_with_template_after_incomplete_turn() -> None:
         stop_reason="end_turn",
     )
     tool_use_response = CompletionResponse(
-        content=[ToolUseBlock(id="goal_1", name="update_goal", input={"status": "complete"})],
+        content=[
+            ToolUseBlock(
+                id="goal_1",
+                name="update_goal",
+                input={"status": "complete", "evidence": "The hook behavior was verified."},
+            )
+        ],
         stop_reason="tool_use",
     )
     final_response = CompletionResponse(
@@ -545,7 +557,7 @@ def test_update_goal_tool_result_is_hidden_in_history_rendering() -> None:
                 ToolUseBlock(
                     id="goal_1",
                     name="update_goal",
-                    input={"status": "complete"},
+                    input={"status": "complete", "evidence": "Done."},
                 )
             ],
         ),
@@ -565,7 +577,11 @@ def test_live_update_goal_tool_runs_without_visible_status_or_output() -> None:
     app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
     app.goal = create_goal("Finish silently")
     live = tui._LiveTerminal(app)
-    block = ToolUseBlock(id="goal_1", name="update_goal", input={"status": "complete"})
+    block = ToolUseBlock(
+        id="goal_1",
+        name="update_goal",
+        input={"status": "complete", "evidence": "Verified."},
+    )
 
     try:
         blocks = live._dispatch_tool_with_animated_prompt(block)

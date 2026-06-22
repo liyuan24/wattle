@@ -15,6 +15,10 @@ class UpdateGoalTool(Tool):
         [
             "Update the active Wattle goal.",
             "Use this tool only to mark the goal achieved or genuinely blocked.",
+            (
+                "Every call must include `evidence`: a concise current-state "
+                "summary explaining why the complete or blocked status is justified."
+            ),
             "Set status to `complete` only when the objective has actually been ",
             "achieved and no required work remains.",
             (
@@ -48,9 +52,18 @@ class UpdateGoalTool(Tool):
                     "Set to complete only when the goal is achieved; set to blocked only "
                     "after the strict repeated-blocker audit is satisfied."
                 ),
-            }
+            },
+            "evidence": {
+                "type": "string",
+                "description": (
+                    "Concise current-state evidence for the status change. For complete, "
+                    "summarize the authoritative verification that proves every required "
+                    "piece is done. For blocked, summarize the repeated blocking condition "
+                    "and why no meaningful progress is possible."
+                ),
+            },
         },
-        "required": ["status"],
+        "required": ["status", "evidence"],
         "additionalProperties": False,
     }
 
@@ -67,9 +80,19 @@ class UpdateGoalTool(Tool):
         status = cast(Literal["complete", "blocked"] | None, kwargs.get("status"))
         if status not in ("complete", "blocked"):
             return "update_goal status must be either 'complete' or 'blocked'."
+        evidence = kwargs.get("evidence")
+        if not isinstance(evidence, str) or not evidence.strip():
+            return (
+                "update_goal requires non-empty evidence explaining why the goal is "
+                f"{status}. Keep the goal active and gather stronger evidence if needed."
+            )
         goal = self._get_goal()
         if goal is None:
             return "No goal is currently set."
         result = set_goal_status(goal, cast(GoalStatus, status))
         self._set_goal(result.goal)
-        return f"Goal {result.goal.status}.\n{goal_summary(result.goal)}"
+        return (
+            f"Goal {result.goal.status}.\n"
+            f"Evidence: {evidence.strip()}\n"
+            f"{goal_summary(result.goal)}"
+        )

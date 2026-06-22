@@ -24,7 +24,8 @@ def test_goal_continuation_prompt_includes_objective_without_budget_language() -
     assert "Do not treat file existence" in prompt
     assert "verify the representation" in prompt
     assert "exact types, names, ordering" in prompt
-    assert "call update_goal with status \"complete\"" in prompt
+    assert "\"complete\" and include concise evidence" in prompt
+    assert "include concise evidence explaining the authoritative" in prompt
     assert "call update_goal with status \"blocked\"" in prompt
     assert "Token budget" not in prompt
 
@@ -67,13 +68,28 @@ def test_update_goal_tool_only_marks_existing_goal_complete_or_blocked() -> None
         set_goal=lambda goal: state.__setitem__("goal", goal),
     )
 
-    output = tool.run(status="complete")
+    output = tool.run(status="complete", evidence="Focused tests passed and artifact exists.")
 
     assert state["goal"].status == "complete"
     assert "Goal complete." in output
+    assert "Evidence: Focused tests passed and artifact exists." in output
     assert "Objective: Ship it" in output
+    assert "Every call must include `evidence`" in tool.description
     assert "independent evidence from authoritative sources" in tool.description
     assert "schema shape" in tool.description
     assert "downstream representation contract" in tool.description
     assert "exact parsed types" in tool.description
     assert "either 'complete' or 'blocked'" in tool.run(status="paused")
+
+
+def test_update_goal_tool_rejects_missing_evidence_without_closing_goal() -> None:
+    state = {"goal": create_goal("Verify it")}
+    tool = UpdateGoalTool(
+        get_goal=lambda: state["goal"],
+        set_goal=lambda goal: state.__setitem__("goal", goal),
+    )
+
+    output = tool.run(status="complete")
+
+    assert state["goal"].status == "active"
+    assert "requires non-empty evidence" in output
