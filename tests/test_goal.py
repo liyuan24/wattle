@@ -24,6 +24,8 @@ def test_goal_continuation_prompt_includes_objective_without_budget_language() -
     assert "Do not treat file existence" in prompt
     assert "contradiction pass" in prompt
     assert "plausible alternate interpretations" in prompt
+    assert "validate artifact-first" in prompt
+    assert "script that merely runs" in prompt
     assert "verify the representation" in prompt
     assert "exact types, names, ordering" in prompt
     assert "\"complete\" and include concise evidence" in prompt
@@ -173,6 +175,26 @@ def test_update_goal_tool_rejects_self_referential_artifact_evidence() -> None:
 
     assert state["goal"].status == "active"
     assert "self-referential" in output
+
+
+def test_update_goal_tool_rejects_script_runs_and_schema_evidence() -> None:
+    state = {"goal": create_goal("Generate analyzer")}
+    tool = UpdateGoalTool(
+        get_goal=lambda: state["goal"],
+        set_goal=lambda goal: state.__setitem__("goal", goal),
+    )
+
+    output = tool.run(
+        status="complete",
+        evidence=(
+            "Created /app/analyzer.py. Final validation confirmed the script "
+            "exists, runs on /app/example.mp4, writes /app/output.toml, and the "
+            "output parses as TOML with exactly the required integer fields."
+        ),
+    )
+
+    assert state["goal"].status == "active"
+    assert "only surface validation" in output
 
 
 def test_update_goal_tool_allows_surface_checks_with_semantic_evidence() -> None:
