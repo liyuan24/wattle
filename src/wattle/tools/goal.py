@@ -17,6 +17,12 @@ class UpdateGoalTool(Tool):
             "Use this tool only to mark the goal achieved or genuinely blocked.",
             "Set status to `complete` only when the objective has actually been ",
             "achieved and no required work remains.",
+            (
+                "For data, artifact, or domain-answer goals, complete requires "
+                "independent evidence from authoritative sources; do not rely only "
+                "on file existence, schema shape, finite values, or values matching "
+                "what was already written."
+            ),
             "Set status to `blocked` only when the same blocking condition has ",
             "repeated for at least three consecutive goal turns and the agent cannot ",
             "make meaningful progress without user input or an external-state change.",

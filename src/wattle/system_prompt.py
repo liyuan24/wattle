@@ -28,7 +28,17 @@ VALIDATION_DISCIPLINE_PROMPT = (
     "- Treat tests, validation datasets, benchmarks, request payloads, and "
     "consumer inputs as part of the final interface; a validation result is "
     "credible only when it preserves the same payload contents and input "
-    "contract the delivered result will consume."
+    "contract the delivered result will consume.\n"
+    "- For tasks whose answer depends on source data, measurements, files, or "
+    "domain rules, validate the produced artifact against an independently "
+    "derived oracle from those authoritative sources. Checking only that a file "
+    "exists, has the requested schema, contains finite values, or matches values "
+    "you already wrote is weak evidence; keep working until semantic correctness "
+    "is supported by the strongest available check.\n"
+    "- When public tests, validation scripts, examples, or specifications are "
+    "available, inspect what they actually assert and run them when practical. "
+    "If exact hidden tests are unavailable, build the closest faithful check from "
+    "the task contract instead of validating only a simplified proxy."
 )
 
 DEFAULT_AGENTS_MD_FILENAME = "AGENTS.md"

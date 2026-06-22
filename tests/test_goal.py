@@ -20,6 +20,8 @@ def test_goal_continuation_prompt_includes_objective_without_budget_language() -
 
     assert "Continue working toward the active Wattle goal." in prompt
     assert "Implement &lt;feature&gt; &amp; verify it" in prompt
+    assert "derive an independent oracle" in prompt
+    assert "Do not treat file existence" in prompt
     assert "call update_goal with status \"complete\"" in prompt
     assert "call update_goal with status \"blocked\"" in prompt
     assert "Token budget" not in prompt
@@ -68,4 +70,6 @@ def test_update_goal_tool_only_marks_existing_goal_complete_or_blocked() -> None
     assert state["goal"].status == "complete"
     assert "Goal complete." in output
     assert "Objective: Ship it" in output
+    assert "independent evidence from authoritative sources" in tool.description
+    assert "schema shape" in tool.description
     assert "either 'complete' or 'blocked'" in tool.run(status="paused")
