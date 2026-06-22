@@ -2762,6 +2762,27 @@ def test_live_prompt_wraps_long_input_across_lines() -> None:
     assert "\x1b[8C\x1b[?25h" in rendered
 
 
+def test_live_prompt_wraps_whole_words_to_next_input_line() -> None:
+    out = _TTYBuffer()
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+    app._statusline_enabled = False
+    app._terminal_width = lambda: 10  # type: ignore[method-assign]
+    live = tui._LiveTerminal(app)
+    live.buffer = "hello world"
+    live.cursor = len(live.buffer)
+
+    live._draw_prompt()
+
+    rendered = out.getvalue()
+    assert " > hello " in rendered
+    assert "   world" in rendered
+    assert " > hello w" not in rendered
+    assert "   orld" not in rendered
+    assert live.prompt_lines == 4
+    assert "\x1b[8C\x1b[?25h" in rendered
+
+
 def test_live_prompt_growing_input_overwrites_without_full_clear() -> None:
     out = _TTYBuffer()
     app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)

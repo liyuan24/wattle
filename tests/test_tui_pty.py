@@ -1439,6 +1439,25 @@ def test_pty_up_arrow_moves_cursor_to_previous_wrapped_input_row(tmp_path: Path)
         session.write("/exit\n")
 
 
+def test_pty_input_box_wraps_whole_words_to_next_line(tmp_path: Path) -> None:
+    with PtySession.spawn_python(
+        _echo_prompt_child_code(),
+        cwd=tmp_path,
+        cols=10,
+        rows=20,
+    ) as session:
+        session.read_until(">", timeout=3)
+        session.write("hello world")
+        session.read_until("world", timeout=3)
+        first_row = session.screen.find_row_containing(" > hello")
+        assert "w" not in session.screen.row_text(first_row)
+        assert "   world" in session.screen.row_text(first_row + 1)
+        assert "   orld" not in session.screen.text()
+        session.write("\n")
+        session.read_until("hello world", timeout=3)
+        session.write("/exit\n")
+
+
 def test_pty_shell_mode_uses_bang_prompt_status_and_runs_command(tmp_path: Path) -> None:
     with PtySession.spawn_python(
         _shell_mode_child_code(),

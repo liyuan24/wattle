@@ -2214,6 +2214,7 @@ def _wrap_prompt_input(
     *,
     first_width: int,
     continuation_width: int,
+    preserve_words: bool = False,
 ) -> _PromptInputLines:
     lines = [""]
     positions: list[tuple[int, int] | None] = [None] * (len(preview) + 1)
@@ -2221,7 +2222,10 @@ def _wrap_prompt_input(
     def current_width() -> int:
         return first_width if len(lines) == 1 else continuation_width
 
-    for index, ch in enumerate(preview):
+    def next_width() -> int:
+        return continuation_width
+
+    def append_char(index: int, ch: str) -> None:
         if ch != "\n" and len(lines[-1]) >= current_width():
             lines.append("")
         positions[index] = (len(lines) - 1, len(lines[-1]))
@@ -2230,6 +2234,34 @@ def _wrap_prompt_input(
         else:
             lines[-1] += ch
         positions[index + 1] = (len(lines) - 1, len(lines[-1]))
+
+    if not preserve_words:
+        for index, ch in enumerate(preview):
+            append_char(index, ch)
+    else:
+        index = 0
+        while index < len(preview):
+            ch = preview[index]
+            if ch == "\n" or ch.isspace():
+                append_char(index, ch)
+                index += 1
+                continue
+
+            word_end = index + 1
+            while word_end < len(preview):
+                word_ch = preview[word_end]
+                if word_ch == "\n" or word_ch.isspace():
+                    break
+                word_end += 1
+
+            word_length = word_end - index
+            remaining_width = current_width() - len(lines[-1])
+            if lines[-1] and word_length > remaining_width and word_length <= next_width():
+                lines.append("")
+
+            while index < word_end:
+                append_char(index, preview[index])
+                index += 1
 
     cursor = max(0, min(cursor, len(preview)))
     cursor_position = positions[cursor]
@@ -6172,6 +6204,7 @@ class _LiveTerminal:
             rendered_input.cursor,
             first_width=first_input_width,
             continuation_width=continuation_width,
+            preserve_words=True,
         )
         if len(wrapped_input.lines) <= 1:
             return "single"
@@ -7450,6 +7483,7 @@ class _LiveTerminal:
             cursor,
             first_width=first_input_width,
             continuation_width=continuation_width,
+            preserve_words=True,
         )
         input_lines = wrapped_input.lines
         cursor_line = wrapped_input.cursor_line
