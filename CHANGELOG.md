@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.9.0
+
+### Added
+
+- Added goal continuation hook support, including persisted goal state and update-goal tooling.
+- Added goal mode support for headless prompts.
+- Added stronger completion validation guidance, including semantic validation, representation-contract checks, verifier-minded contradiction passes, and artifact-first validation evidence.
+
+### Changed
+
+- Start goal mode from the raw objective text instead of rewriting the initial goal prompt.
+- Require concrete evidence when updating goals, and reject weak or surface-only completion evidence.
+- Move the final audit reminder from per-tool request preparation into the default stop hook.
+- Add system prompt guidance to avoid temporary files during normal work unless needed for implementation or validation.
+- Improve TUI input word wrapping.
+
+### Fixed
+
+- Fixed dragged image path handling in the TUI.
+- Fixed macOS screenshot drag anchors.
+- Fixed image anchor backspace handling.
+- Isolated Wattle settings during tests.
+
 ## 0.8.0
 
 ### Added
