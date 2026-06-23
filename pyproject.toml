@@ -1,6 +1,6 @@
 [project]
 name = "wattle"
-version = "0.8.0"
+version = "0.9.0"
 description = "Wattle — a pure-Python agent framework in the spirit of Claude Code."
 readme = "README.md"
 authors = [
