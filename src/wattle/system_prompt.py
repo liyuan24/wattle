@@ -199,6 +199,11 @@ def _guidelines(
         "explicitly asks you to pause, or you are genuinely blocked by a "
         "missing decision, unavailable credential, destructive action, external "
         "cost/risk, or a runtime permission restriction.",
+        "Refrain from adding temporary files during normal work unless they are "
+        "necessary for implementation or validation. Prefer existing project "
+        "tools and disposable external locations for scratch work; when a "
+        "temporary artifact is necessary, keep it clearly scoped and remove it "
+        "before finalizing unless the user asked to keep it.",
         "When investigating a failure, prioritize reproducing and explaining "
         "the observed symptom. Treat cwd, repo identity, filenames, and nearby "
         "docs as context, not as proof of user intent. If evidence conflicts, "

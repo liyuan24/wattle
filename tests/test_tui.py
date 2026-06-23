@@ -23,6 +23,7 @@ import pytest
 from wattle import auth, cli, request_preparation, session, settings, tui
 from wattle.command_summary import CommandSummary, CommandSummaryKind
 from wattle.goal import create_goal, set_goal_status
+from wattle.hooks import FINAL_AUDIT_REMINDER
 from wattle.models import ModelChoice
 from wattle.providers import (
     CompletionRequest,
@@ -476,17 +477,23 @@ def test_basic_tui_goal_starts_continuation_and_update_goal_completes() -> None:
         content=[TextBlock(text="Goal complete.")],
         stop_reason="end_turn",
     )
+    audit_response = CompletionResponse(
+        content=[TextBlock(text="Audit complete.")],
+        stop_reason="end_turn",
+    )
     provider = _ScriptedStreamProvider(
         [
             [StreamComplete(response=tool_use_response)],
             [TextDelta(text="Goal complete."), StreamComplete(response=final_response)],
+            [StreamComplete(response=audit_response)],
         ]
     )
 
     out, app = _drive(provider, ["/goal Finish the hook", "/exit"])
 
-    assert len(provider.requests) == 2
+    assert len(provider.requests) == 3
     assert _message_text(provider.requests[0].messages[0]) == "Finish the hook"
+    assert _message_text(provider.requests[2].messages[-1]) == FINAL_AUDIT_REMINDER
     assert app.goal is not None
     assert app.goal.status == "complete"
     assert isinstance(app.messages[1].content[0], ToolUseBlock)
@@ -518,21 +525,27 @@ def test_tui_goal_continues_with_template_after_incomplete_turn() -> None:
         content=[TextBlock(text="Goal complete.")],
         stop_reason="end_turn",
     )
+    audit_response = CompletionResponse(
+        content=[TextBlock(text="Audit complete.")],
+        stop_reason="end_turn",
+    )
     provider = _ScriptedStreamProvider(
         [
             [TextDelta(text="Need another turn."), StreamComplete(response=first_response)],
             [StreamComplete(response=tool_use_response)],
             [TextDelta(text="Goal complete."), StreamComplete(response=final_response)],
+            [StreamComplete(response=audit_response)],
         ]
     )
 
     _out, app = _drive(provider, ["/goal Finish the hook", "/exit"])
 
-    assert len(provider.requests) == 3
+    assert len(provider.requests) == 4
     assert _message_text(provider.requests[0].messages[0]) == "Finish the hook"
     continuation_text = _message_text(provider.requests[1].messages[-1])
     assert "Continue working toward the active Wattle goal." in continuation_text
     assert "<objective>\nFinish the hook\n</objective>" in continuation_text
+    assert _message_text(provider.requests[3].messages[-1]) == FINAL_AUDIT_REMINDER
     assert app.goal is not None
     assert app.goal.status == "complete"
 
@@ -1081,8 +1094,15 @@ def test_resumed_session_ending_with_tool_result_continues_turn(tmp_path: Path) 
     args._resume_session_record = record
     args._resume_session_path = tmp_path / "sess_tool_result.jsonl"
     response = CompletionResponse(content=[TextBlock(text="continued")], stop_reason="end_turn")
+    audit_response = CompletionResponse(
+        content=[TextBlock(text="Audit complete.")],
+        stop_reason="end_turn",
+    )
     provider = _ScriptedStreamProvider(
-        [[TextDelta(text="continued"), StreamComplete(response=response)]]
+        [
+            [TextDelta(text="continued"), StreamComplete(response=response)],
+            [StreamComplete(response=audit_response)],
+        ]
     )
     inputs_iter = iter(["/exit"])
 
@@ -1102,17 +1122,22 @@ def test_resumed_session_ending_with_tool_result_continues_turn(tmp_path: Path) 
     )
     assert app.run() == 0
 
-    assert len(provider.requests) == 1
-    assert provider.requests[0].messages[:-1] == record.messages[:-1]
-    assert provider.requests[0].messages[-1].content[:-1] == record.messages[-1].content
-    checkpoint = provider.requests[0].messages[-1].content[-1]
-    assert isinstance(checkpoint, TextBlock)
-    assert checkpoint.text == request_preparation.POST_TOOL_OBSERVATION_CHECKPOINT
+    assert len(provider.requests) == 2
+    assert provider.requests[0].messages == record.messages
+    assert _message_text(provider.requests[1].messages[-1]) == FINAL_AUDIT_REMINDER
     out = out_buffer.getvalue()
     assert "[resumed] Continuing from saved tool result." in out
     saved = session.load_session(app._session_path)
     assert saved.messages[: len(record.messages)] == record.messages
-    assert saved.messages[-1] == Message(role="assistant", content=[TextBlock(text="continued")])
+    assert saved.messages[-3] == Message(role="assistant", content=[TextBlock(text="continued")])
+    assert saved.messages[-2] == Message(
+        role="user",
+        content=[TextBlock(text=FINAL_AUDIT_REMINDER)],
+    )
+    assert saved.messages[-1] == Message(
+        role="assistant",
+        content=[TextBlock(text="Audit complete.")],
+    )
 
 
 def test_run_tui_resume_picker_uses_latest_session_when_not_interactive(
@@ -6216,10 +6241,15 @@ def test_tui_persists_tool_use_before_tool_execution(
         stop_reason="tool_use",
     )
     end_response = CompletionResponse(content=[TextBlock(text="done")], stop_reason="end_turn")
+    audit_response = CompletionResponse(
+        content=[TextBlock(text="Audit complete.")],
+        stop_reason="end_turn",
+    )
     provider = _ScriptedStreamProvider(
         [
             [StreamComplete(response=tool_use_response)],
             [StreamComplete(response=end_response)],
+            [StreamComplete(response=audit_response)],
         ]
     )
     inputs = iter(["use tool", "/exit"])
@@ -6248,9 +6278,15 @@ def test_tui_persists_tool_use_before_tool_execution(
         "assistant",
         "user",
         "assistant",
+        "user",
+        "assistant",
     ]
     assert isinstance(saved.messages[1].content[0], ToolUseBlock)
     assert isinstance(saved.messages[2].content[0], ToolResultBlock)
+    assert saved.messages[4] == Message(
+        role="user",
+        content=[TextBlock(text=FINAL_AUDIT_REMINDER)],
+    )
 
 
 def test_edit_tool_result_renders_diff_review_style() -> None:

@@ -10,7 +10,7 @@ from __future__ import annotations
 import sys
 from collections.abc import Generator
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 # If the auth module hasn't landed yet (parallel branch), inject a stub so the
 # `from wattle.auth import get_credential` at the top of `wattle.agent` succeeds
@@ -129,7 +129,10 @@ def test_anthropic_provider_wires_anthropic_vendor_key(
         permission_gate=None,
         thinking=False,
         effort=None,
+        turn_stop_hooks=ANY,
+        max_turn_stop_continuations=agent.MAX_HEADLESS_DEFAULT_CONTINUATIONS,
     )
+    assert len(loop_run_sentinel.call_args.kwargs["turn_stop_hooks"]) == 1
     assert result is loop_run_sentinel.sentinel
 
 
@@ -281,7 +284,10 @@ def test_openai_completions_provider_wires_openai_vendor_key(
         permission_gate=None,
         thinking=False,
         effort=None,
+        turn_stop_hooks=ANY,
+        max_turn_stop_continuations=agent.MAX_HEADLESS_DEFAULT_CONTINUATIONS,
     )
+    assert len(loop_run_sentinel.call_args.kwargs["turn_stop_hooks"]) == 1
     assert result is loop_run_sentinel.sentinel
 
 

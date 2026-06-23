@@ -14,9 +14,7 @@ from wattle.providers import (
     ToolResultBlock,
 )
 from wattle.request_preparation import (
-    POST_TOOL_OBSERVATION_CHECKPOINT,
     RequestPreparer,
-    append_post_tool_observation_checkpoint,
     append_runtime_deadline_status,
     project_messages_for_model_modalities,
 )
@@ -297,7 +295,7 @@ def test_runtime_deadline_status_is_appended_at_request_tail() -> None:
     assert append_runtime_deadline_status(messages, None) is messages
 
 
-def test_prepare_adds_provider_only_observation_checkpoint_after_tool_result() -> None:
+def test_prepare_does_not_add_observation_checkpoint_after_tool_result() -> None:
     preparer = RequestPreparer(
         provider=StubProvider([]),
         model="test-model",
@@ -323,27 +321,20 @@ def test_prepare_adds_provider_only_observation_checkpoint_after_tool_result() -
     prepared = asyncio.run(preparer.aprepare(messages))
 
     assert prepared.request.system == "Base system."
-    assert prepared.request.messages[:-1] == messages[:-1]
-    assert prepared.request.messages[-1].content[:-1] == messages[-1].content
-    checkpoint = prepared.request.messages[-1].content[-1]
-    assert isinstance(checkpoint, TextBlock)
-    assert checkpoint.text == POST_TOOL_OBSERVATION_CHECKPOINT
-    assert checkpoint.text.startswith("[system reminder]")
-    assert "derived file, command, or artifact" in checkpoint.text
-    assert "preserves the meaning of the observed inputs" in checkpoint.text
-    assert "check whether the user's request is actually complete" in checkpoint.text
-    assert "what was and was not verified" in checkpoint.text
-    assert "inspect the final changed or new files" in checkpoint.text
-    assert "distinguish validation-only artifacts" in checkpoint.text
-    assert "requested final observable state" in checkpoint.text
-    assert "Remove artifacts created only for validation or temporary work" in checkpoint.text
-    assert "Deliver only files required by the task" in checkpoint.text
+    assert prepared.request.messages == messages
     assert messages[-1].content == [
         ToolResultBlock(tool_use_id="call_1", content="observed output", is_error=False)
     ]
 
 
-def test_post_tool_observation_checkpoint_is_not_added_without_latest_tool_result() -> None:
+def test_prepare_preserves_existing_tool_result_history() -> None:
+    preparer = RequestPreparer(
+        provider=StubProvider([]),
+        model="test-model",
+        system="Base system.",
+        tools=[],
+        max_tokens=1024,
+    )
     messages = [
         Message(
             role="user",
@@ -358,12 +349,9 @@ def test_post_tool_observation_checkpoint_is_not_added_without_latest_tool_resul
         Message(role="assistant", content=[TextBlock(text="next")]),
     ]
 
-    assert append_post_tool_observation_checkpoint(messages) is messages
-    with_checkpoint = append_post_tool_observation_checkpoint(messages[:1])
-    assert (
-        append_post_tool_observation_checkpoint(with_checkpoint)
-        == with_checkpoint
-    )
+    prepared = asyncio.run(preparer.aprepare(messages))
+
+    assert prepared.request.messages == messages
 
 
 def test_runtime_deadline_notice_can_be_loaded_from_env() -> None:

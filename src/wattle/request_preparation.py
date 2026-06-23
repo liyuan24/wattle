@@ -37,29 +37,12 @@ from wattle.providers import (
     Provider,
     StreamEvent,
     TextBlock,
-    ToolResultBlock,
     TransientProviderError,
 )
 from wattle.providers.base import stream_idle_timeout_seconds_from_env
 from wattle.session import message_to_dict
 
 DEFAULT_STREAM_MAX_RETRIES = 3
-POST_TOOL_OBSERVATION_CHECKPOINT = (
-    "[system reminder]\n"
-    "Before choosing the next action, verify that any derived file, command, "
-    "or artifact still matches the user's required interface and preserves "
-    "the meaning of the observed inputs.\n\n"
-    "Before your next action or final answer, check whether the user's request "
-    "is actually complete. If a lightweight verification is useful, run it. "
-    "If not, be clear about what was and was not verified.\n\n"
-    "Before finalizing, inspect the final changed or new files. Before removing "
-    "anything, distinguish validation-only artifacts from files, services, "
-    "processes, data, or external effects that are part of the requested final "
-    "observable state. Remove artifacts "
-    "created only for validation or temporary work unless the user explicitly "
-    "asked for them. Deliver only files required by the task, then re-check the "
-    "final state."
-)
 
 type RetryableProviderError = IncompleteStreamError | TransientProviderError
 type StreamRetryCallback = Callable[[int, int, BaseException, float], None]
@@ -152,9 +135,6 @@ class RequestPreparer:
             messages,
             model=self.model,
         )
-        projected_input_messages = append_post_tool_observation_checkpoint(
-            projected_input_messages
-        )
         request_system = append_runtime_deadline_notice(self.system, self.run_deadline)
         raw_context_tokens = estimate_request_context_tokens(
             system=request_system,
@@ -185,7 +165,6 @@ class RequestPreparer:
             request_messages,
             model=self.model,
         )
-        projected_messages = append_post_tool_observation_checkpoint(projected_messages)
         projected_messages = append_runtime_deadline_status(
             projected_messages,
             self.run_deadline,
@@ -264,31 +243,6 @@ def project_messages_for_model_modalities(
     return [_replace_images_with_text(message, model=model) for message in messages]
 
 
-def append_post_tool_observation_checkpoint(
-    messages: list[Message],
-) -> list[Message]:
-    """Append a compact provider-only check immediately after tool observations."""
-
-    if not _latest_message_has_tool_result(messages):
-        return messages
-    latest = messages[-1]
-    if any(
-        isinstance(block, TextBlock) and block.text == POST_TOOL_OBSERVATION_CHECKPOINT
-        for block in latest.content
-    ):
-        return messages
-    return [
-        *messages[:-1],
-        Message(
-            role=latest.role,
-            content=[*latest.content, TextBlock(text=POST_TOOL_OBSERVATION_CHECKPOINT)],
-            input_tokens=latest.input_tokens,
-            output_tokens=latest.output_tokens,
-            cached_tokens=latest.cached_tokens,
-        ),
-    ]
-
-
 def append_runtime_deadline_status(
     messages: list[Message],
     deadline: RunDeadline | None,
@@ -308,13 +262,6 @@ def append_runtime_deadline_status(
             content=[TextBlock(text=deadline.request_status())],
         ),
     ]
-
-
-def _latest_message_has_tool_result(messages: list[Message]) -> bool:
-    if not messages:
-        return False
-    latest = messages[-1]
-    return any(isinstance(block, ToolResultBlock) for block in latest.content)
 
 
 def _latest_provider_context_tokens(messages: list[Message]) -> int | None:

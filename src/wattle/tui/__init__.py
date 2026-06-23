@@ -58,7 +58,12 @@ from wattle.goal import (
     goal_summary,
     set_goal_status,
 )
-from wattle.hooks import HookContinuation, TurnStopContext, TurnStopHook
+from wattle.hooks import (
+    HookContinuation,
+    TurnStopContext,
+    TurnStopHook,
+    default_turn_stop_hooks,
+)
 from wattle.loop import dispatch_tool_blocks_async
 from wattle.message_history import (
     active_task_guidance_text_blocks,
@@ -3224,7 +3229,8 @@ class WattleApp:
         self.messages: list[Message] = []
         self.goal: GoalState | None = None
         self._turn_stop_hooks: list[TurnStopHook] = [
-            GoalTurnStopHook(lambda: self.goal)
+            *default_turn_stop_hooks(),
+            GoalTurnStopHook(lambda: self.goal),
         ]
         self._goal_start_content: tuple[ContentBlock, ...] | None = None
         self.runtime = DEFAULT_RUNTIME

@@ -58,6 +58,9 @@ def test_build_system_prompt_uses_wattle_default_without_pi_docs(tmp_path: Path)
     assert "Treat fixable follow-up work discovered during validation" in prompt
     assert "rerun focused validation" in prompt
     assert "runtime permission restriction" in prompt
+    assert "Refrain from adding temporary files during normal work" in prompt
+    assert "necessary for implementation or validation" in prompt
+    assert "remove it before finalizing unless the user asked to keep it" in prompt
     assert "When investigating a failure, prioritize reproducing and explaining" in prompt
     assert "keep multiple hypotheses alive until one explains the symptom end to end" in prompt
     assert "For investigation/debugging requests, do not modify existing project files" in prompt

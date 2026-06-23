@@ -28,6 +28,7 @@ from wattle.auth import (
     get_openai_codex_credential,
 )
 from wattle.goal import GoalState, GoalTurnStopHook
+from wattle.hooks import default_turn_stop_hooks
 from wattle.permissions import PermissionMode
 from wattle.providers import (
     AnthropicProvider,
@@ -61,6 +62,7 @@ PROVIDER_TO_VENDOR: dict[str, str] = {
 DEFAULT_PROVIDER_REQUEST_TIMEOUT_SECONDS = 300.0
 PROVIDER_REQUEST_TIMEOUT_ENV = "WATTLE_PROVIDER_REQUEST_TIMEOUT_SECONDS"
 MAX_HEADLESS_GOAL_CONTINUATIONS = 20
+MAX_HEADLESS_DEFAULT_CONTINUATIONS = 1
 
 
 def _provider_request_timeout_seconds() -> float:
@@ -323,13 +325,19 @@ async def arun_agent(
         model=model,
         tools_by_name=goal_tools,
     )
+    turn_stop_hooks = list(default_turn_stop_hooks())
     run_kwargs: dict[str, object] = {
         "permission_gate": None,
         "thinking": thinking,
         "effort": effort,
+        "turn_stop_hooks": turn_stop_hooks,
+        "max_turn_stop_continuations": MAX_HEADLESS_DEFAULT_CONTINUATIONS,
     }
     if goal is not None:
-        run_kwargs["turn_stop_hooks"] = [GoalTurnStopHook(lambda: goal_box["goal"])]
+        run_kwargs["turn_stop_hooks"] = [
+            *turn_stop_hooks,
+            GoalTurnStopHook(lambda: goal_box["goal"]),
+        ]
         run_kwargs["max_turn_stop_continuations"] = MAX_HEADLESS_GOAL_CONTINUATIONS
     return await loop.arun(
         provider,
@@ -416,6 +424,7 @@ async def arun_agent_with_history(
         publish_snapshot()
 
     publish_snapshot()
+    turn_stop_hooks = list(default_turn_stop_hooks())
     run_kwargs = {
         "permission_gate": None,
         "thinking": thinking,
@@ -424,9 +433,14 @@ async def arun_agent_with_history(
         "runtime_events_out": raw_events,
         "messages_callback": on_messages,
         "runtime_event_callback": on_runtime_event,
+        "turn_stop_hooks": turn_stop_hooks,
+        "max_turn_stop_continuations": MAX_HEADLESS_DEFAULT_CONTINUATIONS,
     }
     if goal is not None:
-        run_kwargs["turn_stop_hooks"] = [GoalTurnStopHook(lambda: goal_box["goal"])]
+        run_kwargs["turn_stop_hooks"] = [
+            *turn_stop_hooks,
+            GoalTurnStopHook(lambda: goal_box["goal"]),
+        ]
         run_kwargs["max_turn_stop_continuations"] = MAX_HEADLESS_GOAL_CONTINUATIONS
     response = await loop.arun(
         provider,

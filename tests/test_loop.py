@@ -91,15 +91,12 @@ def test_loop_runs_tool_and_terminates() -> None:
     assert second.messages[1].output_tokens == 5
     assert second.messages[1].cached_tokens == 4
     tool_result_msg = second.messages[2]
-    assert len(tool_result_msg.content) == 2
+    assert len(tool_result_msg.content) == 1
     block = tool_result_msg.content[0]
     assert isinstance(block, ToolResultBlock)
     assert block.tool_use_id == "call_1"
     assert block.is_error is False
     assert "hello" in block.content
-    checkpoint = tool_result_msg.content[1]
-    assert isinstance(checkpoint, TextBlock)
-    assert checkpoint.text == request_preparation.POST_TOOL_OBSERVATION_CHECKPOINT
 
     # Final response is the second scripted one.
     assert result.stop_reason == "end_turn"
@@ -273,9 +270,7 @@ def test_loop_records_provider_request_events_without_runtime_projection(
     ]
     assert provider.requests[0].system == "Base system."
     assert provider.requests[1].system == "Base system."
-    checkpoint = provider.requests[1].messages[2].content[-1]
-    assert isinstance(checkpoint, TextBlock)
-    assert checkpoint.text == request_preparation.POST_TOOL_OBSERVATION_CHECKPOINT
+    assert len(provider.requests[1].messages[2].content) == 1
     assert [message.role for message in messages_out] == [
         "user",
         "assistant",
@@ -649,9 +644,7 @@ def test_loop_yolo_permission_gate_allows_bash_and_preserves_base_system_prompt(
     assert isinstance(result_block, ToolResultBlock)
     assert result_block.is_error is False
     assert "hi" in result_block.content
-    checkpoint = provider.requests[1].messages[2].content[-1]
-    assert isinstance(checkpoint, TextBlock)
-    assert checkpoint.text == request_preparation.POST_TOOL_OBSERVATION_CHECKPOINT
+    assert len(provider.requests[1].messages[2].content) == 1
 
 
 def test_loop_preserves_thinking_blocks_in_history() -> None:
