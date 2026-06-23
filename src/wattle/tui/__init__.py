@@ -3035,6 +3035,18 @@ def _image_placeholder_prompt_mapped_render(
     )
 
 
+def _image_reference_backspace_span(buffer: str, cursor: int) -> tuple[int, int] | None:
+    if cursor <= 0:
+        return None
+    delete_index = cursor - 1
+    for reference in _path_references_from_text(buffer):
+        if _image_media_type(reference.path) is None:
+            continue
+        if reference.start <= delete_index < reference.end:
+            return reference.start, reference.end
+    return None
+
+
 def _first_text_block_text(
     content: list[ContentBlock],
     *,
@@ -5847,12 +5859,17 @@ class _LiveTerminal:
                 self._finalize_voice_space_before_non_space_key()
                 if self.cursor > 0:
                     self._reset_preferred_cursor_column()
-                    delete_start = self.cursor - 1
-                    self.buffer = self.buffer[:delete_start] + self.buffer[self.cursor :]
+                    span = _image_reference_backspace_span(self.buffer, self.cursor)
+                    if span is None:
+                        delete_start = self.cursor - 1
+                        delete_end = self.cursor
+                    else:
+                        delete_start, delete_end = span
+                    self.buffer = self.buffer[:delete_start] + self.buffer[delete_end:]
                     self.pasted_ranges = _delete_pasted_ranges(
                         self.pasted_ranges,
                         start=delete_start,
-                        deleted_length=1,
+                        deleted_length=delete_end - delete_start,
                     )
                     self.cursor = delete_start
                 self._draw_prompt()

@@ -1926,6 +1926,35 @@ def test_live_ctrl_v_inserts_spaces_around_clipboard_image_paths(
     )
 
 
+def test_live_backspace_on_image_anchor_deletes_entire_attachment_path(
+    tmp_path: Path,
+) -> None:
+    image = tmp_path / "dragged image.png"
+    image.write_bytes(PNG_BYTES)
+    escaped_path = str(image).replace(" ", "\\ ")
+    out = _TTYBuffer()
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+    live = tui._LiveTerminal(app)
+    read_fd, write_fd = os.pipe()
+    try:
+        live.fd = read_fd
+        os.write(write_fd, f"check {escaped_path}\x7f".encode())
+        live._read_available_input()
+    finally:
+        os.close(read_fd)
+        os.close(write_fd)
+
+    rendered = tui._image_placeholder_prompt_render(
+        tui._render_prompt_input(live.buffer, live.pasted_ranges, live.cursor)
+    ).text
+    assert live.buffer == "check "
+    assert live.cursor == len("check ")
+    assert rendered == "check "
+    assert str(image) not in rendered
+    assert escaped_path not in rendered
+
+
 def test_absolute_dragged_image_path_is_not_treated_as_slash_command(
     tmp_path: Path,
 ) -> None:
