@@ -74,6 +74,13 @@ def test_build_system_prompt_uses_wattle_default_without_pi_docs(tmp_path: Path)
     assert "why or how current-project behavior works, differs, or regressed" in prompt
     assert "inspect relevant repository files before giving a concrete answer" in prompt
     assert "Use tty=true only for commands that require an interactive terminal" in prompt
+    assert "set the workdir argument instead of prefixing commands" in prompt
+    assert (
+        "Do not use `cd` unless changing directories inside the shell command is necessary"
+        in prompt
+    )
+    assert "prefer separate bash tool calls for independent state checks" in prompt
+    assert "keep chains only when shell short-circuit or pipeline semantics are needed" in prompt
     assert "try `uv run pytest` before using `python -m compileall`" in prompt
     assert "prefer conventional entrypoint names and process shapes" in prompt
     assert "Before starting a long-running, expensive, or quiet operation" in prompt

@@ -594,12 +594,15 @@ def content_block_to_dict(block: ContentBlock) -> dict[str, Any]:
             "input": block.input,
         }
     if isinstance(block, ToolResultBlock) or block_type == "tool_result":
-        return {
+        result = {
             "type": "tool_result",
             "tool_use_id": block.tool_use_id,
             "content": block.content,
             "is_error": block.is_error,
         }
+        if block.metadata:
+            result["metadata"] = block.metadata
+        return result
     if isinstance(block, ThinkingBlock) or block_type == "thinking":
         return {
             "type": "thinking",
@@ -637,6 +640,7 @@ def content_block_from_dict(data: Any) -> ContentBlock:
             tool_use_id=_require_str(data, "tool_use_id"),
             content=_require_str(data, "content"),
             is_error=_require_bool(data, "is_error"),
+            metadata=_optional_dict(data, "metadata"),
         )
     if block_type == "thinking":
         return ThinkingBlock(
@@ -665,6 +669,15 @@ def _compaction_jsonl_line(compaction: SessionCompaction) -> str:
 
 def _require_dict(data: dict[str, Any], key: str) -> dict[str, Any]:
     value = data.get(key)
+    if not isinstance(value, dict):
+        raise ValueError(f"{key!r} must be an object")
+    return value
+
+
+def _optional_dict(data: dict[str, Any], key: str) -> dict[str, Any]:
+    value = data.get(key)
+    if value is None:
+        return {}
     if not isinstance(value, dict):
         raise ValueError(f"{key!r} must be an object")
     return value

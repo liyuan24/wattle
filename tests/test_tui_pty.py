@@ -7,7 +7,6 @@ import textwrap
 from pathlib import Path
 
 import pytest
-
 from pty_harness import PtySession
 
 from wattle import tui
@@ -1277,13 +1276,13 @@ def test_pty_bash_exec_cell_finalizes_with_output(tmp_path: Path) -> None:
         cols=120,
         rows=36,
     ) as session:
-        session.read_until("Ran echo", timeout=4)
+        session.read_until("Ran 2 shell commands", timeout=4)
         session.read_until("Added src/demo.py", timeout=4)
 
         screen_text = session.screen.text()
-        assert "Ran echo hello | sed -n 1p" in screen_text
+        assert "Ran 2 shell commands" in screen_text
         assert "  └ hello" in screen_text
-        assert screen_text.count("Ran echo hello | sed -n 1p") == 1
+        assert screen_text.count("Ran 2 shell commands") == 1
         assert "  hello" not in screen_text
 
 

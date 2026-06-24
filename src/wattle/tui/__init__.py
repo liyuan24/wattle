@@ -44,6 +44,7 @@ from wattle.auth import login_openai_codex, save_api_key_credential
 from wattle.clipboard import ClipboardImage, read_clipboard_image
 from wattle.command_summary import (
     CommandSummary,
+    CommandSummaryKind,
     is_research_summary,
     render_summary_action,
     summarize_tool_call,
@@ -552,6 +553,57 @@ def _bash_exec_output_rows(
     return [*rows[:2], f"... +{omitted} lines", *rows[-2:]]
 
 
+def _bash_exec_metadata_rows(cell: _BashExecCell) -> list[str]:
+    if cell.running or not cell.metadata:
+        return []
+    metadata = cell.metadata
+    if metadata.get("kind") != "command":
+        return []
+    status = metadata.get("status")
+    if status not in {"failed", "timed_out", "cancelled"}:
+        return []
+
+    rows = [f"Status: {_display_command_status(status)}"]
+    elapsed = metadata.get("elapsed_seconds")
+    if isinstance(elapsed, int | float):
+        rows.append(f"Wall time: {elapsed:.2f}s")
+    timeout = metadata.get("timeout_seconds")
+    if status == "timed_out" and isinstance(timeout, int | float):
+        rows.append(f"Requested timeout: {timeout:g}s")
+    exit_code = metadata.get("exit_code")
+    if isinstance(exit_code, int):
+        rows.append(f"Exit code: {exit_code}")
+    elif status in {"failed", "timed_out"}:
+        rows.append("Exit code: unknown")
+    if metadata.get("output_capture_stopped"):
+        rows.append("Output capture stopped: descendant process kept stdout/stderr open")
+    if metadata.get("is_shell_chain"):
+        rows.append(
+            "Hint: This was a chained command. Rerun segments separately to identify "
+            "which step failed."
+        )
+    return rows
+
+
+def _bash_output_for_metadata_cell(cell: _BashExecCell, metadata_rows: list[str]) -> str:
+    if not metadata_rows:
+        return cell.output
+    lines = cell.output.splitlines()
+    if not lines or not lines[0].startswith("Status: "):
+        return cell.output
+    try:
+        output_start = lines.index("Output:") + 1
+    except ValueError:
+        return ""
+    return "\n".join(lines[output_start:])
+
+
+def _display_command_status(status: object) -> str:
+    if status == "timed_out":
+        return "timed out"
+    return str(status).replace("_", " ")
+
+
 def _bash_exec_cell_plain_rows(
     cell: _BashExecCell,
     *,
@@ -562,7 +614,7 @@ def _bash_exec_cell_plain_rows(
     title_prefix = f"{TOOL_MARKER} {status} "
     continuation_prefix = "  │ "
     line_width = _terminal_line_width(width)
-    command = _strip_control(cell.command)
+    command = _strip_control(cell.title_subject or cell.command)
     first_width = max(1, line_width - len(title_prefix))
     continuation_width = max(1, line_width - len(continuation_prefix))
     command_rows = _wrap_prompt_input(
@@ -574,14 +626,17 @@ def _bash_exec_cell_plain_rows(
     rows = [f"{title_prefix}{command_rows[0]}"]
     rows.extend(f"{continuation_prefix}{line}" for line in command_rows[1:])
     output_width = max(1, line_width - 4)
-    for index, line in enumerate(
-        _bash_exec_output_rows(
-            cell.output,
+    metadata_rows = _bash_exec_metadata_rows(cell)
+    output_rows = [
+        *metadata_rows,
+        *_bash_exec_output_rows(
+            _bash_output_for_metadata_cell(cell, metadata_rows),
             width=output_width,
             running=cell.running,
             compact=compact_output,
-        )
-    ):
+        ),
+    ]
+    for index, line in enumerate(output_rows):
         prefix = "  └ " if index == 0 else "    "
         rows.append(f"{prefix}{line}")
     return rows
@@ -868,7 +923,7 @@ def _tool_action_title(block: ToolUseBlock, *, is_error: bool = False) -> str:
             return f"{block.name} error - {_tool_arg(block, 'path', '<missing path>')}"
         return f"{block.name} error"
     summary = summarize_tool_call(block.name, block.input)
-    if is_research_summary(summary):
+    if summary.kind != CommandSummaryKind.UNKNOWN:
         return render_summary_action(summary)
     if block.name == "bash":
         return f"Ran {_tool_arg(block, 'command', '<missing command>')}"
@@ -890,7 +945,7 @@ def _tool_action_title(block: ToolUseBlock, *, is_error: bool = False) -> str:
 
 def _tool_running_title(block: ToolUseBlock) -> str:
     summary = summarize_tool_call(block.name, block.input)
-    if is_research_summary(summary):
+    if summary.kind != CommandSummaryKind.UNKNOWN:
         return render_summary_action(summary)
     if block.name == "bash":
         return f"running bash - {_tool_arg(block, 'command', '<missing command>')}"
@@ -899,6 +954,13 @@ def _tool_running_title(block: ToolUseBlock) -> str:
     if block.name == "wait_agent":
         return WAIT_AGENT_RUNNING_TITLE
     return f"running {block.name}"
+
+
+def _bash_exec_title_subject(block: ToolUseBlock) -> str | None:
+    summary = summarize_tool_call(block.name, block.input)
+    if summary.kind == CommandSummaryKind.SHELL_CHAIN:
+        return summary.subject
+    return None
 
 
 def _tool_edit_title(block: ToolUseBlock, *, path: str, added: int, deleted: int) -> str:
@@ -1306,6 +1368,8 @@ def _tool_call_summary(block: ToolUseBlock) -> str:
             details.append("background")
         if block.input.get("tty"):
             details.append("tty")
+        if "workdir" in block.input:
+            details.append(f"workdir={block.input['workdir']}")
         if "timeout" in block.input:
             details.append(f"timeout={block.input['timeout']}")
         suffix = f" ({', '.join(details)})" if details else ""
@@ -2059,10 +2123,12 @@ class _PromptFrame:
 class _BashExecCell:
     tool_use_id: str
     command: str
+    title_subject: str | None = None
     output: str = ""
     running: bool = True
     is_error: bool = False
     cursor_at_line_start: bool = False
+    metadata: dict[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -4129,9 +4195,11 @@ class WattleApp:
         cell = _BashExecCell(
             tool_use_id=block.id,
             command=_tool_arg(block, "command", "<missing command>"),
+            title_subject=_bash_exec_title_subject(block),
             output=result.content,
             running=False,
             is_error=result.is_error,
+            metadata=result.metadata,
         )
         width = self._terminal_width()
         rows = _bash_exec_cell_plain_rows(
@@ -6634,7 +6702,11 @@ class _LiveTerminal:
                 command=command,
                 max_output_chars=sys.maxsize,
             )
-            result = ToolResultBlock(tool_use_id=block.id, content=str(output.content))
+            result = ToolResultBlock(
+                tool_use_id=block.id,
+                content=str(output.content),
+                metadata=output.metadata,
+            )
         except Exception as exc:  # noqa: BLE001 - match tool dispatch behavior in shell mode
             result = ToolResultBlock(
                 tool_use_id=block.id,

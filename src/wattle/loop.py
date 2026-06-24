@@ -535,6 +535,14 @@ def _first_tool_result(
 
 def _normalize_tool_output(block: ToolUseBlock, output: object) -> list[ContentBlock]:
     if isinstance(output, ToolExecutionResult):
+        if isinstance(output.content, str):
+            return [
+                ToolResultBlock(
+                    tool_use_id=block.id,
+                    content=output.content,
+                    metadata=output.metadata,
+                )
+            ]
         return _normalize_tool_output(block, output.content)
     if isinstance(output, ToolResultBlock):
         return [output]

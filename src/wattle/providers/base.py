@@ -123,6 +123,7 @@ class ToolResultBlock:
     tool_use_id: str
     content: str
     is_error: bool = False
+    metadata: dict[str, Any] = field(default_factory=dict)
     type: Literal["tool_result"] = "tool_result"
 
 

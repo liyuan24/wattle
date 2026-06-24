@@ -5967,6 +5967,44 @@ def test_terminal_bash_tool_externalized_output_hides_metadata() -> None:
     assert "excerpt_chars:" not in rendered
 
 
+def test_terminal_bash_timeout_card_includes_metadata_and_chain_hint() -> None:
+    out = _TTYBuffer()
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = True
+    command = "pwd && git status --short --branch --untracked-files=all && git remote -v"
+    block = ToolUseBlock(
+        id="call_1",
+        name="bash",
+        input={"command": command, "workdir": "/repo", "timeout": 30},
+    )
+    result = ToolResultBlock(
+        tool_use_id="call_1",
+        content="Status: timed out\nWall time: 1.22s\nRequested timeout: 30s\nExit code: unknown",
+        metadata={
+            "kind": "command",
+            "command": command,
+            "workdir": "/repo",
+            "status": "timed_out",
+            "exit_code": None,
+            "elapsed_seconds": 1.22,
+            "timeout_seconds": 30.0,
+            "output_capture_stopped": True,
+            "is_shell_chain": True,
+        },
+    )
+
+    app._write_tool_result(block, result)
+
+    rendered = _strip_ansi(out.getvalue())
+    assert "| Ran 3 shell commands in /repo" in rendered
+    assert "Status: timed out" in rendered
+    assert "Wall time: 1.22s" in rendered
+    assert "Requested timeout: 30s" in rendered
+    assert "Exit code: unknown" in rendered
+    assert "Output capture stopped: descendant process kept stdout/stderr open" in rendered
+    assert "This was a chained command" in rendered
+
+
 def test_terminal_bash_tool_title_uses_token_styles() -> None:
     out = _TTYBuffer()
     app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)

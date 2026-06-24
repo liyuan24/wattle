@@ -10,7 +10,10 @@ import subprocess
 import sys
 import threading
 import time
+from contextlib import suppress
 from pathlib import Path
+
+import pytest
 
 from wattle.runtime import WattleRuntime
 from wattle.tools.bash import BashTool
@@ -38,10 +41,8 @@ def _pid_is_alive(pid: int) -> bool:
 
 
 def _cleanup_pid(pid: int) -> None:
-    try:
+    with suppress(ProcessLookupError):
         os.kill(pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
 
 
 def _spawn_sleeping_child_command(pid_file: Path, *, start_new_session: bool = False) -> str:
@@ -71,6 +72,34 @@ def test_foreground_output_elapsed_and_exit_code(tmp_path: Path) -> None:
     assert "[stderr]\nerr" in output
     assert "[exit 3]" in output
     assert "[elapsed " in output
+
+
+def test_foreground_uses_workdir_without_cd(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "marker.txt").write_text("ok")
+    tool = BashTool(cwd=tmp_path)
+
+    result = tool.run_execution_result("pwd && ls marker.txt", workdir="project")
+    output = str(result.content)
+
+    assert str(project) in output
+    assert "marker.txt" in output
+    assert result.metadata["workdir"] == str(project)
+
+
+def test_foreground_rejects_invalid_workdir(tmp_path: Path) -> None:
+    tool = BashTool(cwd=tmp_path)
+
+    with pytest.raises(ValueError, match="workdir does not exist"):
+        tool.run("pwd", workdir="missing")
+
+
+def test_bash_schema_exposes_workdir() -> None:
+    schema = BashTool.input_schema
+
+    assert "workdir" in schema["properties"]
+    assert "cd" in schema["properties"]["workdir"]["description"]
 
 
 def test_foreground_replaces_invalid_utf8_output(tmp_path: Path) -> None:
@@ -135,7 +164,8 @@ def test_foreground_timeout_clamps_and_kills_process_group(monkeypatch, tmp_path
     assert communicate_timeouts[0] == 600.0
     assert communicate_timeouts[1] == BashTool.PIPE_DRAIN_TIMEOUT_SECONDS
     assert killed_pgids == [12345]
-    assert "[timeout after 600s;" in output
+    assert "Status: timed out" in output
+    assert "Requested timeout: 600s" in output
 
 
 def test_foreground_timeout_returns_when_descendant_keeps_pipe_open(tmp_path: Path) -> None:
@@ -154,7 +184,8 @@ def test_foreground_timeout_returns_when_descendant_keeps_pipe_open(tmp_path: Pa
     elapsed = time.monotonic() - started_at
 
     assert elapsed < 2.0
-    assert "[timeout after 0.1s;" in output
+    assert "Status: timed out" in output
+    assert "Requested timeout: 0.1s" in output
     assert "descendant process kept stdout/stderr open" in output
 
 

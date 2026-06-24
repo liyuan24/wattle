@@ -248,6 +248,17 @@ def _guidelines(
             "interactive terminal, such as shells, REPLs, prompts, or full-screen tools."
         )
         guidelines.append(
+            "For bash commands, set the workdir argument instead of prefixing commands "
+            "with `cd ... &&`. Do not use `cd` unless changing directories inside the "
+            "shell command is necessary."
+        )
+        guidelines.append(
+            "When investigating command failures, prefer separate bash tool calls for "
+            "independent state checks before mutating commands. Avoid long command "
+            "chains when each command's output matters independently; keep chains only "
+            "when shell short-circuit or pipeline semantics are needed."
+        )
+        guidelines.append(
             "When validating Python projects, prefer the repository's configured runner "
             "before falling back to weaker checks. For example, if bare `pytest` is not "
             "available but the repo has `uv.lock` or a `pyproject.toml` with dev "

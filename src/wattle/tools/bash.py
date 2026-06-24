@@ -13,6 +13,7 @@ from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
 
+from wattle.command_summary import analyze_shell_chain
 from wattle.git_attribution import apply_git_attribution_env
 from wattle.runtime import TaskStatus, WattleRuntime
 from wattle.settings import load_settings
@@ -37,6 +38,7 @@ class BashTool(Tool):
     description = (
         "Execute a shell command in the user's default shell and return its combined "
         "stdout/stderr. Non-zero exit codes are reported in the output, not raised. "
+        "Set workdir instead of prefixing commands with cd. "
         "Do not use bash to create or edit files; use write for new files and edit "
         "for existing file changes."
     )
@@ -46,6 +48,13 @@ class BashTool(Tool):
             "command": {
                 "type": "string",
                 "description": "The shell command to execute.",
+            },
+            "workdir": {
+                "type": "string",
+                "description": (
+                    "Directory to run the command in. Prefer this over `cd ... &&`; "
+                    "relative paths resolve against Wattle's current working directory."
+                ),
             },
             "timeout": {
                 "type": "number",
@@ -93,6 +102,7 @@ class BashTool(Tool):
     def run(
         self,
         command: str,
+        workdir: str | None = None,
         timeout: float = 120.0,
         background: bool = False,
         tty: bool = False,
@@ -102,6 +112,7 @@ class BashTool(Tool):
         return str(
             self.run_execution_result(
                 command=command,
+                workdir=workdir,
                 timeout=timeout,
                 background=background,
                 tty=tty,
@@ -113,18 +124,30 @@ class BashTool(Tool):
     def run_execution_result(
         self,
         command: str,
+        workdir: str | None = None,
         timeout: float = 120.0,
         background: bool = False,
         tty: bool = False,
         max_output_chars: int | None = None,
         max_event_chars: int | None = None,
     ) -> ToolExecutionResult:
+        resolved_workdir = self._resolve_workdir(workdir)
         if background:
-            return self._run_background(command, tty=tty)
+            return self._run_background(command, cwd=resolved_workdir, tty=tty)
         output_limit = _output_limit(max_output_chars, max_event_chars)
         if tty:
-            return self._run_foreground_tty(command, timeout, max_output_chars=output_limit)
-        return self._run_foreground_piped(command, timeout, max_output_chars=output_limit)
+            return self._run_foreground_tty(
+                command,
+                timeout,
+                cwd=resolved_workdir,
+                max_output_chars=output_limit,
+            )
+        return self._run_foreground_piped(
+            command,
+            timeout,
+            cwd=resolved_workdir,
+            max_output_chars=output_limit,
+        )
 
     async def arun_with_events(
         self,
@@ -133,6 +156,7 @@ class BashTool(Tool):
         tool_use_id: str,
         cancel_event: threading.Event | None = None,
         command: str,
+        workdir: str | None = None,
         timeout: float = 120.0,
         background: bool = False,
         tty: bool = False,
@@ -144,6 +168,7 @@ class BashTool(Tool):
             tool_use_id=tool_use_id,
             cancel_event=cancel_event,
             command=command,
+            workdir=workdir,
             timeout=timeout,
             background=background,
             tty=tty,
@@ -159,6 +184,7 @@ class BashTool(Tool):
         tool_use_id: str,
         cancel_event: threading.Event | None = None,
         command: str,
+        workdir: str | None = None,
         timeout: float = 120.0,
         background: bool = False,
         tty: bool = False,
@@ -170,6 +196,7 @@ class BashTool(Tool):
             emit=emit,
             tool_use_id=tool_use_id,
             command=command,
+            workdir=workdir,
             timeout=timeout,
             background=background,
             tty=tty,
@@ -184,6 +211,7 @@ class BashTool(Tool):
         emit: Callable[[ToolRunEvent], None],
         tool_use_id: str,
         command: str,
+        workdir: str | None,
         timeout: float,
         background: bool,
         tty: bool,
@@ -191,8 +219,9 @@ class BashTool(Tool):
         max_event_chars: int | None,
         cancel_event: threading.Event | None,
     ) -> ToolExecutionResult:
+        resolved_workdir = self._resolve_workdir(workdir)
         if background:
-            return self._run_background(command, tty=tty)
+            return self._run_background(command, cwd=resolved_workdir, tty=tty)
         output_limit = _output_limit(max_output_chars, max_event_chars)
         emit(ToolRunEvent(tool_use_id, self.name, "started", command))
         try:
@@ -200,6 +229,7 @@ class BashTool(Tool):
                 return self._run_foreground_tty(
                     command,
                     timeout,
+                    cwd=resolved_workdir,
                     max_output_chars=output_limit,
                     emit=lambda text: emit(
                         ToolRunEvent(tool_use_id, self.name, "output", text, "combined")
@@ -209,6 +239,7 @@ class BashTool(Tool):
             return self._run_foreground_piped(
                 command,
                 timeout,
+                cwd=resolved_workdir,
                 max_output_chars=output_limit,
                 emit=lambda text, stream: emit(
                     ToolRunEvent(tool_use_id, self.name, "output", text, stream)
@@ -223,18 +254,19 @@ class BashTool(Tool):
         command: str,
         timeout: float,
         *,
+        cwd: Path,
         max_output_chars: int | None = None,
         emit: Callable[[str, str], None] | None = None,
         cancel_event: threading.Event | None = None,
     ) -> ToolExecutionResult:
         clamped_timeout = min(float(timeout), self.MAX_TIMEOUT_SECONDS)
         started_at = time.monotonic()
-        attribution = self._git_attribution_env(command)
+        attribution = self._git_attribution_env(command, cwd=cwd)
         existing_pids = _process_snapshot()
         process = subprocess.Popen(
             command,
             shell=True,
-            cwd=self.cwd,
+            cwd=cwd,
             env=attribution.env,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -268,7 +300,7 @@ class BashTool(Tool):
                 parts.append(stdout_text.rstrip("\n"))
             if stderr_text:
                 parts.append(f"[stderr]\n{stderr_text.rstrip(chr(10))}")
-            _kill_new_processes_under_cwd(existing_pids, self.cwd)
+            _kill_new_processes_under_cwd(existing_pids, cwd)
             output = externalize_large_output(
                 _prepend_warnings("\n".join(parts), attribution.warnings),
                 root=self.cwd,
@@ -278,7 +310,7 @@ class BashTool(Tool):
             return _bash_result(
                 output,
                 command=command,
-                cwd=self.cwd,
+                cwd=cwd,
                 status="cancelled",
                 exit_code=None,
                 elapsed_seconds=elapsed,
@@ -316,15 +348,17 @@ class BashTool(Tool):
                 with suppress(subprocess.TimeoutExpired):
                     process.wait(timeout=0.1)
             elapsed = time.monotonic() - started_at
-            parts = [f"[timeout after {clamped_timeout:g}s; elapsed {elapsed:.2f}s]"]
-            if capture_incomplete:
-                parts.append("[output capture stopped: descendant process kept stdout/stderr open]")
             stdout_text = _decode_output(stdout)
             stderr_text = _decode_output(stderr)
-            if stdout_text:
-                parts.append(stdout_text.rstrip("\n"))
-            if stderr_text:
-                parts.append(f"[stderr]\n{stderr_text.rstrip(chr(10))}")
+            parts = _structured_command_output(
+                status="timed_out",
+                elapsed_seconds=elapsed,
+                timeout_seconds=clamped_timeout,
+                exit_code=None,
+                stdout_text=stdout_text,
+                stderr_text=stderr_text,
+                output_capture_stopped=capture_incomplete,
+            )
             output = externalize_large_output(
                 _prepend_warnings("\n".join(parts), attribution.warnings),
                 root=self.cwd,
@@ -334,17 +368,18 @@ class BashTool(Tool):
             return _bash_result(
                 output,
                 command=command,
-                cwd=self.cwd,
+                cwd=cwd,
                 status="timed_out",
                 exit_code=None,
                 elapsed_seconds=elapsed,
                 timeout_seconds=clamped_timeout,
                 stdout_tail=stdout_text,
                 stderr_tail=stderr_text,
+                output_capture_stopped=capture_incomplete,
             )
 
         _kill_process_group(process.pid)
-        _kill_new_processes_under_cwd(existing_pids, self.cwd)
+        _kill_new_processes_under_cwd(existing_pids, cwd)
         parts = list(attribution.warnings)
         stdout_text = _decode_output(stdout)
         stderr_text = _decode_output(stderr)
@@ -371,8 +406,8 @@ class BashTool(Tool):
         return _bash_result(
             output,
             command=command,
-            cwd=self.cwd,
-            status="success" if process.returncode == 0 else "failed",
+            cwd=cwd,
+            status="completed" if process.returncode == 0 else "failed",
             exit_code=process.returncode,
             elapsed_seconds=elapsed,
             timeout_seconds=clamped_timeout,
@@ -385,6 +420,7 @@ class BashTool(Tool):
         command: str,
         timeout: float,
         *,
+        cwd: Path,
         max_output_chars: int | None = None,
         emit: Callable[[str], None] | None = None,
         cancel_event: threading.Event | None = None,
@@ -392,12 +428,12 @@ class BashTool(Tool):
         clamped_timeout = min(float(timeout), self.MAX_TIMEOUT_SECONDS)
         started_at = time.monotonic()
         master_fd, slave_fd = pty.openpty()
-        attribution = self._git_attribution_env(command)
+        attribution = self._git_attribution_env(command, cwd=cwd)
         existing_pids = _process_snapshot()
         process = subprocess.Popen(
             command,
             shell=True,
-            cwd=self.cwd,
+            cwd=cwd,
             env=attribution.env,
             stdin=slave_fd,
             stdout=slave_fd,
@@ -446,7 +482,7 @@ class BashTool(Tool):
                     break
         finally:
             _kill_process_group(process.pid)
-            _kill_new_processes_under_cwd(existing_pids, self.cwd)
+            _kill_new_processes_under_cwd(existing_pids, cwd)
             with suppress(OSError):
                 os.close(master_fd)
 
@@ -457,10 +493,20 @@ class BashTool(Tool):
             parts.append(f"[stopped by user after {elapsed:.2f}s]")
         elif timed_out:
             elapsed = time.monotonic() - started_at
-            parts.append(f"[timeout after {clamped_timeout:g}s; elapsed {elapsed:.2f}s]")
-        if output_text:
+            parts.extend(
+                _structured_command_output(
+                    status="timed_out",
+                    elapsed_seconds=elapsed,
+                    timeout_seconds=clamped_timeout,
+                    exit_code=None,
+                    stdout_text=output_text,
+                    stderr_text="",
+                    output_capture_stopped=False,
+                )
+            )
+        if output_text and not timed_out:
             parts.append(output_text)
-        if process.returncode not in (0, None):
+        if not timed_out and not cancelled and process.returncode not in (0, None):
             parts.append(f"[exit {process.returncode}]")
         if not parts:
             parts.append("[no output]")
@@ -481,25 +527,26 @@ class BashTool(Tool):
         elif timed_out:
             status = "timed_out"
         elif process.returncode == 0:
-            status = "success"
+            status = "completed"
         else:
             status = "failed"
         return _bash_result(
             output,
             command=command,
-            cwd=self.cwd,
+            cwd=cwd,
             status=status,
             exit_code=process.returncode,
             elapsed_seconds=elapsed,
             timeout_seconds=clamped_timeout,
             stdout_tail=output_text,
             stderr_tail="",
+            output_capture_stopped=False,
         )
 
-    def _run_background(self, command: str, *, tty: bool) -> ToolExecutionResult:
+    def _run_background(self, command: str, *, cwd: Path, tty: bool) -> ToolExecutionResult:
         started_at = time.time()
         log_path = self.runtime.tasks.jobs_dir / f"shell-{int(started_at * 1000)}-{os.getpid()}.log"
-        attribution = self._git_attribution_env(command)
+        attribution = self._git_attribution_env(command, cwd=cwd)
         log_file = log_path.open("ab")
         try:
             if tty:
@@ -507,7 +554,7 @@ class BashTool(Tool):
                 process = subprocess.Popen(
                     command,
                     shell=True,
-                    cwd=self.cwd,
+                    cwd=cwd,
                     env=attribution.env,
                     stdin=slave_fd,
                     stdout=slave_fd,
@@ -524,7 +571,7 @@ class BashTool(Tool):
                 process = subprocess.Popen(
                     command,
                     shell=True,
-                    cwd=self.cwd,
+                    cwd=cwd,
                     env=attribution.env,
                     stdout=log_file,
                     stderr=subprocess.STDOUT,
@@ -573,7 +620,7 @@ class BashTool(Tool):
         return _bash_result(
             output,
             command=command,
-            cwd=self.cwd,
+            cwd=cwd,
             status="background",
             exit_code=None,
             elapsed_seconds=0.0,
@@ -585,10 +632,26 @@ class BashTool(Tool):
             status_path=str(task.status_path),
         )
 
-    def _git_attribution_env(self, command: str):
+    def _resolve_workdir(self, workdir: str | None) -> Path:
+        if workdir is None or str(workdir).strip() == "":
+            candidate = self.cwd
+        else:
+            raw = Path(str(workdir)).expanduser()
+            candidate = raw if raw.is_absolute() else self.cwd / raw
+        try:
+            resolved = candidate.resolve()
+        except OSError as exc:
+            raise ValueError(f"workdir does not exist or cannot be resolved: {workdir}") from exc
+        if not resolved.exists():
+            raise ValueError(f"workdir does not exist: {resolved}")
+        if not resolved.is_dir():
+            raise ValueError(f"workdir is not a directory: {resolved}")
+        return resolved
+
+    def _git_attribution_env(self, command: str, *, cwd: Path):
         return apply_git_attribution_env(
             os.environ,
-            cwd=self.cwd,
+            cwd=cwd,
             state_root=self.runtime.tasks.root,
             command=command,
             enabled=load_settings().git_commit_attribution,
@@ -736,6 +799,40 @@ def _prepend_warnings(output: str, warnings: tuple[str, ...]) -> str:
     return "\n".join([*warnings, output])
 
 
+def _structured_command_output(
+    *,
+    status: str,
+    elapsed_seconds: float,
+    timeout_seconds: float | None,
+    exit_code: int | None,
+    stdout_text: str,
+    stderr_text: str,
+    output_capture_stopped: bool,
+) -> list[str]:
+    parts = [
+        f"Status: {_display_status(status)}",
+        f"Wall time: {elapsed_seconds:.2f}s",
+    ]
+    if timeout_seconds is not None:
+        parts.append(f"Requested timeout: {timeout_seconds:g}s")
+    parts.append(f"Exit code: {exit_code if exit_code is not None else 'unknown'}")
+    if output_capture_stopped:
+        parts.append("Output capture stopped: descendant process kept stdout/stderr open")
+    if stdout_text or stderr_text:
+        parts.append("Output:")
+        if stdout_text:
+            parts.append(stdout_text.rstrip("\n"))
+        if stderr_text:
+            parts.append(f"[stderr]\n{stderr_text.rstrip(chr(10))}")
+    return parts
+
+
+def _display_status(status: str) -> str:
+    if status == "timed_out":
+        return "timed out"
+    return status.replace("_", " ")
+
+
 def _output_limit(
     max_output_chars: int | None,
     max_event_chars: int | None,
@@ -767,6 +864,7 @@ def _bash_result(
     timeout_seconds: float | None,
     stdout_tail: str,
     stderr_tail: str,
+    output_capture_stopped: bool = False,
     background_task_id: str | None = None,
     log_path: str | None = None,
     status_path: str | None = None,
@@ -775,16 +873,24 @@ def _bash_result(
         "kind": "command",
         "command": command,
         "cwd": str(cwd),
+        "workdir": str(cwd),
+        "original_command": command,
         "status": status,
         "exit_code": exit_code,
         "elapsed_seconds": elapsed_seconds,
         "timeout_seconds": timeout_seconds,
+        "output_capture_stopped": output_capture_stopped,
         "background_task_id": background_task_id,
         "log_path": log_path,
         "status_path": status_path,
         "stdout_tail": _tail_text(stdout_tail),
         "stderr_tail": _tail_text(stderr_tail),
     }
+    chain = analyze_shell_chain(command)
+    if chain is not None and chain.command_count > 1:
+        metadata["is_shell_chain"] = True
+        metadata["shell_chain_segments"] = [" ".join(segment) for segment in chain.segments]
+        metadata["shell_chain_operators"] = list(chain.operators)
     output_artifact = _full_output_path_from_text(content)
     if output_artifact is not None:
         metadata["output_artifact"] = output_artifact
