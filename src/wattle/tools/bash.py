@@ -9,6 +9,7 @@ import signal
 import subprocess
 import threading
 import time
+import uuid
 from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
@@ -33,6 +34,7 @@ class _ProcessCancelled(Exception):
 class BashTool(Tool):
     MAX_TIMEOUT_SECONDS = 600.0
     PIPE_DRAIN_TIMEOUT_SECONDS = 1.0
+    RUN_ID_ENV = "WATTLE_BASH_RUN_ID"
 
     name = "bash"
     description = (
@@ -262,12 +264,13 @@ class BashTool(Tool):
         clamped_timeout = min(float(timeout), self.MAX_TIMEOUT_SECONDS)
         started_at = time.monotonic()
         attribution = self._git_attribution_env(command, cwd=cwd)
-        existing_pids = _process_snapshot()
+        run_id = uuid.uuid4().hex
+        env = _env_with_run_id(attribution.env, self.RUN_ID_ENV, run_id)
         process = subprocess.Popen(
             command,
             shell=True,
             cwd=cwd,
-            env=attribution.env,
+            env=env,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             start_new_session=True,
@@ -300,7 +303,7 @@ class BashTool(Tool):
                 parts.append(stdout_text.rstrip("\n"))
             if stderr_text:
                 parts.append(f"[stderr]\n{stderr_text.rstrip(chr(10))}")
-            _kill_new_processes_under_cwd(existing_pids, cwd)
+            _kill_new_processes_under_cwd(self.RUN_ID_ENV, run_id, cwd)
             output = externalize_large_output(
                 _prepend_warnings("\n".join(parts), attribution.warnings),
                 root=self.cwd,
@@ -347,6 +350,7 @@ class BashTool(Tool):
                     os.killpg(process.pid, signal.SIGKILL)
                 with suppress(subprocess.TimeoutExpired):
                     process.wait(timeout=0.1)
+            _kill_new_processes_under_cwd(self.RUN_ID_ENV, run_id, cwd)
             elapsed = time.monotonic() - started_at
             stdout_text = _decode_output(stdout)
             stderr_text = _decode_output(stderr)
@@ -379,7 +383,7 @@ class BashTool(Tool):
             )
 
         _kill_process_group(process.pid)
-        _kill_new_processes_under_cwd(existing_pids, cwd)
+        _kill_new_processes_under_cwd(self.RUN_ID_ENV, run_id, cwd)
         parts = list(attribution.warnings)
         stdout_text = _decode_output(stdout)
         stderr_text = _decode_output(stderr)
@@ -429,12 +433,13 @@ class BashTool(Tool):
         started_at = time.monotonic()
         master_fd, slave_fd = pty.openpty()
         attribution = self._git_attribution_env(command, cwd=cwd)
-        existing_pids = _process_snapshot()
+        run_id = uuid.uuid4().hex
+        env = _env_with_run_id(attribution.env, self.RUN_ID_ENV, run_id)
         process = subprocess.Popen(
             command,
             shell=True,
             cwd=cwd,
-            env=attribution.env,
+            env=env,
             stdin=slave_fd,
             stdout=slave_fd,
             stderr=slave_fd,
@@ -482,7 +487,7 @@ class BashTool(Tool):
                     break
         finally:
             _kill_process_group(process.pid)
-            _kill_new_processes_under_cwd(existing_pids, cwd)
+            _kill_new_processes_under_cwd(self.RUN_ID_ENV, run_id, cwd)
             with suppress(OSError):
                 os.close(master_fd)
 
@@ -683,7 +688,7 @@ def _communicate_with_output_events(
             )
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise subprocess.TimeoutExpired(process.args, timeout)
+            raise _timeout_expired(process, timeout, stdout_chunks, stderr_chunks)
         readable, _, _ = select.select(list(streams), [], [], min(0.1, remaining))
         if not readable:
             if process.poll() is not None:
@@ -701,8 +706,32 @@ def _communicate_with_output_events(
                     emit(_decode_output(data), stream)
             else:
                 streams.pop(fd, None)
-    process.wait(timeout=0)
+    while process.poll() is None:
+        if cancel_event is not None and cancel_event.is_set():
+            raise _ProcessCancelled(
+                b"".join(stdout_chunks),
+                b"".join(stderr_chunks),
+            )
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise _timeout_expired(process, timeout, stdout_chunks, stderr_chunks)
+        with suppress(subprocess.TimeoutExpired):
+            process.wait(timeout=min(0.1, remaining))
     return b"".join(stdout_chunks), b"".join(stderr_chunks)
+
+
+def _timeout_expired(
+    process: subprocess.Popen[bytes],
+    timeout: float,
+    stdout_chunks: list[bytes],
+    stderr_chunks: list[bytes],
+) -> subprocess.TimeoutExpired:
+    return subprocess.TimeoutExpired(
+        process.args,
+        timeout,
+        output=b"".join(stdout_chunks),
+        stderr=b"".join(stderr_chunks),
+    )
 
 
 def _read_pty(fd: int) -> bytes:
@@ -734,14 +763,13 @@ def _kill_process_group(pgid: int) -> None:
         os.killpg(pgid, signal.SIGKILL)
 
 
-def _process_snapshot() -> set[int]:
-    proc = Path("/proc")
-    if not proc.exists():
-        return set()
-    return {int(path.name) for path in proc.iterdir() if path.name.isdigit()}
+def _env_with_run_id(env: dict[str, str], name: str, value: str) -> dict[str, str]:
+    next_env = dict(env)
+    next_env[name] = value
+    return next_env
 
 
-def _kill_new_processes_under_cwd(existing_pids: set[int], cwd: Path) -> None:
+def _kill_new_processes_under_cwd(env_name: str, env_value: str, cwd: Path) -> None:
     try:
         root = cwd.resolve()
     except OSError:
@@ -757,7 +785,7 @@ def _kill_new_processes_under_cwd(existing_pids: set[int], cwd: Path) -> None:
         if not path.name.isdigit():
             continue
         pid = int(path.name)
-        if pid in existing_pids or pid == current_pid:
+        if pid == current_pid:
             continue
         try:
             process_cwd = (path / "cwd").resolve()
@@ -765,8 +793,19 @@ def _kill_new_processes_under_cwd(existing_pids: set[int], cwd: Path) -> None:
             continue
         if not _is_relative_to(process_cwd, root):
             continue
+        if not _process_has_env(path / "environ", env_name, env_value):
+            continue
         with suppress(ProcessLookupError, PermissionError):
             os.kill(pid, signal.SIGKILL)
+
+
+def _process_has_env(environ_path: Path, name: str, value: str) -> bool:
+    try:
+        environ = environ_path.read_bytes()
+    except (FileNotFoundError, PermissionError, OSError):
+        return False
+    needle = f"{name}={value}".encode()
+    return any(entry == needle for entry in environ.split(b"\0") if entry)
 
 
 def _is_relative_to(path: Path, root: Path) -> bool:

@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 from wattle.runtime import WattleRuntime
-from wattle.tools.bash import BashTool
+from wattle.tools.bash import BashTool, _kill_new_processes_under_cwd
 
 
 def _python_command(code: str) -> str:
@@ -217,6 +217,28 @@ def test_foreground_piped_kills_new_session_descendants_under_cwd(tmp_path: Path
         _cleanup_pid(child_pid)
 
 
+def test_foreground_cleanup_does_not_kill_unrelated_process_under_cwd(tmp_path: Path) -> None:
+    process = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        cwd=tmp_path,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        _kill_new_processes_under_cwd(
+            BashTool.RUN_ID_ENV,
+            "different-run",
+            tmp_path,
+        )
+
+        assert process.poll() is None
+    finally:
+        _cleanup_pid(process.pid)
+        with suppress(subprocess.TimeoutExpired):
+            process.wait(timeout=1)
+
+
 def test_foreground_tty_allocates_terminal(tmp_path: Path) -> None:
     tool = BashTool(cwd=tmp_path)
     command = _python_command("import os; print(f'tty={os.isatty(1)}')")
@@ -283,6 +305,50 @@ def test_foreground_piped_emits_output_events(tmp_path: Path) -> None:
         event.kind == "output" and event.stream == "stderr" and "err" in event.text
         for event in events
     )
+
+
+def test_foreground_piped_events_waits_for_process_after_pipe_eof(tmp_path: Path) -> None:
+    tool = BashTool(cwd=tmp_path)
+    events = []
+    command = _python_command(
+        "import os, sys, time; os.close(1); os.close(2); time.sleep(0.05); sys.exit(7)"
+    )
+
+    output = asyncio.run(
+        tool.arun_with_events(
+            emit=events.append,
+            tool_use_id="call_1",
+            command=command,
+            timeout=2,
+        )
+    )
+
+    assert "Status: timed out" not in output
+    assert "[exit 7]" in output
+    assert events[0].kind == "started"
+    assert events[-1].kind == "completed"
+
+
+def test_foreground_piped_events_timeout_after_pipe_eof(tmp_path: Path) -> None:
+    tool = BashTool(cwd=tmp_path)
+    command = _python_command(
+        "import os, time; os.close(1); os.close(2); time.sleep(30)"
+    )
+
+    started_at = time.monotonic()
+    output = asyncio.run(
+        tool.arun_with_events(
+            emit=lambda _event: None,
+            tool_use_id="call_1",
+            command=command,
+            timeout=0.05,
+        )
+    )
+    elapsed = time.monotonic() - started_at
+
+    assert elapsed < 1.0
+    assert "Status: timed out" in output
+    assert "Requested timeout: 0.05s" in output
 
 
 def test_foreground_tty_emits_combined_output_events(tmp_path: Path) -> None:
