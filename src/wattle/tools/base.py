@@ -36,6 +36,7 @@ class Tool(ABC):
     description: ClassVar[str]
     # Any: same JSON-Schema rationale as ToolSpec.input_schema above.
     input_schema: ClassVar[dict[str, Any]]
+    supports_parallel_tool_calls: ClassVar[bool] = False
 
     @abstractmethod
     # Any: kwargs are deserialized from the model's tool-call arguments

@@ -261,6 +261,45 @@ class _RecordingTool(Tool):
         return f"echoed: {kwargs.get('message', '')}"
 
 
+class _ParallelRecordingTool(Tool):
+    name = "parallel_echo"
+    supports_parallel_tool_calls = True
+    description = "Return back the given message with a concurrency probe."
+    input_schema = {
+        "type": "object",
+        "properties": {
+            "message": {"type": "string"},
+            "wait_for_peer": {"type": "boolean"},
+        },
+        "required": ["message"],
+    }
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.started = threading.Condition(self.lock)
+        self.started_count = 0
+        self.active = 0
+        self.max_active = 0
+
+    def run(self, message: str, wait_for_peer: bool = True) -> str:
+        with self.started:
+            self.started_count += 1
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+            self.started.notify_all()
+            if wait_for_peer:
+                deadline = time.monotonic() + 1.0
+                while self.started_count < 2:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    self.started.wait(timeout=remaining)
+        time.sleep(0.03)
+        with self.started:
+            self.active -= 1
+        return f"echoed: {message}"
+
+
 class _DiffEditTool(Tool):
     name = "edit"
     description = "Return a focused edit diff."
@@ -4808,6 +4847,45 @@ def test_live_dispatch_uses_inflight_tools_after_model_switch(
         isinstance(block, ToolResultBlock) and block.tool_use_id == "call_1" and not block.is_error
         for block in blocks
     )
+
+
+def test_live_parallel_safe_dispatch_preserves_order_and_inflight_results(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tool = _ParallelRecordingTool()
+    monkeypatch.setitem(TOOLS_BY_NAME, tool.name, tool)
+    out = _TTYBuffer()
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+    live = tui._LiveTerminal(app)
+    live.streaming = True
+    response = CompletionResponse(
+        content=[
+            ToolUseBlock(
+                id="call_1",
+                name=tool.name,
+                input={"message": "one", "wait_for_peer": True},
+            ),
+            ToolUseBlock(
+                id="call_2",
+                name=tool.name,
+                input={"message": "two", "wait_for_peer": True},
+            ),
+        ],
+        stop_reason="tool_use",
+    )
+
+    returned = live._dispatch_tools_with_prompt(response)
+
+    assert tool.max_active == 2
+    assert [
+        block.tool_use_id for block in returned if isinstance(block, ToolResultBlock)
+    ] == ["call_1", "call_2"]
+    assert [block.tool_use_id for block in live.inflight_tool_results] == [
+        "call_1",
+        "call_2",
+    ]
+    assert "running 2 tools" not in _strip_ansi(out.getvalue()).lower()
 
 
 def test_live_inflight_resize_replay_tracks_only_tool_results() -> None:

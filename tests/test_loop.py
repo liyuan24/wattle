@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import threading
+import time
 from collections import deque
 from collections.abc import AsyncIterator, Iterable
 from pathlib import Path
 
 from wattle import request_preparation
-from wattle.loop import run, run_streaming
+from wattle.loop import run, run_streaming, tool_supports_parallel_tool_calls
 from wattle.permissions import PermissionGate, PermissionMode
 from wattle.providers import (
     CompletionRequest,
@@ -31,6 +33,114 @@ from wattle.providers import (
 )
 from wattle.runtime import WattleRuntime
 from wattle.tools import BashTool
+from wattle.tools.base import Tool
+from wattle.tools.edit import EditTool
+from wattle.tools.image import ViewImageTool
+from wattle.tools.read import ReadTool
+from wattle.tools.write import WriteTool
+
+
+class _ConcurrentProbeTool(Tool):
+    name = "probe"
+    supports_parallel_tool_calls = True
+    description = "Probe concurrent dispatch."
+    input_schema = {
+        "type": "object",
+        "properties": {
+            "label": {"type": "string"},
+            "wait_for_peer": {"type": "boolean"},
+        },
+        "required": ["label"],
+    }
+
+    def __init__(self, global_events: list[str] | None = None) -> None:
+        self.lock = threading.Lock()
+        self.started = threading.Condition(self.lock)
+        self.started_count = 0
+        self.active = 0
+        self.max_active = 0
+        self.events: list[str] = []
+        self.global_events = global_events
+
+    def run(self, label: str, wait_for_peer: bool = True) -> str:
+        with self.started:
+            self.events.append(f"start:{label}")
+            if self.global_events is not None:
+                self.global_events.append(f"start:{label}")
+            self.started_count += 1
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+            self.started.notify_all()
+            if wait_for_peer:
+                deadline = time.monotonic() + 1.0
+                while self.started_count < 2:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    self.started.wait(timeout=remaining)
+        time.sleep(0.03)
+        with self.started:
+            self.events.append(f"finish:{label}")
+            if self.global_events is not None:
+                self.global_events.append(f"finish:{label}")
+            self.active -= 1
+        return f"result:{label}"
+
+
+class _ConcurrentBashProbeTool(_ConcurrentProbeTool):
+    name = "bash"
+    description = "Probe safe bash concurrent dispatch."
+    input_schema = {
+        "type": "object",
+        "properties": {
+            "command": {"type": "string"},
+            "label": {"type": "string"},
+            "wait_for_peer": {"type": "boolean"},
+        },
+        "required": ["command", "label"],
+    }
+
+    def run(
+        self,
+        command: str,
+        label: str,
+        wait_for_peer: bool = True,
+        **_kwargs: object,
+    ) -> str:
+        del command
+        return super().run(label=label, wait_for_peer=wait_for_peer)
+
+
+class _SerializedProbeTool(Tool):
+    name = "write"
+    description = "Probe serialized dispatch."
+    input_schema = {
+        "type": "object",
+        "properties": {"label": {"type": "string"}},
+        "required": ["label"],
+    }
+
+    def __init__(self, global_events: list[str] | None = None) -> None:
+        self.lock = threading.Lock()
+        self.active = 0
+        self.max_active = 0
+        self.events: list[str] = []
+        self.global_events = global_events
+
+    def run(self, label: str) -> str:
+        with self.lock:
+            self.events.append(f"start:{label}")
+            if self.global_events is not None:
+                self.global_events.append(f"start:{label}")
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+        time.sleep(0.03)
+        with self.lock:
+            self.events.append(f"finish:{label}")
+            if self.global_events is not None:
+                self.global_events.append(f"finish:{label}")
+            self.active -= 1
+        return f"wrote:{label}"
 
 
 def test_loop_runs_tool_and_terminates() -> None:
@@ -113,6 +223,210 @@ def test_loop_runs_tool_and_terminates() -> None:
     assert messages_out[1].cached_tokens == 4
     assert messages_out[3].input_tokens == 20
     assert messages_out[3].output_tokens == 8
+
+
+def test_builtin_tool_parallel_safety_metadata_keeps_mutations_serialized() -> None:
+    assert ReadTool.supports_parallel_tool_calls is True
+    assert ViewImageTool.supports_parallel_tool_calls is True
+    assert WriteTool.supports_parallel_tool_calls is False
+    assert EditTool.supports_parallel_tool_calls is False
+
+
+def test_bash_parallel_safety_allows_only_simple_search_and_list_commands() -> None:
+    bash = BashTool()
+    tools = {bash.name: bash}
+
+    assert tool_supports_parallel_tool_calls(
+        ToolUseBlock(id="rg", name="bash", input={"command": "rg needle src"}),
+        tools,
+    )
+    assert tool_supports_parallel_tool_calls(
+        ToolUseBlock(id="git-grep", name="bash", input={"command": "git grep TODO"}),
+        tools,
+    )
+    assert tool_supports_parallel_tool_calls(
+        ToolUseBlock(id="files", name="bash", input={"command": "find src -type f"}),
+        tools,
+    )
+
+    unsafe_inputs = [
+        {"command": "rg needle src | head"},
+        {"command": "python -c 'print(1)'"},
+        {"command": "git status"},
+        {"command": "find src -delete"},
+        {"command": "find src -exec cat {} ;"},
+        {"command": "rg needle src", "background": True},
+        {"command": "rg needle src", "tty": True},
+    ]
+    for index, tool_input in enumerate(unsafe_inputs):
+        assert not tool_supports_parallel_tool_calls(
+            ToolUseBlock(id=f"unsafe-{index}", name="bash", input=tool_input),
+            tools,
+        )
+
+
+def test_loop_dispatches_parallel_safe_tools_concurrently_and_preserves_order() -> None:
+    tool = _ConcurrentProbeTool()
+    scripted = [
+        CompletionResponse(
+            content=[
+                ToolUseBlock(
+                    id="call_slow",
+                    name=tool.name,
+                    input={"label": "slow", "wait_for_peer": True},
+                ),
+                ToolUseBlock(
+                    id="call_fast",
+                    name=tool.name,
+                    input={"label": "fast", "wait_for_peer": True},
+                ),
+            ],
+            stop_reason="tool_use",
+        ),
+        CompletionResponse(content=[TextBlock(text="done")], stop_reason="end_turn"),
+    ]
+    provider = StubProvider(scripted)
+
+    run(
+        provider=provider,
+        tools_by_name={tool.name: tool},
+        system=None,
+        user_input="probe",
+        model="stub-model",
+    )
+
+    assert tool.max_active == 2
+    followup = provider.requests[1].messages[2]
+    assert [
+        block.tool_use_id for block in followup.content if isinstance(block, ToolResultBlock)
+    ] == ["call_slow", "call_fast"]
+    assert [
+        block.content for block in followup.content if isinstance(block, ToolResultBlock)
+    ] == ["result:slow", "result:fast"]
+
+
+def test_loop_dispatches_safe_bash_searches_concurrently_and_preserves_order() -> None:
+    tool = _ConcurrentBashProbeTool()
+    scripted = [
+        CompletionResponse(
+            content=[
+                ToolUseBlock(
+                    id="bash_1",
+                    name=tool.name,
+                    input={
+                        "command": "rg needle src",
+                        "label": "one",
+                        "wait_for_peer": True,
+                    },
+                ),
+                ToolUseBlock(
+                    id="bash_2",
+                    name=tool.name,
+                    input={
+                        "command": "git grep TODO",
+                        "label": "two",
+                        "wait_for_peer": True,
+                    },
+                ),
+            ],
+            stop_reason="tool_use",
+        ),
+        CompletionResponse(content=[TextBlock(text="done")], stop_reason="end_turn"),
+    ]
+    provider = StubProvider(scripted)
+
+    run(
+        provider=provider,
+        tools_by_name={tool.name: tool},
+        system=None,
+        user_input="probe bash",
+        model="stub-model",
+    )
+
+    assert tool.max_active == 2
+    followup = provider.requests[1].messages[2]
+    assert [
+        block.tool_use_id for block in followup.content if isinstance(block, ToolResultBlock)
+    ] == ["bash_1", "bash_2"]
+
+
+def test_loop_serialized_tool_is_barrier_between_parallel_safe_groups() -> None:
+    events: list[str] = []
+    read_tool = _ConcurrentProbeTool(events)
+    write_tool = _SerializedProbeTool(events)
+    scripted = [
+        CompletionResponse(
+            content=[
+                ToolUseBlock(
+                    id="read_1",
+                    name=read_tool.name,
+                    input={"label": "before", "wait_for_peer": False},
+                ),
+                ToolUseBlock(
+                    id="write_1",
+                    name=write_tool.name,
+                    input={"label": "barrier"},
+                ),
+                ToolUseBlock(
+                    id="read_2",
+                    name=read_tool.name,
+                    input={"label": "after", "wait_for_peer": False},
+                ),
+            ],
+            stop_reason="tool_use",
+        ),
+        CompletionResponse(content=[TextBlock(text="done")], stop_reason="end_turn"),
+    ]
+    provider = StubProvider(scripted)
+
+    run(
+        provider=provider,
+        tools_by_name={read_tool.name: read_tool, write_tool.name: write_tool},
+        system=None,
+        user_input="probe",
+        model="stub-model",
+    )
+
+    assert read_tool.max_active == 1
+    assert write_tool.max_active == 1
+    assert events == [
+        "start:before",
+        "finish:before",
+        "start:barrier",
+        "finish:barrier",
+        "start:after",
+        "finish:after",
+    ]
+    followup = provider.requests[1].messages[2]
+    assert [
+        block.tool_use_id for block in followup.content if isinstance(block, ToolResultBlock)
+    ] == ["read_1", "write_1", "read_2"]
+
+
+def test_loop_keeps_writes_serialized() -> None:
+    write_tool = _SerializedProbeTool()
+    scripted = [
+        CompletionResponse(
+            content=[
+                ToolUseBlock(id="write_1", name=write_tool.name, input={"label": "one"}),
+                ToolUseBlock(id="write_2", name=write_tool.name, input={"label": "two"}),
+            ],
+            stop_reason="tool_use",
+        ),
+        CompletionResponse(content=[TextBlock(text="done")], stop_reason="end_turn"),
+    ]
+    provider = StubProvider(scripted)
+
+    run(
+        provider=provider,
+        tools_by_name={write_tool.name: write_tool},
+        system=None,
+        user_input="probe",
+        model="stub-model",
+    )
+
+    assert write_tool.max_active == 1
+    assert write_tool.events == ["start:one", "finish:one", "start:two", "finish:two"]
 
 
 def test_loop_omits_stale_tool_attached_image_on_followup_request(tmp_path: Path) -> None:

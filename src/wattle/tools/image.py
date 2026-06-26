@@ -13,6 +13,7 @@ MAX_IMAGE_BYTES = 20 * 1024 * 1024
 
 class ViewImageTool(Tool):
     name = "view_image"
+    supports_parallel_tool_calls = True
     description = (
         "Attach a local image to the next model turn so the model can inspect it. "
         "Use this first for screenshots, debug images, and visual UI issues."

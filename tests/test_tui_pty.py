@@ -563,6 +563,123 @@ def _tool_rendering_child_code() -> str:
     )
 
 
+def _parallel_read_child_code() -> str:
+    return textwrap.dedent(
+        """
+        import argparse
+        import threading
+        import time
+
+        from wattle.permissions import PermissionMode
+        from wattle.providers import (
+            CompletionResponse,
+            Provider,
+            StreamComplete,
+            TextBlock,
+            TextDelta,
+            ToolUseBlock,
+            ToolUseDelta,
+        )
+        from wattle.tools import TOOLS_BY_NAME
+        from wattle.tools.base import Tool
+        from wattle.tui import WattleApp
+
+
+        class ParallelReadTool(Tool):
+            name = "read"
+            supports_parallel_tool_calls = True
+            description = "Parallel test read."
+            input_schema = {
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"],
+            }
+            started = threading.Condition()
+            started_count = 0
+            max_active = 0
+            active = 0
+
+            def run(self, path):
+                with self.started:
+                    type(self).started_count += 1
+                    type(self).active += 1
+                    type(self).max_active = max(type(self).max_active, type(self).active)
+                    self.started.notify_all()
+                    deadline = time.monotonic() + 1.0
+                    while type(self).started_count < 2:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            break
+                        self.started.wait(timeout=remaining)
+                time.sleep(0.1 if path == "first.txt" else 0.02)
+                with self.started:
+                    type(self).active -= 1
+                return f"path: {path}\\nlines: 1-1 of 1\\n     1\\t{path}"
+
+
+        TOOLS_BY_NAME["read"] = ParallelReadTool()
+
+
+        class ParallelReadProvider(Provider):
+            def __init__(self):
+                self.calls = 0
+
+            async def acomplete(self, request):
+                return CompletionResponse(
+                    content=[TextBlock(text="done")],
+                    stop_reason="end_turn",
+                    usage={},
+                )
+
+            async def astream(self, request):
+                self.calls += 1
+                if self.calls == 1:
+                    yield ToolUseDelta(id="read_1", name="read", partial_json=None)
+                    yield ToolUseDelta(id="read_2", name="read", partial_json=None)
+                    yield StreamComplete(
+                        CompletionResponse(
+                            content=[
+                                ToolUseBlock(
+                                    id="read_1",
+                                    name="read",
+                                    input={"path": "first.txt"},
+                                ),
+                                ToolUseBlock(
+                                    id="read_2",
+                                    name="read",
+                                    input={"path": "second.txt"},
+                                ),
+                            ],
+                            stop_reason="tool_use",
+                            usage={},
+                        )
+                    )
+                    return
+                yield TextDelta(text="done")
+                yield StreamComplete(
+                    CompletionResponse(
+                        content=[TextBlock(text="done")],
+                        stop_reason="end_turn",
+                        usage={},
+                    )
+                )
+
+
+        args = argparse.Namespace(
+            provider="openai_responses",
+            model="gpt-5.5",
+            max_tokens=4096,
+            thinking=False,
+            effort=None,
+            prompt="parallel reads",
+            persist_session=False,
+            permission_mode=PermissionMode.YOLO,
+        )
+        raise SystemExit(WattleApp(args, ParallelReadProvider()).run())
+        """
+    )
+
+
 def _slow_second_write_child_code() -> str:
     return textwrap.dedent(
         """
@@ -1248,6 +1365,26 @@ def test_pty_research_tool_calls_render_aggregate(tmp_path: Path) -> None:
         assert "Read other.txt" in screen_text
         assert "Read third.txt" in screen_text
         assert "read ok - notes.txt" not in screen_text
+
+
+def test_pty_parallel_read_dispatch_preserves_order_without_aggregate_status(
+    tmp_path: Path,
+) -> None:
+    with PtySession.spawn_python(
+        _parallel_read_child_code(),
+        cwd=tmp_path,
+        cols=120,
+        rows=36,
+    ) as session:
+        session.read_until("Read first.txt", timeout=4)
+        session.read_until("done", timeout=4)
+
+        screen_text = session.screen.text()
+        assert "Read first.txt" in screen_text
+        assert "Read second.txt" in screen_text
+        assert screen_text.index("Read first.txt") < screen_text.index("Read second.txt")
+        assert "running 2 tools" not in screen_text.lower()
+        assert "running read ×2" not in screen_text.lower()
 
 
 def test_pty_resize_preserves_completed_inflight_diff_rendering(tmp_path: Path) -> None:

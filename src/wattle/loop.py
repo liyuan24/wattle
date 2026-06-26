@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import shlex
 import threading
 from collections.abc import Callable, Mapping, MutableSequence, Sequence
 from typing import Any, Literal, cast
@@ -211,18 +212,15 @@ async def arun(
             publish_messages()
             continue
 
-        tool_results: list[ContentBlock] = []
-        for block in response.content:
-            if not isinstance(block, ToolUseBlock):
-                continue
-            tool_results.extend(
-                await dispatch_tool_blocks_async(
-                    block,
-                    model_tools_by_name,
-                    permission_gate,
-                    runtime_event_callback=on_runtime_event,
-                )
-            )
+        tool_use_blocks = [
+            block for block in response.content if isinstance(block, ToolUseBlock)
+        ]
+        tool_results = await dispatch_tool_blocks_batch_async(
+            tool_use_blocks,
+            model_tools_by_name,
+            permission_gate,
+            runtime_event_callback=on_runtime_event,
+        )
         monitor_blocks = _drain_monitor_event_blocks(runtime)
 
         # An assistant turn with stop_reason="tool_use" but no ToolUseBlocks
@@ -397,18 +395,15 @@ async def arun_streaming(
             publish_messages()
             continue
 
-        tool_results: list[ContentBlock] = []
-        for block in response.content:
-            if not isinstance(block, ToolUseBlock):
-                continue
-            tool_results.extend(
-                await dispatch_tool_blocks_async(
-                    block,
-                    model_tools_by_name,
-                    permission_gate,
-                    runtime_event_callback=on_runtime_event,
-                )
-            )
+        tool_use_blocks = [
+            block for block in response.content if isinstance(block, ToolUseBlock)
+        ]
+        tool_results = await dispatch_tool_blocks_batch_async(
+            tool_use_blocks,
+            model_tools_by_name,
+            permission_gate,
+            runtime_event_callback=on_runtime_event,
+        )
         monitor_blocks = _drain_monitor_event_blocks(runtime)
 
         followup_blocks = [*tool_results, *monitor_blocks]
@@ -419,6 +414,130 @@ async def arun_streaming(
         publish_messages()
 
     raise RuntimeError("unreachable streaming agent loop exit")
+
+
+_PARALLEL_SAFE_BASH_COMMANDS = frozenset({"find", "git", "grep", "rg", "ls", "tree"})
+_PARALLEL_SAFE_GIT_SUBCOMMANDS = frozenset({"grep", "ls-files"})
+_UNSAFE_FIND_FLAGS = frozenset({"-delete", "-exec", "-execdir", "-ok", "-okdir"})
+_UNSAFE_BASH_SUBSTRINGS = ("|", ";", "&", ">", "<", "`", "$(", "\n")
+
+
+def _bash_call_is_parallel_safe(block: ToolUseBlock) -> bool:
+    if block.input.get("background") is True or block.input.get("tty") is True:
+        return False
+    command = block.input.get("command")
+    if not isinstance(command, str):
+        return False
+    if any(token in command for token in _UNSAFE_BASH_SUBSTRINGS):
+        return False
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return False
+    if not words:
+        return False
+    executable = words[0].rsplit("/", 1)[-1]
+    if executable not in _PARALLEL_SAFE_BASH_COMMANDS:
+        return False
+    if executable == "git":
+        return len(words) >= 2 and words[1] in _PARALLEL_SAFE_GIT_SUBCOMMANDS
+    if executable == "find":
+        return not any(flag in _UNSAFE_FIND_FLAGS for flag in words[1:])
+    return True
+
+
+def tool_supports_parallel_tool_calls(
+    block: ToolUseBlock,
+    tools_by_name: Mapping[str, Tool],
+) -> bool:
+    """Return whether a tool call may run concurrently with other safe calls."""
+
+    tool = tools_by_name.get(block.name)
+    if tool is None:
+        return False
+    if block.name == "bash":
+        return _bash_call_is_parallel_safe(block)
+    return bool(getattr(tool, "supports_parallel_tool_calls", False))
+
+
+async def dispatch_tool_block_groups_async(
+    blocks: Sequence[ToolUseBlock],
+    tools_by_name: Mapping[str, Tool],
+    permission_gate: PermissionGate | None = None,
+    tool_event_callback: Callable[[ToolRunEvent], None] | None = None,
+    cancel_event: threading.Event | None = None,
+    runtime_event_callback: Callable[[dict[str, Any]], None] | None = None,
+) -> list[tuple[ToolUseBlock, list[ContentBlock]]]:
+    """Dispatch tool calls with safe parallelism while preserving result order.
+
+    Consecutive calls whose tools opt in to parallel dispatch are gathered. Calls
+    without that opt-in run one at a time and form barriers, so mutating tools do
+    not race with reads before or after them. Returned groups follow assistant
+    tool-call order even when parallel calls finish out of order.
+    """
+
+    results: list[tuple[ToolUseBlock, list[ContentBlock]]] = []
+    pending_parallel: list[ToolUseBlock] = []
+
+    async def flush_parallel() -> None:
+        nonlocal pending_parallel
+        if not pending_parallel:
+            return
+        batch = pending_parallel
+        pending_parallel = []
+        batch_results = await asyncio.gather(
+            *(
+                dispatch_tool_blocks_async(
+                    block,
+                    tools_by_name,
+                    permission_gate,
+                    tool_event_callback=tool_event_callback,
+                    cancel_event=cancel_event,
+                    runtime_event_callback=runtime_event_callback,
+                )
+                for block in batch
+            )
+        )
+        results.extend(zip(batch, batch_results, strict=True))
+
+    for block in blocks:
+        if tool_supports_parallel_tool_calls(block, tools_by_name):
+            pending_parallel.append(block)
+            continue
+        await flush_parallel()
+        block_results = await dispatch_tool_blocks_async(
+            block,
+            tools_by_name,
+            permission_gate,
+            tool_event_callback=tool_event_callback,
+            cancel_event=cancel_event,
+            runtime_event_callback=runtime_event_callback,
+        )
+        results.append((block, block_results))
+
+    await flush_parallel()
+    return results
+
+
+async def dispatch_tool_blocks_batch_async(
+    blocks: Sequence[ToolUseBlock],
+    tools_by_name: Mapping[str, Tool],
+    permission_gate: PermissionGate | None = None,
+    tool_event_callback: Callable[[ToolRunEvent], None] | None = None,
+    cancel_event: threading.Event | None = None,
+    runtime_event_callback: Callable[[dict[str, Any]], None] | None = None,
+) -> list[ContentBlock]:
+    """Dispatch multiple tool calls and flatten their ordered content blocks."""
+
+    groups = await dispatch_tool_block_groups_async(
+        blocks,
+        tools_by_name,
+        permission_gate,
+        tool_event_callback=tool_event_callback,
+        cancel_event=cancel_event,
+        runtime_event_callback=runtime_event_callback,
+    )
+    return [content for _block, group in groups for content in group]
 
 
 async def dispatch_tool_async(

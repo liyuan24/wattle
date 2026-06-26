@@ -31,6 +31,7 @@ UNICODE_SPACES = str.maketrans(
 
 class ReadTool(Tool):
     name = "read"
+    supports_parallel_tool_calls = True
     description = (
         "Read a text file from disk. Returns contents prefixed with 1-indexed line numbers. "
         "Use offset/limit for large files. Output is capped with continuation hints."

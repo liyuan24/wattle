@@ -65,7 +65,11 @@ from wattle.hooks import (
     TurnStopHook,
     default_turn_stop_hooks,
 )
-from wattle.loop import dispatch_tool_blocks_async
+from wattle.loop import (
+    dispatch_tool_block_groups_async,
+    dispatch_tool_blocks_async,
+    tool_supports_parallel_tool_calls,
+)
 from wattle.message_history import (
     active_task_guidance_text_blocks,
     interrupted_user_text_blocks,
@@ -4058,6 +4062,21 @@ class WattleApp:
         return final_response
 
     async def _adispatch_tools(self, response: CompletionResponse) -> list[ContentBlock]:
+        tool_blocks = [
+            block for block in response.content if isinstance(block, ToolUseBlock)
+        ]
+        groups = await dispatch_tool_block_groups_async(
+            tool_blocks,
+            self._available_tools(),
+            self.permission_gate,
+            runtime_event_callback=self._record_runtime_event,
+        )
+        return self._render_dispatched_tool_groups(groups)
+
+    def _render_dispatched_tool_groups(
+        self,
+        groups: Sequence[tuple[ToolUseBlock, list[ContentBlock]]],
+    ) -> list[ContentBlock]:
         results: list[ContentBlock] = []
         pending_research: list[CommandSummary] = []
         pending_edit_group: _EditRenderGroup | None = None
@@ -4073,15 +4092,7 @@ class WattleApp:
                 self._write_edit_result_group(pending_edit_group)
                 pending_edit_group = None
 
-        for block in response.content:
-            if not isinstance(block, ToolUseBlock):
-                continue
-            blocks = await dispatch_tool_blocks_async(
-                block,
-                self._available_tools(),
-                self.permission_gate,
-                runtime_event_callback=self._record_runtime_event,
-            )
+        for block, blocks in groups:
             result = _first_tool_result(block, blocks)
             if _tool_hidden_in_tui(block):
                 results.extend(blocks)
@@ -7441,58 +7452,131 @@ class _LiveTerminal:
         self,
         response: CompletionResponse,
     ) -> list[ContentBlock]:
-        results: list[ContentBlock] = []
-        pending_research: list[CommandSummary] = []
-        pending_edit_group: _EditRenderGroup | None = None
+        tools_by_name = self.inflight_tools_by_name or self.app._available_tools()
+        groups: list[tuple[ToolUseBlock, list[ContentBlock]]] = []
+        pending_parallel: list[ToolUseBlock] = []
 
-        def flush_research() -> None:
-            if pending_research:
-                self.app._write_research_result(pending_research)
-                pending_research.clear()
-
-        def flush_edit_group() -> None:
-            nonlocal pending_edit_group
-            if pending_edit_group is not None:
-                self.app._write_edit_result_group(pending_edit_group)
-                pending_edit_group = None
+        def flush_parallel() -> None:
+            if not pending_parallel:
+                return
+            batch = list(pending_parallel)
+            pending_parallel.clear()
+            groups.extend(self._dispatch_tool_group_with_animated_prompt(batch, tools_by_name))
 
         for block in response.content:
             if not isinstance(block, ToolUseBlock):
                 continue
-            blocks = self._dispatch_tool_with_animated_prompt(block)
-            result = _first_tool_result(block, blocks)
-            self.inflight_tool_results.append(result)
-            if _tool_hidden_in_tui(block):
-                results.extend(blocks)
+            if tool_supports_parallel_tool_calls(block, tools_by_name):
+                pending_parallel.append(block)
                 continue
-            edit_item = _edit_render_item(block, result)
-            summary = _research_summary_for_success(block, result)
-            if edit_item is not None:
-                flush_research()
-                if pending_edit_group is None:
-                    pending_edit_group = _EditRenderGroup(
-                        path=edit_item.path,
-                        items=[edit_item],
+            flush_parallel()
+            groups.append((block, self._dispatch_tool_with_animated_prompt(block)))
+        flush_parallel()
+
+        for block, blocks in groups:
+            self.inflight_tool_results.append(_first_tool_result(block, blocks))
+        return self.app._render_dispatched_tool_groups(groups)
+
+    def _dispatch_tool_group_with_animated_prompt(
+        self,
+        blocks: Sequence[ToolUseBlock],
+        tools_by_name: Mapping[str, Tool],
+    ) -> list[tuple[ToolUseBlock, list[ContentBlock]]]:
+        if not blocks:
+            return []
+        if len(blocks) == 1:
+            block = blocks[0]
+            return [(block, self._dispatch_tool_with_animated_prompt(block))]
+
+        result_box: list[list[tuple[ToolUseBlock, list[ContentBlock]]]] = []
+        cancel_event = self.active_turn_cancel_event
+
+        def run_tools() -> None:
+            result_box.append(
+                asyncio.run(
+                    dispatch_tool_block_groups_async(
+                        blocks,
+                        tools_by_name,
+                        self.app.permission_gate,
+                        tool_event_callback=self._tool_event_queue.put,
+                        cancel_event=cancel_event,
+                        runtime_event_callback=self.app._record_runtime_event,
                     )
-                elif pending_edit_group.path == edit_item.path:
-                    pending_edit_group.items.append(edit_item)
+                )
+            )
+
+        visible_blocks = [block for block in blocks if not _tool_hidden_in_tui(block)]
+        self.active_tool_status = (
+            _tool_running_title(visible_blocks[0]) if visible_blocks else None
+        )
+        self._last_running_frame_at = 0.0
+        self._last_tool_output_prompt_redraw_at = 0.0
+        self._draw_prompt()
+        worker = threading.Thread(
+            target=run_tools,
+            name="wattle-tool-parallel",
+            daemon=True,
+        )
+        worker.start()
+        try:
+            prompt_dirty = False
+            tool_output_redraw_interval = 0.12
+            while worker.is_alive():
+                if self.fd >= 0:
+                    self._read_available_input()
+                if not self.streaming:
+                    return [
+                        (
+                            block,
+                            [
+                                ToolResultBlock(
+                                    tool_use_id=block.id,
+                                    content="Interrupted by user.",
+                                    is_error=True,
+                                )
+                            ],
+                        )
+                        for block in blocks
+                    ]
+                now = time.monotonic()
+                if self._drain_tool_events():
+                    prompt_dirty = True
+                should_redraw_prompt = (
+                    prompt_dirty
+                    or bool(self.active_exec_cells)
+                ) and now - self._last_tool_output_prompt_redraw_at >= tool_output_redraw_interval
+                if should_redraw_prompt:
+                    self._last_tool_output_prompt_redraw_at = now
+                    self._last_running_frame_at = now
+                    self._draw_prompt()
+                    prompt_dirty = False
                 else:
-                    flush_edit_group()
-                    pending_edit_group = _EditRenderGroup(
-                        path=edit_item.path,
-                        items=[edit_item],
+                    self._last_running_frame_at = now
+                    self._redraw_running_status_line()
+                worker.join(timeout=0.04)
+        finally:
+            if self.streaming:
+                worker.join()
+            self._drain_tool_events()
+            self._clear_prompt()
+            self.active_tool_status = None
+            for block in blocks:
+                self.active_exec_cells.pop(block.id, None)
+        if result_box:
+            return result_box[0]
+        return [
+            (
+                block,
+                [
+                    ToolResultBlock(
+                        tool_use_id=block.id,
+                        content=f"Tool ended without a result: {block.name!r}",
+                        is_error=True,
                     )
-            elif summary is not None:
-                flush_edit_group()
-                pending_research.append(summary)
-            else:
-                flush_edit_group()
-                flush_research()
-                self.app._write_tool_result(block, result)
-            results.extend(blocks)
-        flush_edit_group()
-        flush_research()
-        return results
+                ],
+            )
+            for block in blocks
+        ]
 
     def _dispatch_tool_with_animated_prompt(self, block: ToolUseBlock) -> list[ContentBlock]:
         tools_by_name = self.inflight_tools_by_name or self.app._available_tools()
