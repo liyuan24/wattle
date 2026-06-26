@@ -2654,6 +2654,25 @@ def test_assistant_markdown_wraps_long_unbroken_words() -> None:
     ]
 
 
+def test_user_transcript_wraps_words_with_leading_message_margin() -> None:
+    rows = tui._render_user_transcript_rows("hello world", width=10)
+
+    assert [row.text for row in rows] == ["hello", "world"]
+    assert {row.style for row in rows} == {tui.USER_STYLE}
+
+
+def test_user_transcript_preserves_leading_whitespace_when_wrapping() -> None:
+    rows = tui._render_user_transcript_rows("  hello world", width=10)
+
+    assert [row.text for row in rows] == ["  hello", "world"]
+
+
+def test_user_transcript_keeps_long_unbroken_words_for_terminal_soft_wrap() -> None:
+    rows = tui._render_user_transcript_rows("abcdefghijklmnopqrstuvwxyz", width=12)
+
+    assert [row.text for row in rows] == ["abcdefghijklmnopqrstuvwxyz"]
+
+
 def test_prompt_path_scanner_ignores_unknown_tilde_user() -> None:
     text = "You can explore codex in ~Traceback"
 

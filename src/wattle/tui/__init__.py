@@ -2352,6 +2352,25 @@ def _wrap_prompt_input(
     )
 
 
+def _render_user_transcript_rows(text: str, *, width: int) -> list[_RenderedTextLine]:
+    content_width = max(1, _terminal_line_width(width) - 1)
+    rows: list[_RenderedTextLine] = []
+    for line in text.splitlines() or [""]:
+        wrapped = textwrap.wrap(
+            line,
+            width=content_width,
+            break_long_words=False,
+            break_on_hyphens=False,
+            drop_whitespace=False,
+            replace_whitespace=False,
+        ) or [""]
+        rows.extend(
+            _RenderedTextLine(wrapped_line.rstrip(), USER_STYLE)
+            for wrapped_line in wrapped
+        )
+    return rows
+
+
 def _display_cwd(path: Path | None = None) -> str:
     cwd = path or Path.cwd()
     home = Path.home()
@@ -5700,6 +5719,8 @@ class WattleApp:
         rows = (
             _render_markdown_text(text, width=width)
             if style == ASSISTANT_STYLE
+            else _render_user_transcript_rows(text, width=width)
+            if style == USER_STYLE
             else [_RenderedTextLine(line, style) for line in (text.splitlines() or [""])]
         )
         for row in rows:

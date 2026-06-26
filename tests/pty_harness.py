@@ -126,8 +126,8 @@ class TerminalScreen:
     def row_backgrounds(self, row: int) -> list[str | None]:
         return [cell.bg for cell in self.cells[row]]
 
-    def find_row_containing(self, needle: str) -> int:
-        for index in range(self.rows):
+    def find_row_containing(self, needle: str, *, start: int = 0) -> int:
+        for index in range(max(0, start), self.rows):
             if needle in self.row_text(index):
                 return index
         raise AssertionError(f"screen does not contain {needle!r}\n{self.text()}")

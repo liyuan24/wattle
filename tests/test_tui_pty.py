@@ -1447,7 +1447,9 @@ def test_pty_up_arrow_moves_cursor_to_previous_wrapped_input_row(tmp_path: Path)
         session.write("/exit\n")
 
 
-def test_pty_input_box_wraps_whole_words_to_next_line(tmp_path: Path) -> None:
+def test_pty_input_box_and_submitted_user_history_wrap_whole_words(
+    tmp_path: Path,
+) -> None:
     with PtySession.spawn_python(
         _echo_prompt_child_code(),
         cwd=tmp_path,
@@ -1457,12 +1459,39 @@ def test_pty_input_box_wraps_whole_words_to_next_line(tmp_path: Path) -> None:
         session.read_until(">", timeout=3)
         session.write("hello world")
         session.read_until("world", timeout=3)
-        first_row = session.screen.find_row_containing(" > hello")
-        assert "w" not in session.screen.row_text(first_row)
-        assert "   world" in session.screen.row_text(first_row + 1)
+
+        input_first_row = session.screen.find_row_containing(" > hello")
+        assert "w" not in session.screen.row_text(input_first_row)
+        assert "   world" in session.screen.row_text(input_first_row + 1)
         assert "   orld" not in session.screen.text()
+
         session.write("\n")
-        session.read_until("hello world", timeout=3)
+        session.read_until("Worked for", timeout=3)
+        session.read_for(0.2)
+
+        submitted_first_row = session.screen.find_row_containing(" hello")
+        assert "w" not in session.screen.row_text(submitted_first_row)
+        assert " world" in session.screen.row_text(submitted_first_row + 1)
+        assert " hello wor" not in session.screen.text()
+        assert session.screen.row_text(submitted_first_row + 1).strip() != "ld"
+        for row_index in (
+            submitted_first_row - 1,
+            submitted_first_row,
+            submitted_first_row + 1,
+            submitted_first_row + 2,
+        ):
+            backgrounds = session.screen.row_backgrounds(row_index)
+            assert all(background == "ansi-235" for background in backgrounds), (
+                row_index,
+                session.screen.row_text(row_index),
+                backgrounds,
+            )
+
+        assistant_first_row = session.screen.find_row_containing(
+            " hello",
+            start=submitted_first_row + 3,
+        )
+        assert " world" in session.screen.row_text(assistant_first_row + 1)
         session.write("/exit\n")
 
 
