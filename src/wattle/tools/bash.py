@@ -4,6 +4,7 @@ import asyncio
 import errno
 import os
 import pty
+import queue
 import select
 import signal
 import subprocess
@@ -29,6 +30,229 @@ class _ProcessCancelled(Exception):
         super().__init__("process cancelled")
         self.stdout = stdout
         self.stderr = stderr
+
+
+class _ProcessSession:
+    def __init__(
+        self,
+        process: subprocess.Popen[bytes],
+        *,
+        stdout_chunks: list[bytes],
+        stderr_chunks: list[bytes],
+        output_queue: queue.Queue[tuple[str, bytes]],
+        output_event: threading.Event,
+        wait_event: threading.Event,
+        lock: threading.Lock,
+        wait_thread: threading.Thread,
+        reader_threads: list[threading.Thread],
+        close_streams: Callable[[], None],
+    ) -> None:
+        self.process = process
+        self._stdout_chunks = stdout_chunks
+        self._stderr_chunks = stderr_chunks
+        self._output_queue = output_queue
+        self._output_event = output_event
+        self._wait_event = wait_event
+        self._lock = lock
+        self._wait_thread = wait_thread
+        self._reader_threads = reader_threads
+        self._close_streams = close_streams
+
+    @classmethod
+    def for_piped_process(cls, process: subprocess.Popen[bytes]) -> "_ProcessSession":
+        stdout_chunks: list[bytes] = []
+        stderr_chunks: list[bytes] = []
+        output_queue: queue.Queue[tuple[str, bytes]] = queue.Queue()
+        output_event = threading.Event()
+        wait_event = threading.Event()
+        lock = threading.Lock()
+        closeables = [pipe for pipe in (process.stdout, process.stderr) if pipe is not None]
+
+        def read_pipe(stream: str, chunks: list[bytes], fd: int) -> None:
+            while True:
+                try:
+                    data = os.read(fd, 4096)
+                except OSError:
+                    break
+                if not data:
+                    break
+                with lock:
+                    chunks.append(data)
+                output_queue.put((stream, data))
+                output_event.set()
+
+        reader_threads: list[threading.Thread] = []
+        if process.stdout is not None:
+            reader_threads.append(
+                threading.Thread(
+                    target=read_pipe,
+                    args=("stdout", stdout_chunks, process.stdout.fileno()),
+                    name=f"wattle-bash-stdout-{process.pid}",
+                    daemon=True,
+                )
+            )
+        if process.stderr is not None:
+            reader_threads.append(
+                threading.Thread(
+                    target=read_pipe,
+                    args=("stderr", stderr_chunks, process.stderr.fileno()),
+                    name=f"wattle-bash-stderr-{process.pid}",
+                    daemon=True,
+                )
+            )
+
+        def wait_for_exit() -> None:
+            with suppress(Exception):
+                process.wait()
+            wait_event.set()
+            output_event.set()
+
+        wait_thread = threading.Thread(
+            target=wait_for_exit,
+            name=f"wattle-bash-wait-{process.pid}",
+            daemon=True,
+        )
+        for thread in reader_threads:
+            thread.start()
+        wait_thread.start()
+
+        return cls(
+            process,
+            stdout_chunks=stdout_chunks,
+            stderr_chunks=stderr_chunks,
+            output_queue=output_queue,
+            output_event=output_event,
+            wait_event=wait_event,
+            lock=lock,
+            wait_thread=wait_thread,
+            reader_threads=reader_threads,
+            close_streams=lambda: _close_closeables(closeables),
+        )
+
+    @classmethod
+    def for_pty_process(
+        cls,
+        process: subprocess.Popen[bytes],
+        master_fd: int,
+    ) -> "_ProcessSession":
+        stdout_chunks: list[bytes] = []
+        output_queue: queue.Queue[tuple[str, bytes]] = queue.Queue()
+        output_event = threading.Event()
+        wait_event = threading.Event()
+        lock = threading.Lock()
+
+        def read_pty() -> None:
+            while True:
+                try:
+                    data = _read_pty(master_fd)
+                except OSError:
+                    break
+                if not data:
+                    break
+                with lock:
+                    stdout_chunks.append(data)
+                output_queue.put(("combined", data))
+                output_event.set()
+
+        reader_threads = [
+            threading.Thread(
+                target=read_pty,
+                name=f"wattle-bash-pty-{process.pid}",
+                daemon=True,
+            )
+        ]
+
+        def wait_for_exit() -> None:
+            with suppress(Exception):
+                process.wait()
+            wait_event.set()
+            output_event.set()
+
+        wait_thread = threading.Thread(
+            target=wait_for_exit,
+            name=f"wattle-bash-wait-{process.pid}",
+            daemon=True,
+        )
+        for thread in reader_threads:
+            thread.start()
+        wait_thread.start()
+
+        return cls(
+            process,
+            stdout_chunks=stdout_chunks,
+            stderr_chunks=[],
+            output_queue=output_queue,
+            output_event=output_event,
+            wait_event=wait_event,
+            lock=lock,
+            wait_thread=wait_thread,
+            reader_threads=reader_threads,
+            close_streams=lambda: _close_fd(master_fd),
+        )
+
+    def wait_for_exit_or_timeout(
+        self,
+        *,
+        timeout: float,
+        emit: Callable[[str, str], None] | None,
+        cancel_event: threading.Event | None,
+    ) -> tuple[bytes, bytes]:
+        deadline = time.monotonic() + timeout
+        while True:
+            self.drain_output(emit)
+            if cancel_event is not None and cancel_event.is_set():
+                raise _ProcessCancelled(*self.output_bytes())
+            if self._wait_event.is_set() or self.process.poll() is not None:
+                self._wait_event.set()
+                self.drain_output(emit)
+                return self.output_bytes()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise _timeout_expired(self.process, timeout, *self.output_chunks())
+            self._output_event.wait(min(0.05, remaining))
+            self._output_event.clear()
+
+    def drain_after_stop(
+        self,
+        *,
+        timeout: float,
+        emit: Callable[[str, str], None] | None,
+    ) -> bool:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            self.drain_output(emit)
+            if not self.reader_threads_alive():
+                return False
+            self._output_event.wait(min(0.02, max(0.0, deadline - time.monotonic())))
+            self._output_event.clear()
+        self.drain_output(emit)
+        incomplete = self.reader_threads_alive()
+        if incomplete:
+            self.close_streams()
+        return incomplete
+
+    def drain_output(self, emit: Callable[[str, str], None] | None) -> None:
+        while True:
+            try:
+                stream, data = self._output_queue.get_nowait()
+            except queue.Empty:
+                return
+            if emit is not None:
+                emit(_decode_output(data), stream)
+
+    def reader_threads_alive(self) -> bool:
+        return any(thread.is_alive() for thread in self._reader_threads)
+
+    def output_chunks(self) -> tuple[list[bytes], list[bytes]]:
+        with self._lock:
+            return list(self._stdout_chunks), list(self._stderr_chunks)
+
+    def output_bytes(self) -> tuple[bytes, bytes]:
+        stdout_chunks, stderr_chunks = self.output_chunks()
+        return b"".join(stdout_chunks), b"".join(stderr_chunks)
+
+    def close_streams(self) -> None:
+        self._close_streams()
 
 
 class BashTool(Tool):
@@ -271,30 +495,27 @@ class BashTool(Tool):
             shell=True,
             cwd=cwd,
             env=env,
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             start_new_session=True,
         )
+        session = _ProcessSession.for_piped_process(process)
         try:
-            if emit is None and cancel_event is None:
-                stdout, stderr = process.communicate(timeout=clamped_timeout)
-            else:
-                stdout, stderr = _communicate_with_output_events(
-                    process,
-                    timeout=clamped_timeout,
-                    emit=emit,
-                    cancel_event=cancel_event,
-                )
+            stdout, stderr = session.wait_for_exit_or_timeout(
+                timeout=clamped_timeout,
+                emit=emit,
+                cancel_event=cancel_event,
+            )
         except _ProcessCancelled as cancelled:
             _terminate_process_group(process.pid)
-            for pipe in (process.stdout, process.stderr):
-                if pipe is not None:
-                    with suppress(OSError):
-                        pipe.close()
-            with suppress(subprocess.TimeoutExpired):
-                process.wait(timeout=0.2)
-            stdout = cancelled.stdout
-            stderr = cancelled.stderr
+            _kill_new_processes_under_cwd(self.RUN_ID_ENV, run_id, cwd)
+            session.drain_after_stop(timeout=self.PIPE_DRAIN_TIMEOUT_SECONDS, emit=emit)
+            stdout, stderr = session.output_bytes()
+            if not stdout:
+                stdout = cancelled.stdout
+            if not stderr:
+                stderr = cancelled.stderr
             elapsed = time.monotonic() - started_at
             parts = [f"[stopped by user after {elapsed:.2f}s]"]
             stdout_text = _decode_output(stdout)
@@ -303,7 +524,6 @@ class BashTool(Tool):
                 parts.append(stdout_text.rstrip("\n"))
             if stderr_text:
                 parts.append(f"[stderr]\n{stderr_text.rstrip(chr(10))}")
-            _kill_new_processes_under_cwd(self.RUN_ID_ENV, run_id, cwd)
             output = externalize_large_output(
                 _prepend_warnings("\n".join(parts), attribution.warnings),
                 root=self.cwd,
@@ -324,33 +544,16 @@ class BashTool(Tool):
         except subprocess.TimeoutExpired as timeout_error:
             with suppress(ProcessLookupError, PermissionError):
                 os.killpg(process.pid, signal.SIGKILL)
-            capture_incomplete = False
-            try:
-                if emit is None:
-                    stdout, stderr = process.communicate(timeout=self.PIPE_DRAIN_TIMEOUT_SECONDS)
-                else:
-                    stdout, stderr = _communicate_with_output_events(
-                        process,
-                        timeout=self.PIPE_DRAIN_TIMEOUT_SECONDS,
-                        emit=emit,
-                    )
-            except subprocess.TimeoutExpired as drain_error:
-                capture_incomplete = True
-                stdout = _timeout_output(drain_error.output) or _timeout_output(
-                    timeout_error.output
-                )
-                stderr = _timeout_output(drain_error.stderr) or _timeout_output(
-                    timeout_error.stderr
-                )
-                for pipe in (process.stdout, process.stderr):
-                    if pipe is not None:
-                        with suppress(OSError):
-                            pipe.close()
-                with suppress(ProcessLookupError, PermissionError):
-                    os.killpg(process.pid, signal.SIGKILL)
-                with suppress(subprocess.TimeoutExpired):
-                    process.wait(timeout=0.1)
             _kill_new_processes_under_cwd(self.RUN_ID_ENV, run_id, cwd)
+            capture_incomplete = session.drain_after_stop(
+                timeout=self.PIPE_DRAIN_TIMEOUT_SECONDS,
+                emit=emit,
+            )
+            stdout, stderr = session.output_bytes()
+            if not stdout:
+                stdout = _timeout_output(timeout_error.output).encode()
+            if not stderr:
+                stderr = _timeout_output(timeout_error.stderr).encode()
             elapsed = time.monotonic() - started_at
             stdout_text = _decode_output(stdout)
             stderr_text = _decode_output(stderr)
@@ -384,6 +587,8 @@ class BashTool(Tool):
 
         _kill_process_group(process.pid)
         _kill_new_processes_under_cwd(self.RUN_ID_ENV, run_id, cwd)
+        session.drain_after_stop(timeout=self.PIPE_DRAIN_TIMEOUT_SECONDS, emit=emit)
+        stdout, stderr = session.output_bytes()
         parts = list(attribution.warnings)
         stdout_text = _decode_output(stdout)
         stderr_text = _decode_output(stderr)
@@ -448,50 +653,44 @@ class BashTool(Tool):
         )
         os.close(slave_fd)
 
-        chunks: list[bytes] = []
         timed_out = False
         cancelled = False
+        session = _ProcessSession.for_pty_process(process, master_fd)
+        combined_emit = _combined_emit(emit)
         try:
-            deadline = started_at + clamped_timeout
-            while True:
-                if cancel_event is not None and cancel_event.is_set():
-                    cancelled = True
-                    _terminate_process_group(process.pid)
-                    break
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    timed_out = True
-                    with suppress(ProcessLookupError):
-                        os.killpg(process.pid, signal.SIGKILL)
-                    process.wait()
-                    break
-
-                readable, _, _ = select.select([master_fd], [], [], min(0.1, remaining))
-                if readable:
-                    data = _read_pty(master_fd)
-                    if data:
-                        chunks.append(data)
-                        if emit is not None:
-                            emit(_decode_output(data))
-                    elif process.poll() is not None:
-                        break
-
-                if process.poll() is not None:
-                    while select.select([master_fd], [], [], 0)[0]:
-                        data = _read_pty(master_fd)
-                        if not data:
-                            break
-                        chunks.append(data)
-                        if emit is not None:
-                            emit(_decode_output(data))
-                    break
+            session.wait_for_exit_or_timeout(
+                timeout=clamped_timeout,
+                emit=combined_emit,
+                cancel_event=cancel_event,
+            )
+        except _ProcessCancelled:
+            cancelled = True
+            _terminate_process_group(process.pid)
+            _kill_new_processes_under_cwd(self.RUN_ID_ENV, run_id, cwd)
+            session.drain_after_stop(
+                timeout=self.PIPE_DRAIN_TIMEOUT_SECONDS,
+                emit=combined_emit,
+            )
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            with suppress(ProcessLookupError, PermissionError):
+                os.killpg(process.pid, signal.SIGKILL)
+            _kill_new_processes_under_cwd(self.RUN_ID_ENV, run_id, cwd)
+            session.drain_after_stop(
+                timeout=self.PIPE_DRAIN_TIMEOUT_SECONDS,
+                emit=combined_emit,
+            )
         finally:
             _kill_process_group(process.pid)
             _kill_new_processes_under_cwd(self.RUN_ID_ENV, run_id, cwd)
-            with suppress(OSError):
-                os.close(master_fd)
+            session.drain_after_stop(
+                timeout=self.PIPE_DRAIN_TIMEOUT_SECONDS,
+                emit=combined_emit,
+            )
+            session.close_streams()
 
-        output_text = b"".join(chunks).decode(errors="replace").rstrip("\n")
+        stdout, _stderr = session.output_bytes()
+        output_text = stdout.decode(errors="replace").rstrip("\n")
         parts: list[str] = list(attribution.warnings)
         if cancelled:
             elapsed = time.monotonic() - started_at
@@ -663,63 +862,6 @@ class BashTool(Tool):
         )
 
 
-def _communicate_with_output_events(
-    process: subprocess.Popen[bytes],
-    *,
-    timeout: float,
-    emit: Callable[[str, str], None] | None,
-    cancel_event: threading.Event | None = None,
-) -> tuple[bytes, bytes]:
-    stdout_chunks: list[bytes] = []
-    stderr_chunks: list[bytes] = []
-    streams: dict[int, tuple[str, list[bytes]]] = {}
-    if process.stdout is not None:
-        os.set_blocking(process.stdout.fileno(), False)
-        streams[process.stdout.fileno()] = ("stdout", stdout_chunks)
-    if process.stderr is not None:
-        os.set_blocking(process.stderr.fileno(), False)
-        streams[process.stderr.fileno()] = ("stderr", stderr_chunks)
-    deadline = time.monotonic() + timeout
-    while streams:
-        if cancel_event is not None and cancel_event.is_set():
-            raise _ProcessCancelled(
-                b"".join(stdout_chunks),
-                b"".join(stderr_chunks),
-            )
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise _timeout_expired(process, timeout, stdout_chunks, stderr_chunks)
-        readable, _, _ = select.select(list(streams), [], [], min(0.1, remaining))
-        if not readable:
-            if process.poll() is not None:
-                continue
-            continue
-        for fd in readable:
-            stream, chunks = streams[fd]
-            try:
-                data = os.read(fd, 4096)
-            except BlockingIOError:
-                continue
-            if data:
-                chunks.append(data)
-                if emit is not None:
-                    emit(_decode_output(data), stream)
-            else:
-                streams.pop(fd, None)
-    while process.poll() is None:
-        if cancel_event is not None and cancel_event.is_set():
-            raise _ProcessCancelled(
-                b"".join(stdout_chunks),
-                b"".join(stderr_chunks),
-            )
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise _timeout_expired(process, timeout, stdout_chunks, stderr_chunks)
-        with suppress(subprocess.TimeoutExpired):
-            process.wait(timeout=min(0.1, remaining))
-    return b"".join(stdout_chunks), b"".join(stderr_chunks)
-
-
 def _timeout_expired(
     process: subprocess.Popen[bytes],
     timeout: float,
@@ -732,6 +874,25 @@ def _timeout_expired(
         output=b"".join(stdout_chunks),
         stderr=b"".join(stderr_chunks),
     )
+
+
+def _close_closeables(closeables) -> None:
+    for closeable in closeables:
+        with suppress(OSError, ValueError):
+            closeable.close()
+
+
+def _close_fd(fd: int) -> None:
+    with suppress(OSError):
+        os.close(fd)
+
+
+def _combined_emit(
+    emit: Callable[[str], None] | None,
+) -> Callable[[str, str], None] | None:
+    if emit is None:
+        return None
+    return lambda text, _stream: emit(text)
 
 
 def _read_pty(fd: int) -> bytes:

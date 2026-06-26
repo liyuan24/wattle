@@ -117,6 +117,17 @@ def test_foreground_replaces_invalid_utf8_output(tmp_path: Path) -> None:
     assert "UnicodeDecodeError" not in output
 
 
+def test_foreground_uses_closed_stdin(tmp_path: Path) -> None:
+    tool = BashTool(cwd=tmp_path)
+    command = _python_command(
+        "import sys; data = sys.stdin.read(); print('stdin-eof' if data == '' else 'stdin-data')"
+    )
+
+    output = tool.run(command, timeout=2)
+
+    assert "stdin-eof" in output
+
+
 def test_foreground_large_output_is_externalized(tmp_path: Path) -> None:
     tool = BashTool(cwd=tmp_path)
     command = _python_command("import sys; sys.stdout.write('x' * 30000)")
@@ -141,31 +152,17 @@ def test_foreground_accepts_model_output_budget_alias(tmp_path: Path) -> None:
     assert "full_output_path:" in output
 
 
-def test_foreground_timeout_clamps_and_kills_process_group(monkeypatch, tmp_path: Path) -> None:
-    communicate_timeouts: list[float | None] = []
-    killed_pgids: list[int] = []
+def test_foreground_timeout_clamps(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(BashTool, "MAX_TIMEOUT_SECONDS", 0.05)
+    command = _python_command("import time; time.sleep(30)")
 
-    class FakeProcess:
-        pid = 12345
-        returncode = None
+    started_at = time.monotonic()
+    output = BashTool(cwd=tmp_path).run(command, timeout=999)
+    elapsed = time.monotonic() - started_at
 
-        def communicate(self, timeout=None):
-            communicate_timeouts.append(timeout)
-            if timeout == 600.0:
-                raise subprocess.TimeoutExpired(cmd="sleep forever", timeout=timeout)
-            self.returncode = -9
-            return "", ""
-
-    monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: FakeProcess())
-    monkeypatch.setattr("wattle.tools.bash.os.killpg", lambda pgid, sig: killed_pgids.append(pgid))
-
-    output = BashTool(cwd=tmp_path).run("sleep forever", timeout=999)
-
-    assert communicate_timeouts[0] == 600.0
-    assert communicate_timeouts[1] == BashTool.PIPE_DRAIN_TIMEOUT_SECONDS
-    assert killed_pgids == [12345]
+    assert elapsed < 2.0
     assert "Status: timed out" in output
-    assert "Requested timeout: 600s" in output
+    assert "Requested timeout: 0.05s" in output
 
 
 def test_foreground_timeout_returns_when_descendant_keeps_pipe_open(tmp_path: Path) -> None:
@@ -186,7 +183,7 @@ def test_foreground_timeout_returns_when_descendant_keeps_pipe_open(tmp_path: Pa
     assert elapsed < 2.0
     assert "Status: timed out" in output
     assert "Requested timeout: 0.1s" in output
-    assert "descendant process kept stdout/stderr open" in output
+    assert "descendant process kept stdout/stderr open" not in output
 
 
 def test_foreground_piped_kills_descendants_after_command_exits(tmp_path: Path) -> None:
@@ -215,6 +212,38 @@ def test_foreground_piped_kills_new_session_descendants_under_cwd(tmp_path: Path
         _wait_for(lambda: not _pid_is_alive(child_pid))
     finally:
         _cleanup_pid(child_pid)
+
+
+def test_foreground_parallel_commands_same_cwd_do_not_kill_each_other(tmp_path: Path) -> None:
+    tool = BashTool(cwd=tmp_path)
+    short = _python_command("print('short')")
+    slow = _python_command("import time; time.sleep(0.2); print('slow')")
+
+    async def run() -> tuple[str, str]:
+        short_task = asyncio.create_task(
+            tool.arun_with_events(
+                emit=lambda _event: None,
+                tool_use_id="short",
+                command=short,
+                timeout=2,
+            )
+        )
+        slow_task = asyncio.create_task(
+            tool.arun_with_events(
+                emit=lambda _event: None,
+                tool_use_id="slow",
+                command=slow,
+                timeout=2,
+            )
+        )
+        return await asyncio.gather(short_task, slow_task)
+
+    short_output, slow_output = asyncio.run(run())
+
+    assert "short" in short_output
+    assert "slow" in slow_output
+    assert "Status: timed out" not in short_output
+    assert "Status: timed out" not in slow_output
 
 
 def test_foreground_cleanup_does_not_kill_unrelated_process_under_cwd(tmp_path: Path) -> None:
@@ -247,6 +276,20 @@ def test_foreground_tty_allocates_terminal(tmp_path: Path) -> None:
 
     assert "tty=True" in output
     assert "[elapsed " in output
+
+
+def test_foreground_tty_timeout_uses_process_lifecycle(tmp_path: Path) -> None:
+    tool = BashTool(cwd=tmp_path)
+    command = _python_command("import time; print('tty-start', flush=True); time.sleep(30)")
+
+    started_at = time.monotonic()
+    output = tool.run(command, tty=True, timeout=0.05)
+    elapsed = time.monotonic() - started_at
+
+    assert elapsed < 2.0
+    assert "Status: timed out" in output
+    assert "Requested timeout: 0.05s" in output
+    assert "tty-start" in output
 
 
 def test_foreground_tty_kills_descendants_after_command_exits(tmp_path: Path) -> None:
