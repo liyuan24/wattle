@@ -6065,6 +6065,32 @@ def test_terminal_bash_tool_title_uses_token_styles() -> None:
         id="call_1",
         name="bash",
         input={
+            "command": "git diff -- src/wattle/tui/__init__.py",
+        },
+    )
+    result = ToolResultBlock(
+        tool_use_id="call_1",
+        content="diff --git a/src/wattle/tui/__init__.py b/src/wattle/tui/__init__.py",
+    )
+
+    app._write_tool_result(block, result)
+
+    rendered = out.getvalue()
+    plain = _strip_ansi(rendered)
+    assert "Ran git diff -- src/wattle/tui/__init__.py" in plain
+    assert f"{tui.COMMAND_EXEC_STYLE}git{tui.RESET}" in rendered
+    assert f"{tui.COMMAND_OPTION_STYLE}--{tui.RESET}" in rendered
+    assert f"{tui.COMMAND_PATH_STYLE}src/wattle/tui/__init__.py{tui.RESET}" in rendered
+
+
+def test_terminal_bash_chain_title_uses_summary_without_shell_token_styles() -> None:
+    out = _TTYBuffer()
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+    block = ToolUseBlock(
+        id="call_1",
+        name="bash",
+        input={
             "command": "git diff -- src/wattle/tui/__init__.py | sed -n '1,20p'",
         },
     )
@@ -6077,12 +6103,10 @@ def test_terminal_bash_tool_title_uses_token_styles() -> None:
 
     rendered = out.getvalue()
     plain = _strip_ansi(rendered)
-    assert "Ran git diff -- src/wattle/tui/__init__.py | sed -n '1,20p'" in plain
-    assert f"{tui.COMMAND_EXEC_STYLE}git{tui.RESET}" in rendered
-    assert f"{tui.COMMAND_OPTION_STYLE}--{tui.RESET}" in rendered
-    assert f"{tui.COMMAND_PATH_STYLE}src/wattle/tui/__init__.py{tui.RESET}" in rendered
-    assert f"{tui.COMMAND_OPERATOR_STYLE}|{tui.RESET}" in rendered
-    assert f"{tui.COMMAND_STRING_STYLE}'1,20p'{tui.RESET}" in rendered
+    assert "Ran 2 shell commands" in plain
+    assert "Ran git diff -- src/wattle/tui/__init__.py | sed -n '1,20p'" not in plain
+    assert f"{tui.TOOL_TITLE_STYLE}Ran{tui.RESET} 2 shell commands" in rendered
+    assert f"{tui.COMMAND_EXEC_STYLE}2{tui.RESET}" not in rendered
 
 
 def test_terminal_bash_live_events_update_prompt_frame() -> None:

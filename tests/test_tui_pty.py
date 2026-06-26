@@ -1286,26 +1286,25 @@ def test_pty_bash_exec_cell_finalizes_with_output(tmp_path: Path) -> None:
         assert "  hello" not in screen_text
 
 
-def test_pty_tool_rendering_uses_distinct_command_and_diff_styles(tmp_path: Path) -> None:
+def test_pty_tool_rendering_uses_distinct_summary_and_diff_styles(tmp_path: Path) -> None:
     with PtySession.spawn_python(
         _tool_rendering_child_code(),
         cwd=tmp_path,
         cols=120,
         rows=36,
     ) as session:
-        session.read_until("Ran echo", timeout=4)
+        session.read_until("Ran 2 shell commands", timeout=4)
         session.read_until("Added src/demo.py", timeout=4)
         session.read_until("done", timeout=4)
 
         screen_text = session.screen.text()
-        assert "Ran echo hello | sed -n 1p" in screen_text
+        assert "Ran 2 shell commands" in screen_text
         assert "Added src/demo.py (+2 -0)" in screen_text
         assert "    1 +def hello():" in screen_text
         assert "    2 +    return 'world'" in screen_text
 
         raw = session.raw_output
-        assert "\x1b[38;5;75;1mecho\x1b[0m" in raw
-        assert "\x1b[38;5;80;1m|\x1b[0m" in raw
+        assert f"{tui.TOOL_TITLE_STYLE}Ran{tui.RESET} 2 shell commands" in raw
         assert "\x1b[38;5;159;1msrc/demo.py\x1b[0m" in raw
         assert "\x1b[48;5;22;38;5;72m    1 " in raw
         assert "\x1b[48;5;22;38;5;40m+" in raw

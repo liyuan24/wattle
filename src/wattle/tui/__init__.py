@@ -659,7 +659,10 @@ def _bash_exec_cell_prompt_rows(
             status = "Running" if cell.running else "Ran"
             prefix = f"{TOOL_MARKER} {status} "
             command = row[len(prefix) :]
-            rendered_command = _render_shell_command(command) or command
+            if cell.title_subject is None:
+                rendered_command = _render_shell_command(command) or command
+            else:
+                rendered_command = command
             marker_styles = (
                 TOOL_MARKER_STYLE,
                 "\x1b[38;5;118;1m",
@@ -4263,7 +4266,10 @@ class WattleApp:
             if index == 0:
                 prefix = f"{TOOL_MARKER} Ran "
                 command = row[len(prefix) :]
-                rendered_command = _render_shell_command(command) or command
+                if cell.title_subject is None:
+                    rendered_command = _render_shell_command(command) or command
+                else:
+                    rendered_command = command
                 self._write(
                     f"{marker_style}{TOOL_MARKER}{RESET} "
                     f"{title_style}Ran{RESET} {rendered_command}\n"
