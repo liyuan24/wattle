@@ -3106,15 +3106,42 @@ def _image_placeholder_prompt_mapped_render(
     )
 
 
+def _image_reference_spans(buffer: str) -> list[tuple[int, int]]:
+    spans: list[tuple[int, int]] = []
+    for reference in _path_references_from_text(buffer):
+        if _image_media_type(reference.path) is None:
+            continue
+        spans.append((reference.start, reference.end))
+    return spans
+
+
 def _image_reference_backspace_span(buffer: str, cursor: int) -> tuple[int, int] | None:
     if cursor <= 0:
         return None
     delete_index = cursor - 1
-    for reference in _path_references_from_text(buffer):
-        if _image_media_type(reference.path) is None:
-            continue
-        if reference.start <= delete_index < reference.end:
-            return reference.start, reference.end
+    for start, end in _image_reference_spans(buffer):
+        if start <= delete_index < end:
+            return start, end
+    return None
+
+
+def _image_reference_span_before_or_containing(
+    spans: Sequence[tuple[int, int]],
+    cursor: int,
+) -> tuple[int, int] | None:
+    for start, end in reversed(spans):
+        if start < cursor <= end:
+            return start, end
+    return None
+
+
+def _image_reference_span_after_or_containing(
+    spans: Sequence[tuple[int, int]],
+    cursor: int,
+) -> tuple[int, int] | None:
+    for start, end in spans:
+        if start <= cursor < end:
+            return start, end
     return None
 
 
@@ -6249,20 +6276,34 @@ class _LiveTerminal:
     def _move_cursor_word_left(self) -> None:
         self._reset_preferred_cursor_column()
         cursor = self.cursor
+        image_spans = _image_reference_spans(self.buffer)
         while cursor > 0 and self.buffer[cursor - 1].isspace():
             cursor -= 1
+        if span := _image_reference_span_before_or_containing(image_spans, cursor):
+            self.cursor = span[0]
+            return
         while cursor > 0 and not self.buffer[cursor - 1].isspace():
             cursor -= 1
+            if span := _image_reference_span_before_or_containing(image_spans, cursor):
+                cursor = span[0]
+                break
         self.cursor = cursor
 
     def _move_cursor_word_right(self) -> None:
         self._reset_preferred_cursor_column()
         cursor = self.cursor
         length = len(self.buffer)
+        image_spans = _image_reference_spans(self.buffer)
         while cursor < length and self.buffer[cursor].isspace():
             cursor += 1
+        if span := _image_reference_span_after_or_containing(image_spans, cursor):
+            self.cursor = span[1]
+            return
         while cursor < length and not self.buffer[cursor].isspace():
             cursor += 1
+            if span := _image_reference_span_after_or_containing(image_spans, cursor):
+                cursor = span[1]
+                break
         self.cursor = cursor
 
     def _model_picker_active(self) -> bool:

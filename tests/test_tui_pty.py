@@ -1764,6 +1764,31 @@ def test_pty_backspace_on_image_anchor_deletes_entire_attachment_path(
         assert str(image) not in screen_text
 
 
+def test_pty_option_arrow_treats_image_anchor_as_single_word(
+    tmp_path: Path,
+) -> None:
+    image = tmp_path / "dragged image with spaces.png"
+    image.write_bytes(b"fake-png")
+    escaped_path = str(image).replace(" ", "\\ ")
+
+    with PtySession.spawn_python(
+        _slow_wattle_child_code(first_delay=2.0, later_delay=0.1),
+        cwd=tmp_path,
+        cols=80,
+        rows=30,
+    ) as session:
+        session.read_until("press esc to interrupt", timeout=3)
+        session.write(f"check {escaped_path} after")
+        session.read_until("check [IMAGE #1] after", timeout=3)
+        session.write("\x1bb\x1bbX \x1b[1;3C !")
+        session.read_until("check X [IMAGE #1] ! after", timeout=3)
+
+        screen_text = session.screen.text()
+        assert "check X [IMAGE #1] ! after" in screen_text
+        assert "dragged\\ image\\ with\\ spaces.png" not in screen_text
+        assert str(image) not in screen_text
+
+
 def test_pty_unescaped_dragged_image_uses_anchor_in_active_input(tmp_path: Path) -> None:
     image = tmp_path / "dragged image.png"
     image.write_bytes(b"fake-png")
