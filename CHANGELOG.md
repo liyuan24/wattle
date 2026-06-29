@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.10.0
+
+### Added
+
+- Added safe parallel tool-call dispatch so independent read-only and other concurrency-safe tools can run together, with TUI status coverage for grouped tool calls.
+
+### Changed
+
+- Improved bash command diagnostics, command-title summarization, timeout reporting, and guidance around shell command chaining.
+- Refactored bash process lifecycle handling for more reliable process-group management and timeout cleanup.
+- Treat image anchors as words for TUI cursor movement.
+- Bound implementation pre-edit inspection in the system prompt so code changes start from smaller, targeted context reads.
+
+### Fixed
+
+- Fixed shell harness timeout races in bash tool execution.
+- Fixed user transcript word wrapping in the TUI while preserving prompt and transcript layout contracts.
+- Fixed bash chain title rendering in the TUI and related PTY coverage.
+- Hide provisional final-audit assistant responses from the TUI transcript.
+
 ## 0.9.0
 
 ### Added
