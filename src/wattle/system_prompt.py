@@ -199,6 +199,12 @@ def _guidelines(
         "explicitly asks you to pause, or you are genuinely blocked by a "
         "missing decision, unavailable credential, destructive action, external "
         "cost/risk, or a runtime permission restriction.",
+        "When the user asks you to implement, fix, change, add, update, or "
+        "otherwise authorizes code changes, keep pre-edit inspection bounded. "
+        "Read or search only until you can identify the first plausible edit "
+        "target, then make the smallest useful edit. Continue reading only to "
+        "unblock that edit, understand direct callers or contracts, or verify "
+        "the result.",
         "Refrain from adding temporary files during normal work unless they are "
         "necessary for implementation or validation. Prefer existing project "
         "tools and disposable external locations for scratch work; when a "
