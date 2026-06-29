@@ -8,6 +8,7 @@ import base64
 import io
 import json
 import os
+from dataclasses import replace
 import re
 import shlex
 import sys
@@ -540,7 +541,8 @@ def test_basic_tui_goal_starts_continuation_and_update_goal_completes() -> None:
     assert isinstance(app.messages[2].content[0], ToolResultBlock)
     assert app.messages[2].content[0].tool_use_id == "goal_1"
     assert "Goal active." in out
-    assert "Goal complete." in out
+    assert "Goal complete." not in out
+    assert "Audit complete." in out
     assert "update_goal" not in out
     assert "Status: complete" not in out
 
@@ -4800,6 +4802,46 @@ def test_live_end_turn_queued_input_waits_for_assistant_turn_to_finish() -> None
     assert "after the full turn" in out.getvalue()
 
 
+def test_live_final_audit_candidate_with_queued_input_keeps_visible_order() -> None:
+    out = _TTYBuffer()
+    app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
+    app._force_plain = False
+    live = tui._LiveTerminal(app)
+    live.streaming = True
+    live.stream_text = ["candidate final"]
+    live.turn_followup_user_inputs = ["queued after turn"]
+    app.messages = [
+        Message(role="user", content=[TextBlock(text="use tool")]),
+        Message(role="assistant", content=[ToolUseBlock(id="call_1", name="echo", input={})]),
+        Message(role="user", content=[ToolResultBlock(tool_use_id="call_1", content="ok")]),
+    ]
+    starts: list[bool] = []
+
+    def fake_start_worker() -> None:
+        live.streaming = True
+        starts.append(True)
+
+    live._start_worker = fake_start_worker  # type: ignore[method-assign]
+
+    live._finish_response(
+        CompletionResponse(
+            content=[TextBlock(text="candidate final")],
+            stop_reason="end_turn",
+        )
+    )
+
+    rendered = out.getvalue()
+    assert rendered.index("candidate final") < rendered.index("queued after turn")
+    assert app._deferred_tui_message_indices == set()
+    assert app._hidden_tui_message_indices == set()
+    assert app.messages[-2] == Message(
+        role="assistant",
+        content=[TextBlock(text="candidate final")],
+    )
+    assert app.messages[-1].content == [TextBlock(text="queued after turn")]
+    assert starts == [True]
+
+
 def test_live_interrupt_current_turn_clears_transient_inflight_tool_results() -> None:
     out = _TTYBuffer()
     app = tui.WattleApp(_make_args(), _ScriptedStreamProvider([]), out=out)
@@ -5452,7 +5494,11 @@ def test_terminal_hides_thinking_content_by_default(
         stop_reason="tool_use",
     )
     end_response = CompletionResponse(
-        content=[TextBlock(text="done")],
+        content=[TextBlock(text="provisional hidden")],
+        stop_reason="end_turn",
+    )
+    audit_response = CompletionResponse(
+        content=[TextBlock(text="verified done")],
         stop_reason="end_turn",
     )
     provider = _ScriptedStreamProvider(
@@ -5463,7 +5509,8 @@ def test_terminal_hides_thinking_content_by_default(
                 ToolUseDelta(id="call_1", name="echo", partial_json=None),
                 StreamComplete(response=tool_use_response),
             ],
-            [TextDelta(text="done"), StreamComplete(response=end_response)],
+            [TextDelta(text="provisional hidden"), StreamComplete(response=end_response)],
+            [TextDelta(text="verified done"), StreamComplete(response=audit_response)],
         ]
     )
 
@@ -5474,7 +5521,8 @@ def test_terminal_hides_thinking_content_by_default(
     assert "answer" in out
     assert "| echo ok" in out
     assert "echoed: hi" in out
-    assert "done" in out
+    assert "provisional hidden" not in out
+    assert "verified done" in out
 
 
 def test_terminal_streams_text_thinking_and_tool_markers_in_order(
@@ -5488,7 +5536,11 @@ def test_terminal_streams_text_thinking_and_tool_markers_in_order(
         stop_reason="tool_use",
     )
     end_response = CompletionResponse(
-        content=[TextBlock(text="done")],
+        content=[TextBlock(text="provisional hidden")],
+        stop_reason="end_turn",
+    )
+    audit_response = CompletionResponse(
+        content=[TextBlock(text="verified done")],
         stop_reason="end_turn",
     )
     provider = _ScriptedStreamProvider(
@@ -5499,7 +5551,8 @@ def test_terminal_streams_text_thinking_and_tool_markers_in_order(
                 ToolUseDelta(id="call_1", name="echo", partial_json=None),
                 StreamComplete(response=tool_use_response),
             ],
-            [TextDelta(text="done"), StreamComplete(response=end_response)],
+            [TextDelta(text="provisional hidden"), StreamComplete(response=end_response)],
+            [TextDelta(text="verified done"), StreamComplete(response=audit_response)],
         ]
     )
     settings_path = tmp_path / "settings.json"
@@ -5513,7 +5566,8 @@ def test_terminal_streams_text_thinking_and_tool_markers_in_order(
     assert out.index("reasoning") < out.index("answer")
     assert out.index("answer") < out.index("| echo ok")
     assert out.index("| echo ok") < out.index("echoed: hi")
-    assert out.index("echoed: hi") < out.index("done")
+    assert "provisional hidden" not in out
+    assert out.index("echoed: hi") < out.index("verified done")
     assert "---" in out
 
 
@@ -6398,6 +6452,148 @@ def test_terminal_edit_error_is_hidden_from_transcript() -> None:
     rendered = out.getvalue()
     assert "edit error - src/wattle/loop.py" not in rendered
     assert "old_text not found" not in rendered
+
+
+def test_tui_final_audit_hides_provisional_response_but_persists_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(session.SESSION_DIR_ENV, str(tmp_path / "sessions"))
+    tool = _RecordingTool()
+    monkeypatch.setitem(TOOLS_BY_NAME, tool.name, tool)
+    tool_use_response = CompletionResponse(
+        content=[ToolUseBlock(id="call_1", name=tool.name, input={"message": "payload"})],
+        stop_reason="tool_use",
+    )
+    provisional_response = CompletionResponse(
+        content=[TextBlock(text="provisional final")],
+        stop_reason="end_turn",
+    )
+    verified_response = CompletionResponse(
+        content=[TextBlock(text="verified final")],
+        stop_reason="end_turn",
+    )
+    provider = _ScriptedStreamProvider(
+        [
+            [StreamComplete(response=tool_use_response)],
+            [TextDelta(text="provisional final"), StreamComplete(response=provisional_response)],
+            [TextDelta(text="verified final"), StreamComplete(response=verified_response)],
+        ]
+    )
+
+    out, app = _drive(
+        provider,
+        ["use tool", "/exit"],
+        args=_make_args(persist_session=True),
+    )
+
+    assert "verified final" in out
+    assert "provisional final" not in out
+    assert FINAL_AUDIT_REMINDER not in out
+    assert len(provider.requests) == 3
+    assert _message_text(provider.requests[2].messages[-1]) == FINAL_AUDIT_REMINDER
+    assert app._session_path is not None
+    saved = session.load_session(app._session_path)
+    assert saved.messages == [
+        Message(role="user", content=[TextBlock(text="use tool")]),
+        Message(role="assistant", content=[tool_use_response.content[0]]),
+        Message(
+            role="user",
+            content=[ToolResultBlock(tool_use_id="call_1", content="echoed: payload")],
+        ),
+        Message(role="assistant", content=[TextBlock(text="provisional final")]),
+        Message(role="user", content=[TextBlock(text=FINAL_AUDIT_REMINDER)]),
+        Message(role="assistant", content=[TextBlock(text="verified final")]),
+    ]
+    hidden = tui._hidden_tui_message_indices(saved.events)
+    assert hidden == {3, 4}
+
+
+def test_tui_history_replay_hides_final_audit_visibility_events() -> None:
+    record = _session_with_final_audit_visibility("audit_visibility")
+    out = io.StringIO()
+    app = tui.WattleApp(
+        _make_args(),
+        _ScriptedStreamProvider([]),
+        state=tui._state_from_session(record),
+        out=out,
+    )
+
+    app._write_history_transcript()
+    rendered = out.getvalue()
+
+    assert "verified final" in rendered
+    assert "provisional final" not in rendered
+    assert FINAL_AUDIT_REMINDER not in rendered
+
+
+def test_tui_resize_redraw_preserves_final_audit_visibility_filter() -> None:
+    record = _session_with_final_audit_visibility("audit_resize")
+    out = io.StringIO()
+    app = tui.WattleApp(
+        _make_args(),
+        _ScriptedStreamProvider([]),
+        state=tui._state_from_session(record),
+        out=out,
+    )
+    live = tui._LiveTerminal(app)
+
+    live._redraw_visible_screen_after_resize()
+    rendered = out.getvalue()
+
+    assert "verified final" in rendered
+    assert "provisional final" not in rendered
+    assert FINAL_AUDIT_REMINDER not in rendered
+
+
+def test_tui_clear_resets_in_memory_visibility_state() -> None:
+    out = io.StringIO()
+    app = tui.WattleApp(_make_args(), _ResettableScriptedStreamProvider([]), out=out)
+    app.messages = [
+        Message(role="user", content=[TextBlock(text="old")]),
+        Message(role="assistant", content=[TextBlock(text="old hidden")]),
+    ]
+    app._hidden_tui_message_indices = {1}
+    app._deferred_tui_message_indices = {1}
+
+    app._handle_clear()
+
+    assert app.messages == []
+    assert app._hidden_tui_message_indices == set()
+    assert app._deferred_tui_message_indices == set()
+    assert app.provider.reset_count == 1
+
+
+def _session_with_final_audit_visibility(session_id: str) -> session.SessionRecord:
+    record = _session_record(session_id, text="use tool")
+    return replace(
+        record,
+        messages=[
+            *record.messages,
+            Message(
+                role="assistant",
+                content=[ToolUseBlock(id="call_1", name="echo", input={"message": "payload"})],
+            ),
+            Message(
+                role="user",
+                content=[ToolResultBlock(tool_use_id="call_1", content="echoed: payload")],
+            ),
+            Message(role="assistant", content=[TextBlock(text="provisional final")]),
+            Message(role="user", content=[TextBlock(text=FINAL_AUDIT_REMINDER)]),
+            Message(role="assistant", content=[TextBlock(text="verified final")]),
+        ],
+        events=[
+            session.SessionEvent(
+                type=tui.TUI_MESSAGE_VISIBILITY_EVENT,
+                source={"kind": "hook", "hook": "final_audit"},
+                data={
+                    "message_indices": [3, 4],
+                    "visible": False,
+                    "reason": "final_audit",
+                },
+            )
+        ],
+    )
 
 
 def test_tui_persists_tool_use_before_tool_execution(
@@ -7451,6 +7647,89 @@ def test_resumed_compaction_rebuilds_projected_context() -> None:
         *messages[10:],
         Message(role="user", content=[TextBlock(text="new question")]),
     ]
+
+
+def test_branch_copies_final_audit_visibility_events_into_new_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(session.SESSION_DIR_ENV, str(tmp_path / "sessions"))
+    parent = _session_with_final_audit_visibility("parent_with_visibility")
+    parent_path = session.save_session(parent, session.default_session_path(parent.metadata.id))
+    args = _make_args(persist_session=True)
+    args.provider = parent.settings.provider
+    args.model = parent.settings.model
+    args.max_tokens = parent.settings.max_tokens
+    args._resume_session_record = parent
+    args._resume_session_path = parent_path
+    out = io.StringIO()
+    app = tui.WattleApp(
+        args,
+        _ScriptedStreamProvider([]),
+        state=tui._state_from_session(parent),
+        out=out,
+    )
+
+    app._handle_branch()
+
+    assert app._session_record is not None
+    branch = app._session_record
+    assert branch.metadata.parent_session_id == parent.metadata.id
+    assert branch.messages == parent.messages
+    assert tui._hidden_tui_message_indices(branch.events) == {3, 4}
+    assert app._hidden_tui_message_indices == {3, 4}
+    assert app._session_path is not None
+    saved_branch = session.load_session(app._session_path)
+    assert tui._hidden_tui_message_indices(saved_branch.events) == {3, 4}
+
+    replay = io.StringIO()
+    replay_app = tui.WattleApp(
+        _make_args(),
+        _ScriptedStreamProvider([]),
+        state=tui._state_from_session(saved_branch),
+        out=replay,
+    )
+    replay_app._write_history_transcript()
+    rendered = replay.getvalue()
+    assert "verified final" in rendered
+    assert "provisional final" not in rendered
+    assert FINAL_AUDIT_REMINDER not in rendered
+
+
+def test_tui_resume_rebuilds_visibility_state_for_target_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(session.SESSION_DIR_ENV, str(tmp_path / "sessions"))
+    hidden = _session_with_final_audit_visibility("hidden_session")
+    hidden_path = session.save_session(hidden, session.default_session_path(hidden.metadata.id))
+    plain = _session_record("plain_session", text="plain question")
+    plain_path = session.save_session(plain, session.default_session_path(plain.metadata.id))
+    args = _make_args(persist_session=True)
+    args.provider = hidden.settings.provider
+    args.model = hidden.settings.model
+    args.max_tokens = hidden.settings.max_tokens
+    args._resume_session_record = hidden
+    args._resume_session_path = hidden_path
+    app = tui.WattleApp(
+        args,
+        _ScriptedStreamProvider([]),
+        state=tui._state_from_session(hidden),
+        out=io.StringIO(),
+    )
+    assert app._hidden_tui_message_indices == {3, 4}
+
+    app._switch_to_session(plain, plain_path)
+
+    assert app.messages == plain.messages
+    assert app._hidden_tui_message_indices == set()
+    assert app._deferred_tui_message_indices == set()
+
+    app._switch_to_session(hidden, hidden_path)
+
+    assert app.messages == hidden.messages
+    assert app._hidden_tui_message_indices == {3, 4}
+    assert app._deferred_tui_message_indices == set()
 
 
 def test_branch_copies_history_and_compaction_into_new_session(

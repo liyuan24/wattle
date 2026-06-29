@@ -380,6 +380,8 @@ COMPACTION_FRAMES = ("◐", "◓", "◑", "◒")
 WAIT_AGENT_RUNNING_TITLE = "Waiting for subagent"
 INPUT_FOCUS_ID = "input"
 MAIN_AGENT_ID = "main"
+TUI_MESSAGE_VISIBILITY_EVENT = "tui_message_visibility"
+FINAL_AUDIT_VISIBILITY_REASON = "final_audit"
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b[78]")
 SUBAGENT_VISIBLE_STATUSES = frozenset({"pending", "running", "closing"})
 SUBAGENT_TOOL_RESULT_STATUSES = frozenset(
@@ -1367,6 +1369,60 @@ def _history_message_is_fully_suppressed(
     )
 
 
+def _tui_visibility_policy_for_hook_reason(reason: str) -> _TuiHookVisibilityPolicy:
+    if reason == FINAL_AUDIT_VISIBILITY_REASON:
+        return _TuiHookVisibilityPolicy(
+            hide_previous_assistant=True,
+            hide_continuation=True,
+            defer_candidate_response=True,
+        )
+    return _TuiHookVisibilityPolicy()
+
+
+def _hidden_tui_message_indices(events: Sequence[SessionEvent]) -> set[int]:
+    hidden: set[int] = set()
+    for event in events:
+        if event.type != TUI_MESSAGE_VISIBILITY_EVENT:
+            continue
+        if event.data.get("visible") is not False:
+            continue
+        indices = event.data.get("message_indices", [])
+        if not isinstance(indices, list):
+            continue
+        for index in indices:
+            if isinstance(index, int) and index >= 0:
+                hidden.add(index)
+    return hidden
+
+
+def _tui_visibility_events_for_message_count(
+    events: Sequence[SessionEvent],
+    message_count: int,
+) -> list[SessionEvent]:
+    copied: list[SessionEvent] = []
+    for event in events:
+        if event.type != TUI_MESSAGE_VISIBILITY_EVENT:
+            continue
+        indices = event.data.get("message_indices", [])
+        if not isinstance(indices, list):
+            continue
+        valid_indices = [
+            index for index in indices if isinstance(index, int) and 0 <= index < message_count
+        ]
+        if not valid_indices:
+            continue
+        if valid_indices == indices:
+            copied.append(event)
+            continue
+        copied.append(
+            replace(
+                event,
+                data={**event.data, "message_indices": valid_indices},
+            )
+        )
+    return copied
+
+
 def _tool_call_summary(block: ToolUseBlock) -> str:
     if block.name == "bash":
         command = block.input.get("command", "<missing command>")
@@ -2124,6 +2180,13 @@ class _PromptFrame:
     width: int
     cursor_line_index: int
     cursor_column: int
+
+
+@dataclass(frozen=True, slots=True)
+class _TuiHookVisibilityPolicy:
+    hide_previous_assistant: bool = False
+    hide_continuation: bool = False
+    defer_candidate_response: bool = False
 
 
 @dataclass(slots=True)
@@ -3385,6 +3448,8 @@ class WattleApp:
         self._active_agent_id = MAIN_AGENT_ID
         self._active_focus_id = INPUT_FOCUS_ID
         self._subagent_parent_prefixes: dict[str, list[Message]] = {}
+        self._hidden_tui_message_indices: set[int] = set()
+        self._deferred_tui_message_indices: set[int] = set()
 
         if state is not None:
             self._restore_state(state)
@@ -3401,6 +3466,9 @@ class WattleApp:
                 self._session_record = resume_record
                 self._session_path = resume_path or default_session_path(resume_record.metadata.id)
                 self.goal = resume_record.goal
+                self._hidden_tui_message_indices = _hidden_tui_message_indices(
+                    resume_record.events
+                )
                 self._resume_history_pending = bool(resume_record.messages)
                 self._compaction_state = _runtime_compaction_from_session(resume_record)
             elif self._auth_ready():
@@ -3698,6 +3766,7 @@ class WattleApp:
             "permission_mode": self.permission_mode,
             "compaction_keep_recent_tokens": self.compaction_keep_recent_tokens,
             "messages": list(self.messages),
+            "hidden_tui_message_indices": set(self._hidden_tui_message_indices),
             "goal": self.goal,
             "compaction_state": self._compaction_state,
             "statusline_enabled": self._statusline_enabled,
@@ -3740,6 +3809,16 @@ class WattleApp:
         )
         self.permission_gate = PermissionGate()
         self.messages = list(cast(list[Message], state.get("messages", self.messages)))
+        hidden_indices = state.get("hidden_tui_message_indices", self._hidden_tui_message_indices)
+        if isinstance(hidden_indices, set):
+            hidden_values = hidden_indices
+        elif isinstance(hidden_indices, Sequence) and not isinstance(hidden_indices, str):
+            hidden_values = hidden_indices
+        else:
+            hidden_values = ()
+        self._hidden_tui_message_indices = {
+            index for index in hidden_values if isinstance(index, int) and index >= 0
+        }
         self.goal = cast(GoalState | None, state.get("goal", self.goal))
         self._compaction_state = cast(
             RuntimeCompaction | None,
@@ -3778,13 +3857,26 @@ class WattleApp:
     def _run_turn(self, *, started_at: float | None = None) -> None:
         asyncio.run(self._arun_turn(started_at=started_at))
 
-    async def _arun_turn(self, *, started_at: float | None = None) -> CompletionResponse | None:
+    async def _arun_turn(
+        self,
+        *,
+        started_at: float | None = None,
+        defer_candidate_response_for_visibility: bool = False,
+    ) -> CompletionResponse | None:
         if started_at is None:
             started_at = time.monotonic()
         self._configure_subagents()
         preparer = self._request_preparer()
         while True:
-            response = await self._adrive_stream_with_recovery(preparer)
+            suppress_text = (
+                defer_candidate_response_for_visibility
+                or self._next_response_should_be_deferred_for_visibility()
+            )
+            response = await self._adrive_stream_with_recovery(
+                preparer,
+                suppress_text=suppress_text,
+            )
+            defer_candidate_response_for_visibility = False
             self._record_usage(response)
 
             has_tool_uses = any(isinstance(block, ToolUseBlock) for block in response.content)
@@ -3817,12 +3909,22 @@ class WattleApp:
                 response,
                 pending_user_blocks=pending_monitor,
             )
+            message_index = len(self.messages)
             append_turn_step(self.messages, step)
+            if suppress_text:
+                self._defer_tui_message(message_index)
             self._persist_session()
             if not step.continue_running:
-                self._write_status_snapshot()
-                self._write_worked_duration(started_at)
+                continuation_pending = self._turn_stop_continuation(
+                    has_pending_user_input=False,
+                    last_response=response,
+                ) is not None
+                if not continuation_pending:
+                    self._flush_deferred_tui_messages()
+                    self._write_status_snapshot()
+                    self._write_worked_duration(started_at)
                 return response
+            self._flush_deferred_tui_messages()
 
     def _run_turn_recovering(self) -> None:
         asyncio.run(self._arun_turn_recovering())
@@ -3847,9 +3949,19 @@ class WattleApp:
                 last_response=last_response,
             )
             if continuation is None:
+                self._flush_deferred_tui_messages()
                 return
+            hidden_indices = self._message_indices_to_hide_for_hook_continuation(
+                continuation
+            )
             self._append_hook_continuation(continuation)
+            self._record_hidden_tui_messages_for_hook_continuation(
+                continuation,
+                hidden_indices,
+                continuation_index=len(self.messages) - 1,
+            )
             last_response = await self._arun_turn(started_at=time.monotonic())
+        self._flush_deferred_tui_messages()
         self._write_panel(
             "goal",
             "Stopped automatic goal continuation after too many consecutive turns. "
@@ -3877,6 +3989,84 @@ class WattleApp:
     def _append_hook_continuation(self, continuation: HookContinuation) -> None:
         self.messages.append(Message(role="user", content=list(continuation.content)))
         self._persist_session()
+
+    def _message_indices_to_hide_for_hook_continuation(
+        self,
+        continuation: HookContinuation,
+    ) -> list[int]:
+        policy = _tui_visibility_policy_for_hook_reason(continuation.reason)
+        if not policy.hide_previous_assistant or not self.messages:
+            return []
+        index = len(self.messages) - 1
+        return [index] if self.messages[index].role == "assistant" else []
+
+    def _record_hidden_tui_messages_for_hook_continuation(
+        self,
+        continuation: HookContinuation,
+        prior_indices: Sequence[int],
+        *,
+        continuation_index: int,
+    ) -> None:
+        policy = _tui_visibility_policy_for_hook_reason(continuation.reason)
+        indices = [*prior_indices]
+        if policy.hide_continuation:
+            indices.append(continuation_index)
+        self._record_hidden_tui_messages(indices, reason=continuation.reason)
+
+    def _record_hidden_tui_messages(self, indices: Sequence[int], *, reason: str) -> None:
+        hidden_indices = sorted({index for index in indices if index >= 0})
+        if not hidden_indices:
+            return
+        self._deferred_tui_message_indices.difference_update(hidden_indices)
+        self._hidden_tui_message_indices.update(hidden_indices)
+        if self._session_record is None:
+            return
+        event = SessionEvent(
+            type=TUI_MESSAGE_VISIBILITY_EVENT,
+            source={"kind": "hook", "hook": reason},
+            data={
+                "message_indices": hidden_indices,
+                "visible": False,
+                "reason": reason,
+            },
+        )
+        self._session_record = replace(
+            self._session_record,
+            events=[*self._session_record.events, event],
+        )
+        self._persist_session()
+
+    def _defer_tui_message(self, index: int) -> None:
+        if index >= 0 and index not in self._hidden_tui_message_indices:
+            self._deferred_tui_message_indices.add(index)
+
+    def _flush_deferred_tui_messages(self) -> None:
+        visible_indices = sorted(
+            index
+            for index in self._deferred_tui_message_indices
+            if index not in self._hidden_tui_message_indices and index < len(self.messages)
+        )
+        self._deferred_tui_message_indices.clear()
+        for index in visible_indices:
+            self._write_history_message(self.messages[index])
+
+    def _reset_tui_visibility_state(
+        self,
+        events: Sequence[SessionEvent] = (),
+    ) -> None:
+        self._hidden_tui_message_indices = _hidden_tui_message_indices(events)
+        self._deferred_tui_message_indices.clear()
+
+    def _next_response_should_be_deferred_for_visibility(self) -> bool:
+        continuation = self._turn_stop_continuation(
+            has_pending_user_input=False,
+            last_response=None,
+        )
+        if continuation is None:
+            return False
+        return _tui_visibility_policy_for_hook_reason(
+            continuation.reason
+        ).defer_candidate_response
 
     def _turn_stop_continuation(
         self,
@@ -3987,6 +4177,8 @@ class WattleApp:
     async def _adrive_stream_with_recovery(
         self,
         preparer: RequestPreparer,
+        *,
+        suppress_text: bool = False,
     ) -> CompletionResponse:
         final_response: CompletionResponse | None = None
         seen_tools: set[str] = set()
@@ -3999,7 +4191,8 @@ class WattleApp:
             nonlocal in_text
             if not text_buffer:
                 return
-            self._write_block("".join(text_buffer), ASSISTANT_STYLE)
+            if not suppress_text:
+                self._write_block("".join(text_buffer), ASSISTANT_STYLE)
             text_buffer.clear()
             in_text = False
 
@@ -4023,7 +4216,8 @@ class WattleApp:
             async for event in astream_with_recovery(preparer, self.messages):
                 if isinstance(event, TextDelta):
                     if in_thinking:
-                        self._write(f"{RESET}\n" if self._styles_enabled() else "\n")
+                        if not suppress_text:
+                            self._write(f"{RESET}\n" if self._styles_enabled() else "\n")
                         in_thinking = False
                     text_buffer.append(event.text)
                     in_text = True
@@ -4034,16 +4228,19 @@ class WattleApp:
                     if not in_thinking:
                         if in_text:
                             flush_text_buffer()
-                        if self._styles_enabled():
-                            self._write(f"{THINKING_STYLE} thinking {RESET}\n")
-                        else:
-                            self._write("thinking\n")
+                        if not suppress_text:
+                            if self._styles_enabled():
+                                self._write(f"{THINKING_STYLE} thinking {RESET}\n")
+                            else:
+                                self._write("thinking\n")
                         in_thinking = True
                         wrote_content = True
-                    self._write_styled(event.thinking, THINKING_STYLE)
+                    if not suppress_text:
+                        self._write_styled(event.thinking, THINKING_STYLE)
                 elif isinstance(event, ToolUseDelta):
                     if event.id not in seen_tools and event.name is not None:
                         seen_tools.add(event.id)
+                        suppress_text = False
                         if in_thinking or in_text:
                             flush_text_buffer()
                             self._write(f"{RESET}\n" if self._styles_enabled() else "\n")
@@ -4054,11 +4251,22 @@ class WattleApp:
             preparer.on_stream_retry = previous_retry_callback
             self._compaction_state = preparer.state
 
-        flush_text_buffer()
-        if wrote_content:
-            self._write(f"{RESET}\n" if self._styles_enabled() else "\n")
         if final_response is None:
             raise RuntimeError("provider stream ended without StreamComplete")
+        if suppress_text and any(
+            isinstance(block, ToolUseBlock) for block in final_response.content
+        ):
+            suppress_text = False
+        if not wrote_content and not suppress_text:
+            text = "\n".join(
+                block.text for block in final_response.content if isinstance(block, TextBlock)
+            )
+            if text:
+                text_buffer.append(text)
+                wrote_content = True
+        flush_text_buffer()
+        if wrote_content and not suppress_text:
+            self._write(f"{RESET}\n" if self._styles_enabled() else "\n")
         return final_response
 
     async def _adispatch_tools(self, response: CompletionResponse) -> list[ContentBlock]:
@@ -4458,7 +4666,18 @@ class WattleApp:
         self._write_history_messages(
             self._active_agent_messages(),
             with_separators=with_separators,
+            hidden_indices=self._active_agent_hidden_tui_message_indices(),
         )
+
+    def _active_agent_hidden_tui_message_indices(self) -> set[int]:
+        if self._active_agent_id == MAIN_AGENT_ID:
+            return set(self._hidden_tui_message_indices)
+        parent_prefix = self._subagent_parent_prefixes.get(self._active_agent_id, [])
+        return {
+            index
+            for index in self._hidden_tui_message_indices
+            if index < len(parent_prefix)
+        }
 
     def _write_edit_result(
         self,
@@ -4682,9 +4901,14 @@ class WattleApp:
             branch_record,
             messages=list(self.messages),
             compactions=list(parent_record.compactions),
+            events=_tui_visibility_events_for_message_count(
+                parent_record.events,
+                len(self.messages),
+            ),
         )
         self._session_record = branch_record
         self._session_path = default_session_path(branch_record.metadata.id)
+        self._reset_tui_visibility_state(branch_record.events)
         self._compaction_state = _runtime_compaction_from_session(branch_record)
         self._resume_history_pending = False
         self._persist_session()
@@ -4734,6 +4958,7 @@ class WattleApp:
         self.messages = list(record.messages)
         self._session_record = record
         self._session_path = path
+        self._reset_tui_visibility_state(record.events)
         self._compaction_state = _runtime_compaction_from_session(record)
         self._resume_history_pending = False
         self._last_context_tokens = next(
@@ -5233,6 +5458,7 @@ class WattleApp:
         previous_usage = self._previous_session_usage_text()
         self._persist_session()
         self.messages = []
+        self._reset_tui_visibility_state()
         self._compaction_state = None
         self._resume_history_pending = False
         self._last_transcript_was_separator = False
@@ -5264,6 +5490,7 @@ class WattleApp:
         previous_usage = self._previous_session_usage_text()
         self._persist_session()
         self.messages = []
+        self._reset_tui_visibility_state()
         self._compaction_state = None
         self._resume_history_pending = False
         self._last_transcript_was_separator = False
@@ -5378,10 +5605,14 @@ class WattleApp:
         messages: list[Message],
         *,
         with_separators: bool,
+        hidden_indices: set[int] | None = None,
     ) -> None:
         suppressed_tool_result_ids: set[str] = set()
+        hidden = hidden_indices or set()
         wrote_message = False
         for index, message in enumerate(messages):
+            if index in hidden:
+                continue
             if _history_message_is_fully_suppressed(message, suppressed_tool_result_ids):
                 continue
             if with_separators and wrote_message:
@@ -7323,11 +7554,22 @@ class _LiveTerminal:
                 self.stream_tool_names.append(event.name)
 
     def _finish_response(self, response: CompletionResponse) -> None:
-        self._flush_stream_buffer()
+        has_tool_uses = any(isinstance(block, ToolUseBlock) for block in response.content)
+        has_pending_user_input = bool(
+            self.pending_user_inputs
+            or self.turn_followup_user_inputs
+            or self.pending_monitor_inputs
+            or self.interrupted_user_inputs
+        )
+        suppress_stream = (
+            not has_tool_uses
+            and not has_pending_user_input
+            and self.app._next_response_should_be_deferred_for_visibility()
+        )
+        self._flush_stream_buffer(suppress=suppress_stream)
         self.in_text = False
         self.in_thinking = False
         self.app._record_usage(response)
-        has_tool_uses = any(isinstance(block, ToolUseBlock) for block in response.content)
         has_visible_tool_uses = any(
             isinstance(block, ToolUseBlock) and not _tool_hidden_in_tui(block)
             for block in response.content
@@ -7390,10 +7632,14 @@ class _LiveTerminal:
                 response,
                 pending_user_blocks=pending,
             )
+            message_index = len(self.app.messages)
             append_turn_step(self.app.messages, step)
+            if suppress_stream:
+                self.app._defer_tui_message(message_index)
             self.app._persist_session()
             continue_running = step.continue_running
         if continue_running:
+            self.app._flush_deferred_tui_messages()
             self.inflight_tool_results = []
             if has_visible_tool_uses and tool_results:
                 self.app._write_separator()
@@ -7405,10 +7651,11 @@ class _LiveTerminal:
             self.streaming = False
             self.active_turn_cancel_event = None
             self.working_started_at = None
-            self.app._write_status_snapshot()
-            self._remember_worked_duration()
             if self._append_turn_stop_continuation_if_allowed(response):
                 self._start_worker()
+            else:
+                self.app._write_status_snapshot()
+                self._remember_worked_duration()
 
     def _append_turn_stop_continuation_if_allowed(
         self,
@@ -7424,6 +7671,7 @@ class _LiveTerminal:
             last_response=response,
         )
         if continuation is None:
+            self.app._flush_deferred_tui_messages()
             self.goal_continuations_started = 0
             return False
         if continuation.reason == "goal_continuation":
@@ -7439,7 +7687,15 @@ class _LiveTerminal:
                 self.goal_continuations_started = 0
                 return False
             self.goal_continuations_started += 1
+        hidden_indices = self.app._message_indices_to_hide_for_hook_continuation(
+            continuation
+        )
         self.app._append_hook_continuation(continuation)
+        self.app._record_hidden_tui_messages_for_hook_continuation(
+            continuation,
+            hidden_indices,
+            continuation_index=len(self.app.messages) - 1,
+        )
         return True
 
     def _remember_worked_duration(self) -> None:
@@ -7714,13 +7970,14 @@ class _LiveTerminal:
                 if cell is not None:
                     cell.running = False
 
-    def _flush_stream_buffer(self) -> None:
+    def _flush_stream_buffer(self, *, suppress: bool = False) -> None:
         thinking = "".join(self.stream_thinking)
         text = "".join(self.stream_text)
-        if thinking and self.app.show_thinking_content:
-            self.app._write_block(thinking, THINKING_STYLE)
-        if text:
-            self.app._write_block(text, ASSISTANT_STYLE)
+        if not suppress:
+            if thinking and self.app.show_thinking_content:
+                self.app._write_block(thinking, THINKING_STYLE)
+            if text:
+                self.app._write_block(text, ASSISTANT_STYLE)
         self._clear_stream_buffers()
 
     def _clear_stream_buffers(self) -> None:
@@ -8068,7 +8325,11 @@ class _LiveTerminal:
         self.app._write(TERMINAL_HISTORY_CLEAR)
         self.app._write_welcome_card()
         messages = self._active_agent_messages_for_redraw()
-        self.app._write_history_messages(messages, with_separators=False)
+        self.app._write_history_messages(
+            messages,
+            with_separators=False,
+            hidden_indices=self.app._active_agent_hidden_tui_message_indices(),
+        )
         self.app._last_transcript_was_separator = False
 
     def _active_agent_messages_for_redraw(self) -> list[Message]:
@@ -8119,6 +8380,7 @@ def _state_from_session(record: SessionRecord) -> dict[str, object]:
         "thinking": record.settings.thinking,
         "effort": record.settings.effort,
         "messages": list(record.messages),
+        "hidden_tui_message_indices": _hidden_tui_message_indices(record.events),
         "compaction_state": _runtime_compaction_from_session(record),
         "statusline_enabled": True,
         "last_context_tokens": last_context_tokens,
